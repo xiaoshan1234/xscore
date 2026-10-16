@@ -24,7 +24,7 @@ Each backend's `write`/`read` would otherwise have to know about resize, scrollb
 Per-link tmux server name = the `link-id` uuid, e.g. `xscore-<uuid>`. Per-pane = `tmux new-window` inside that server.
 
 ```
-xscore connect shell:///bin/cat
+xscore link add shell:///bin/cat
   → tmux -L xscore new-session -d -s xscore-01928e0a ...
   → pane #0 = default window in that server
   → xscore data write ... --pane ...  → tmux -L xscore send-keys -t xscore-01928e0a:0

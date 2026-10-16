@@ -8,28 +8,39 @@ Rust session manager for SSH / shell / serial, modeled as **Link x Pane**.
 ## Quick start
 
 ```
-xscore connect shell:///bin/bash
-xscore connect ssh://user@host:22
-xscore connect serial:///dev/ttyUSB0?baud=115200
+xscore link add shell:///bin/bash
+xscore link add ssh://user@host:22
+xscore link add serial:///dev/ttyUSB0?baud=115200
 
-# Multiple panes on the same link:
-xscore connect ssh://u@h:22
-xscore connect ssh://u@h:22 --link=existing   # opens a 2nd pane in the same tmux server
+# Persistent template (one-time):
+xscore link config add web ssh://u@h:22?identity=~/.ssh/id_ed25519
+
+# Reuse template + attach multiple panes on the same link:
+xscore link add ssh://u@h:22 -c web -a web1
+xscore link add ssh://u@h:22 --link=existing -a web2
 ```
 
 ## Commands
 
 ```
-xscore connect <url> [--save] [--link=existing]
-xscore link list
-xscore link show --id <link-id>
+xscore link add <url> [-c CONFIG] [-a ALIAS] [--link=existing]
+xscore link open --id <link-id>
 xscore link close --id <link-id>
-xscore link save --id <link-id>
-xscore link load --path <file>
+xscore link remove --id <link-id>
+xscore link show --id <link-id>
+xscore link list
 
-xscore pane list [--link <link-id>]
-xscore pane show --id <pane-id>
+xscore link config add <alias> <url>
+xscore link config remove <alias>
+xscore link config show <alias>
+xscore link config list
+
+xscore pane add --link <link-id> [--name=NAME]
+xscore pane open --id <pane-id> [--link <link-id>]
 xscore pane close --id <pane-id>
+xscore pane remove --id <pane-id>
+xscore pane show --id <pane-id>
+xscore pane list [--link <link-id>]
 
 xscore data read --pane <pane-id> [--bytes N]
 xscore data write --pane <pane-id> [--from-file FILE]
@@ -45,7 +56,7 @@ xscore config unset <key>
 
 ```
 CLI -> SessionManager
-       +-- LinkRegistry     (address-keyed dedup)
+       +-- LinkRegistry     (by_id, by_address, by_alias)
        |    +-- Link { transport + sink + Vec<PaneId> }
        +-- PaneRegistry     (pane_id -> PaneInfo)
        +-- BackendRegistry  (pane_id -> Arc<dyn PaneBackend>)
@@ -53,9 +64,13 @@ CLI -> SessionManager
 ```
 
 Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Pane lives inside
-one link and addresses the link's sink via a sink_handle (e.g. tmux `%42`). Closing a
-pane does not close the link; closing a link drops every pane on it.
+one link and addresses the link's sink via a sink_handle (e.g. tmux `%42`).
+
+**`add` vs `open`:** `add` creates a new external resource; `open` re-attaches an
+existing one. **`close` vs `remove`:** `close` kills the underlying resource (transport
++ sink + tmux window); `remove` only unregisters from in-memory state and leaves the
+external resources alive.
 
 `--link=existing` opts into **address-keyed dedup**: search LinkRegistry for an existing
 link matching the URL's transport address; if found, open a new pane on it; if not found,
-error. Without `--link=existing`, every `xscore connect` creates a brand-new link.
+error. Without `--link=existing`, every `xscore link add` creates a brand-new link.

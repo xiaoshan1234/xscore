@@ -29,7 +29,7 @@ stateDiagram-v2
         Closing --> Closed: sink.close_pane() ok
     }
 
-    Idle --> Constructing: xscore connect
+    Idle --> Constructing: xscore link add
     Constructing --> Ready: success
     Ready --> Active
     Ready --> Closing: close_link

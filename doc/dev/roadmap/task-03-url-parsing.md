@@ -1,6 +1,6 @@
 # Task 3: URL → ConnectSpec + LinkAddress
 
-**Objective:** Pure parser for `xscore connect <url>` → `(ConnectSpec, LinkAddress)`.
+**Objective:** Pure parser for `xscore link add <url>` → `(ConnectSpec, LinkAddress)`.
 
 **Files:**
 - Create: `crates/xscore/src/model/session.rs`

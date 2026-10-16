@@ -7,7 +7,7 @@
 
 ## Context
 
-Two `xscore connect ssh://u@h:22` calls in sequence could mean:
+Two `xscore link add ssh://u@h:22` calls in sequence could mean:
 
 - (a) Two independent connections (current default in the original flat-session model).
 - (b) One connection with two sessions.
@@ -25,9 +25,9 @@ Making any one of these the silent default would surprise the others.
 
 ## Decision
 
-**`xscore connect <url>` without flags = behavior (a).** Always creates a new link.
+**`xscore link add <url>` without flags = behavior (a).** Always creates a new link.
 
-**`xscore connect <url> --link=existing` = behavior (b)/(c) with attach-style reuse.** Searches the `LinkRegistry` for an existing link matching the URL's `LinkAddress`. If found, attaches a new pane to it. If not found:
+**`xscore link add <url> --link=existing` = behavior (b)/(c) with attach-style reuse.** Searches the `LinkRegistry` for an existing link matching the URL's `LinkAddress`. If found, attaches a new pane to it. If not found:
 
 - For `shell` / `serial` transports: returns `Error::LinkExistingUnsupported("<transport>")` — there is no meaningful "same link" semantics for these (a shell process is one process; a serial port is one port).
 - For `ssh` transport: returns `Error::LinkNotFound(...)` today. Real attach (open an SSH channel and run `tmux -L xscore` over it) lands in the SSH-integration PR.
@@ -41,6 +41,8 @@ ssh://...     → (host, port, user, identity, proxy)
 ```
 
 Two URLs with the same `LinkAddress` tuple map to the same link.
+
+The related verbs `xscore link open <link-id>` (re-attach by id) and `xscore pane open <pane-id>` (re-attach by pane id) are **stubs** in this slice — they call `todo!()` and return `Error::AttachNotImplemented`. See `task-10-cli-connect-link-pane.md`. Future PR wires them via persistent link-state files under `~/.config/xscore/state/links/`.
 
 ## Consequences
 

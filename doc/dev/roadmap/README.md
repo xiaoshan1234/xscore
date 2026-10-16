@@ -20,8 +20,8 @@ The plan is split across files. **Each task lives in its own file so edits stay 
 | `task-06-link-pane-registries-manager.md` | `Link`, `Pane`, three registries, `SessionManager.connect` |
 | `task-07-shell-transport.md` | `ShellTransport` real impl |
 | `task-08-transport-stubs.md` | `SerialTransport` + `SshTransport` stubs |
-| `task-09-config-loader.md` | XDG paths + `ConnectSpec` JSON save/load |
-| `task-10-cli-connect-link-pane.md` | `xscore connect`/`link`/`pane` CLI |
+| `task-09-config-loader.md` | XDG paths + `ConnectSpec` JSON save/load (under `links/`) |
+| `task-10-cli-connect-link-pane.md` | `xscore link {add,open,close,remove,show,list,config ...}` + `xscore pane {...}` CLI |
 | `task-11-cli-data.md` | `xscore data read/write/resize` (per-pane) |
 | `task-12-cli-config.md` | `xscore config show/path/set/unset` |
 | `task-13-tests-readme.md` | CLI smoke tests + README rewrite |
@@ -47,8 +47,9 @@ the table above.
 
 - **Project root:** `/home/loner/prj/xscore/`
 - **Crate:** `xscore` (single binary)
-- **CLI entry:** `xscore connect <url> [--save] [--link=existing]`
-- **Other commands:** `xscore {link,pane,data,config} ...`
+- **CLI entry:** `xscore link add <url> [-c CONFIG] [-a ALIAS]`
+- **Two-tier CLI:** `xscore {link, pane, data, config} ...`
+- **Persistent templates:** `~/.config/xscore/links/<alias>.json` (`link config add`)
 - **Config dir:** `~/.config/xscore/`
 - **tmux socket:** `xscore` (`-L xscore`)
 - **Env prefix:** `XSCORE_*`

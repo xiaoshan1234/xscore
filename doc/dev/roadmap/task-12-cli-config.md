@@ -44,8 +44,9 @@ pub async fn run(cmd: ConfigCmd) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
         }
         ConfigCmd::Path => {
-            println!("config: {}", config::config_file().display());
-            println!("sessions: {}", config::sessions_dir().display());
+            println!("config:       {}", config::config_file().display());
+            println!("links/:       {}", config::links_dir().display());
+            println!("state/:       {}", config::state_dir().display());
         }
         ConfigCmd::Set { key, value } => {
             let mut cfg = load_or_default();

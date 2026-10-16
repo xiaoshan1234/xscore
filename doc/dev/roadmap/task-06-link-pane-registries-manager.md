@@ -282,12 +282,17 @@ impl SessionManager {
         }
     }
 
-    /// Connect: returns (link_id, pane_id).
-    /// - If `link_existing=false`: always create a new link (with new address uuid).
+    /// Add a new link: returns (link_id, pane_id). The first pane is created automatically.
+    /// - If `link_existing=false`: always create a new link.
     /// - If `link_existing=true`: search by LinkAddress; if found, attach new pane;
     ///   if not found, return Error::LinkExistingUnsupported (for non-ssh) /
     ///   Error::LinkNotFound for ssh-but-not-yet-implemented (deferred to SSH phase).
-    pub async fn connect(
+    ///
+    /// Note: this is renamed from `connect` to align with `xscore link add`.
+    /// The full implementation lives in `task-10-cli-connect-link-pane.md`
+    /// (where it takes `alias` and writes `by_alias`). This task keeps the
+    /// skeleton without alias; link-pane-cli adds alias.
+    pub async fn add_link(
         &self,
         spec: ConnectSpec,
         address: LinkAddress,
@@ -404,5 +409,5 @@ Expected: existing tests still pass.
 
 ```bash
 git add crates/xscore/src/core/ crates/xscore/src/backends/ crates/xscore/src/transport/factory.rs crates/xscore/src/sink/
-git commit -m "feat(core): Link + Pane + Registries + SessionManager.connect (with --link=existing)"
+git commit -m "feat(core): Link + Pane + Registries + SessionManager.add_link (with --link=existing, alias support added in task-10)"
 ```

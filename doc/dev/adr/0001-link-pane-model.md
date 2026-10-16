@@ -13,7 +13,7 @@ Three product realities drove the change:
 
 1. **Tmux-in-SSH is the norm.** When a developer connects to a remote box over SSH, they want `tmux` running *inside* that SSH channel. The "session" they're working with is `ssh-channel` + tmux-server + N windows. The previous single-session model treated each tmux window as a separate SSH connection, which is wrong.
 2. **Same link, multiple panes.** A single SSH connection can hold multiple useful workspaces (one window per task). The model must let one link host N panes without re-opening the SSH channel.
-3. **Address-based dedup.** Two `xscore connect ssh://u@h:22` calls — without explicit flags — should not both open SSH channels to the same host. The user opts in with `--link=existing` to attach.
+3. **Address-based dedup.** Two `xscore link add ssh://u@h:22` calls — without explicit flags — should not both open SSH channels to the same host. The user opts in with `--link=existing` to attach.
 
 ## Decision
 
@@ -23,6 +23,8 @@ Introduce a **two-level model**:
 - **Pane** = one view into a link. Identified by `PaneId` (uuid v7). Has independent lifecycle, snapshot, write state. Addressed by `sink_handle` (e.g. tmux `%42`).
 
 Every CLI command operates on either a `link-id` or a `pane-id` — never a generic "session id".
+
+In addition, each alive link may carry a **runtime alias** (`xscore link add ... -a <alias>`) for human-readable reference. Aliases live in `LinkRegistry.by_alias` (in-memory only, lost on process exit) and are not the dedup key — `LinkAddress` is. Persistent templates use a separate `link config add <alias> <url>` flow under `~/.config/xscore/links/`.
 
 ```
 SessionManager
@@ -42,7 +44,7 @@ SessionManager
 **Negative:**
 - Two IDs instead of one. CLI surface grows: `link list`/`pane list`. Documentation must explain the distinction clearly.
 - `Sink` trait gains `new_pane`/`close_pane`/`list_pane`-per-handle methods. More boilerplate than a single-session trait, but each method is small.
-- `xscore connect <same url>` (without `--link=existing`) is now the *default* behavior — users expecting dedup must opt in. This inverts the prior assumption. Documented explicitly in `--help` text and `acceptance.md`.
+- `xscore link add <same url>` (without `--link=existing`) is now the *default* behavior — users expecting dedup must opt in. This inverts the prior assumption. Documented explicitly in `--help` text and `acceptance.md`.
 
 **Risks:**
 - Users conflate link-id with pane-id and `data --id` style commands become ambiguous. Mitigated by `--pane` flag on `data` (not `--id`).

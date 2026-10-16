@@ -33,32 +33,34 @@ SessionManager
 ```
 
 - tmux is always external, on a dedicated `xscore` socket (`tmux -L xscore ...`). One link = one tmux server name. Multiple PaneIds = multiple windows inside that server.
-- Config = `~/.config/xscore/config.json` + per-link JSON snippets under `~/.config/xscore/sessions/`.
+- Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<alias>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (reserved for future link-state persistence).
 
-**CLI entry:** `xscore connect <url> [--save] [--link=existing]`. URLs:
+**CLI entry:** `xscore link add <url> [-c CONFIG] [-a ALIAS]`. URLs:
 
-```
-xscore connect shell:///bin/bash
-xscore connect serial:///dev/ttyUSB0?baud=115200&data_bits=8
-xscore connect ssh://user@host:22?identity=~/.ssh/id_ed25519&proxy=ssh://jump@1.2.3.4
-xscore connect ssh://user@host:22?tmux=on    # default
+```text
+xscore link add shell:///bin/bash
+xscore link add serial:///dev/ttyUSB0?baud=115200&data_bits=8
+xscore link add ssh://user@host:22?identity=~/.ssh/id_ed25519&proxy=ssh://jump@1.2.3.4
+xscore link add ssh://user@host:22?tmux=on    # default
 
 # Multiple panes on the same link:
-xscore connect ssh://u@h:22
-xscore connect ssh://u@h:22 --link=existing   # attach pane 2 to the same link
-xscore connect ssh://u@h:22 --link=existing   # pane 3
+xscore link add ssh://u@h:22
+xscore link add ssh://u@h:22 --link=existing   # attach pane 2 to the same link
+xscore link add ssh://u@h:22 --link=existing   # pane 3
 ```
 
-Other commands take `--id <link-id>` or `--id <pane-id>`. URLs are the entry point; `--from spec.json` is **removed**.
+Other commands are organized into two tiers (`link` for the physical connection, `pane` for the views). `--from spec.json` was removed in favor of `link config add/remove/show/list` templates under `~/.config/xscore/links/`.
 
 **Link uniqueness rule (locked from user):** A link is uniquely identified by the `(transport_kind, address-tuple)`:
 - `shell` → `(command, args-tuple)`
 - `serial` → `(path)`
 - `ssh` → `(host, port, user, identity, proxy)`
 
-Two `xscore connect ssh://u@h:22` calls with no `--link=existing` flag produce **different links** (each with `link_id` = a new uuid). The `--link=existing` flag opts into attach mode: search the `LinkRegistry` for a matching address tuple; if found, attach a new pane to that link; if not, error. `--link=existing` is meaningless for `shell`/`serial` and returns `Error::LinkExistingUnsupported`.
+Two `xscore link add ssh://u@h:22` calls with no `--link=existing` flag produce **different links** (each with `link_id` = a new uuid). The `--link=existing` flag opts into attach mode: search the `LinkRegistry` for a matching address tuple; if found, attach a new pane to that link; if not, error. `--link=existing` is meaningless for `shell`/`serial` and returns `Error::LinkExistingUnsupported`.
 
-> ⚠️ **Open question (does not block the slice):** "Same link reuse" on SSH means tmux inside the SSH channel — second `xscore connect` to the same SSH with `--link=existing` should ssh-attached tmux, NOT a new SSH channel. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (return error from `--link=existing` for ssh transport too, since the stub doesn't have a real channel — see acceptance criteria below).
+Each alive link can also have a runtime alias (`xscore link add ... -a <alias>`); aliases live in the in-memory `LinkRegistry.by_alias` and are lost on process exit. For persistent templates use `xscore link config add <alias> <url>`.
+
+> ⚠️ **Open question (does not block the slice):** "Same link reuse" on SSH means tmux inside the SSH channel — second `xscore link add` to the same SSH with `--link=existing` should ssh-attached tmux, NOT a new SSH channel. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (return error from `--link=existing` for ssh transport too, since the stub doesn't have a real channel — see acceptance criteria below).
 
 **Tech Stack (locked from user):**
 - CLI: `clap` v4 derive
@@ -86,14 +88,13 @@ crates/xscore/
 │   ├── main.rs                       # clap entry, tracing init, dispatch
 │   ├── cli/
 │   │   ├── mod.rs                    # Cli struct, derive top-level
-│   │   ├── connect.rs                # xscore connect <url> [--save] [--link=existing]
-│   │   ├── link.rs                   # link list/show/close/save/load
-│   │   ├── pane.rs                   # pane list/show/close
+│   │   ├── link.rs                   # link add/open/close/remove/show/list + config sub-tree
+│   │   ├── pane.rs                   # pane add/open/close/remove/show/list
 │   │   ├── data.rs                   # pane data read/write/resize
 │   │   └── config.rs                 # config show/path/set/unset
 │   ├── core/
 │   │   ├── mod.rs                    # pub SessionManager, re-exports
-│   │   ├── manager.rs                # connect/list/close for links and panes
+│   │   ├── manager.rs                # add_link/attach_link/close/remove/unregister for links and panes
 │   │   ├── link.rs                   # Link struct (transport + sink + pane list)
 │   │   ├── pane.rs                   # Pane struct (handle + state)
 │   │   ├── link_registry.rs          # LinkRegistry (address-keyed dedup)
@@ -108,7 +109,7 @@ crates/xscore/
 │   ├── url/
 │   │   ├── mod.rs                    # URL parser entry
 │   │   ├── scheme.rs                 # placeholder
-│   │   └── connect.rs                # ConnectUrl -> ConnectSpec + LinkAddress
+│   │   └── connect.rs                # URL -> (ConnectSpec, LinkAddress)
 │   ├── transport/
 │   │   ├── mod.rs                    # pub trait Transport + address()
 │   │   ├── factory.rs                # transport_for(TransportConfig) -> Box<dyn Transport>
