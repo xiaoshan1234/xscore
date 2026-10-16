@@ -1,8 +1,6 @@
-# xscore-core CLI First Implementation Plan
+# xscore CLI First Implementation Plan
 
-> **Note (rename):** Project renamed from `xsterm-core` to `xscore-core` because `xsterm` was already taken by another project. Binary `xscore`, config dir `~/.config/xscore/`, tmux socket `xscore`, env prefix `XSCORE_`.
-
-**Goal:** Build the CLI-first slice of xscore-core — a Rust workspace that manages SSH / shell / tmux / serial sessions behind a single `Session` API, callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
+**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / tmux / serial sessions behind a single `Session` API, callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
 
 **Architecture (CLI-first):**
 - One Rust workspace, one `xscore` binary crate at `crates/xscore/`.
@@ -93,7 +91,7 @@ crates/xscore/
 **Step 1: Write workspace root**
 
 ```toml
-# /home/loner/prj/xscore-core/Cargo.toml
+# /home/loner/prj/xscore/Cargo.toml
 [workspace]
 resolver = "2"
 members = ["crates/xscore"]
@@ -1751,7 +1749,7 @@ fn xscore_session_create_and_close_shell_cat() {
 
 Fix `SessionCmd::Close` to use `--id <id>` (already done in Task 13 plan).
 
-**Step 2: README slice** — already in `/home/loner/prj/xscore-core/README.md`.
+**Step 2: README slice** — already in `/home/loner/prj/xscore/README.md`.
 
 **Step 3: Run all tests**
 
@@ -1791,13 +1789,13 @@ git commit -m "test+docs: CLI smoke tests + README slice"
 
 | Old | New |
 | --- | --- |
-| project root `xsterm-core/` | `xscore-core/` |
-| crate `xsterm` | `xscore` |
-| binary `xsterm` | `xscore` |
-| config dir `~/.config/xsterm/` | `~/.config/xscore/` |
-| tmux socket `xsterm` | `xscore` |
-| env `XSTERM_*` | `XSCORE_*` |
-| Rust crate path `xsterm::` | `xscore::` |
+| project root | `/home/loner/prj/xscore/` |
+| crate | `xscore` |
+| binary | `xscore` |
+| config dir | `~/.config/xscore/` |
+| tmux socket | `xscore` |
+| env | `XSCORE_*` |
+| Rust crate path | `xscore::` |
 
 ## Execution Handoff
 

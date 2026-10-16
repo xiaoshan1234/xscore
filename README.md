@@ -1,4 +1,4 @@
-# xscore-core
+# xscore
 
 Rust session manager for SSH / shell / tmux / serial.
 
