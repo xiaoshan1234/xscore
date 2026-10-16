@@ -1,0 +1,49 @@
+stateDiagram-v2
+    [*] --> Idle
+
+    state "Link lifecycle" as LL {
+        [*] --> Constructing
+        Constructing --> Open: transport.open() ok
+        Constructing --> Failed: transport.open() err
+        Open --> Ready: sink_for().attach() ok
+        Open --> Failed: sink err
+        Ready --> Closing: close_link()
+        Closing --> Closed: transport.close() ok
+        Failed --> Closed: best-effort cleanup
+
+        state "Active (N panes)" as Active {
+            [*] --> Empty
+            Empty --> OnePane: new_pane() #1
+            OnePane --> ManyPanes: new_pane() #N
+            ManyPanes --> OnePane: close_pane()
+            OnePane --> Empty: close_pane() last
+        }
+    }
+
+    state "Pane lifecycle" as PL {
+        [*] --> Created
+        Created --> Open: backend.insert()
+        Open --> ReadWrite: snapshot/write ok
+        ReadWrite --> ReadWrite: read/write/resize
+        ReadWrite --> Closing: close_pane()
+        Closing --> Closed: sink.close_pane() ok
+    }
+
+    Idle --> Constructing: xscore connect
+    Constructing --> Ready: success
+    Ready --> Active
+    Ready --> Closing: close_link
+    Closed --> [*]
+
+    note right of Active
+        Link stays Alive
+        across pane lifecycle.
+        Pane close ≠ Link close.
+    end note
+
+    note right of Failed
+        Reachable from any
+        transport / sink error.
+        Recovery: best-effort
+        cleanup, then Closed.
+    end note

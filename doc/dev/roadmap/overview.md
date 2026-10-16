@@ -2,6 +2,17 @@
 
 **Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions behind a single `Link × Pane` abstraction, callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
 
+**Architecture Decision Records (read first, in order):**
+- [ADR 0001](../adr/0001-link-pane-model.md) — why Link × Pane (not flat Session)
+- [ADR 0002](../adr/0002-transport-sink-split.md) — why Transport × Sink (not single backend)
+- [ADR 0003](../adr/0003-external-tmux-server.md) — why external `tmux -L xscore` (not embedded tmux)
+- [ADR 0004](../adr/0004-link-existing-dedup.md) — why `--link=existing` is opt-in (not default)
+
+**Architecture diagrams** ([source](../architecture/diagrams/README.md)):
+- [Link × Pane topology](../architecture/diagrams/link-pane-topology.mmd)
+- [Link & Pane lifecycle](../architecture/diagrams/lifecycle.mmd)
+- [Module dependency rules](../architecture/diagrams/module-deps.mmd)
+
 **Architecture (Link × Pane):**
 
 A **Link** is one physical connection. A **Pane** is one logical view into a link. One link can host N panes; panes on the same link share Transport + Sink infrastructure but hold independent buffers, IDs, and lifecycle.
