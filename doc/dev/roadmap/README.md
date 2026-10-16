@@ -17,11 +17,11 @@ The plan is split across files. **Each task lives in its own file so edits stay 
 | `task-03-url-parsing.md` | URL → `(ConnectSpec, LinkAddress)` parser |
 | `task-04-transport-trait.md` | `Transport` trait + echo stub |
 | `task-05-sink-trait-tmux-raw.md` | `Sink` trait + per-pane ops, `TmuxSink`, `RawSink`, factory |
-| `task-06-link-pane-registries-manager.md` | `Link`, `Pane`, three registries, `SessionManager.connect` |
+| `task-06-link-pane-registries-manager.md` | `Link`, `Pane`, three registries, `SessionManager` (add_link / open_link / close_link / del_link) |
 | `task-07-shell-transport.md` | `ShellTransport` real impl |
 | `task-08-transport-stubs.md` | `SerialTransport` + `SshTransport` stubs |
 | `task-09-config-loader.md` | XDG paths + `ConnectSpec` JSON save/load (under `links/`) |
-| `task-10-cli-connect-link-pane.md` | `xscore link {add,open,close,remove,show,list,config ...}` + `xscore pane {...}` CLI |
+| `task-10-cli-connect-link-pane.md` | `xscore link {add,del,open,close,show,list,config ...}` (ADR 0005 verb split) + `xscore pane {...}` CLI |
 | `task-11-cli-data.md` | `xscore data read/write/resize` (per-pane) |
 | `task-12-cli-config.md` | `xscore config show/path/set/unset` |
 | `task-13-tests-readme.md` | CLI smoke tests + README rewrite |
@@ -47,7 +47,7 @@ the table above.
 
 - **Project root:** `/home/loner/prj/xscore/`
 - **Crate:** `xscore` (single binary)
-- **CLI entry:** `xscore link add <url> [-c CONFIG] [--link=existing]`
+- **CLI entry:** `xscore link add <url?> [-c CONFIG]` + `link {del,open,close,show,list}` (ADR 0005)
 - **Two-tier CLI:** `xscore {link, pane, data, config} ...`
 - **Persistent templates:** `~/.config/xscore/links/<name>.json` (`link config add`)
 - **Config dir:** `~/.config/xscore/`

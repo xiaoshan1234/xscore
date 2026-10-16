@@ -155,8 +155,11 @@ pub enum Error {
     #[error("pane not found: {0}")]
     PaneNotFound(PaneId),
 
-    #[error("--link=existing not supported for transport: {0}")]
-    LinkExistingUnsupported(&'static str),
+    #[error("`xscore link open` is only valid for tmux sessions, not {0}")]
+    OpenOnlyForTmux(&'static str),
+
+    #[error("`xscore link close` is only valid for tmux sessions, not {0}")]
+    CloseOnlyForTmux(&'static str),
 
     #[error("url parse error: {0}")]
     Url(String),

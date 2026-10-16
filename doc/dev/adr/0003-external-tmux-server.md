@@ -44,7 +44,7 @@ xscore link add shell:///bin/cat
 - `TmuxSink::attach()` for "remote mode" (ssh channel) is a forward-compat no-op today; real wiring is non-trivial (russh channel → tmux needs tmux over the wire). Deferred to SSH-integration.
 
 **Risks:**
-- If tmux server is killed externally, link state becomes inconsistent. Mitigation: `TmuxSink::close()` is best-effort kill-session; link is also removed from `LinkRegistry` when `close_link` runs. The tmux server is reused across CLI invocations because we don't kill it on `xscore` exit — this is a feature (sessions keep running) but means stale servers can accumulate. Mitigation: documentation + a future `xscore link list --all` flag.
+- If tmux server is killed externally, link state becomes inconsistent. Mitigation: `TmuxSink::del()` is best-effort kill-session; link is also removed from `LinkRegistry` when `del_link` (formerly `close_link`) runs. The tmux server is reused across CLI invocations because we don't kill it on `xscore` exit — this is a feature (sessions keep running, re-attachable via `link open`) but means stale servers can accumulate. Mitigation: documentation + a future `xscore link list --all` flag.
 
 ## Alternatives considered
 

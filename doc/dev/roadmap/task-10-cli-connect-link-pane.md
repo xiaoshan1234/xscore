@@ -1,15 +1,15 @@
 # Task 10: CLI — `link`, `pane` subcommands
 
-**Objective:** Wire the new two-tier CLI: `link {add,open,close,remove,show,list,config ...}` + `pane {add,open,close,remove,show,list}`.
+**Objective:** Wire the new two-tier CLI: `link {add,del,open,close,show,list,config ...}` + `pane {add,open,close,remove,show,list}`. ADR 0005 retired `--link=existing`; `link` verbs split into `add` (always new), `open` (always attach-existing, tmux only), `close` (tmux-detach only), `del` (full teardown).
 
-**Background:** this is the revised CLI surface from the user-feedback round. The old `xscore connect <url>` is now `xscore link add <url>`. The old `xscore session {list,show,close,save,load}` and `xscore pane {list,show,close}` are renamed and extended. A new `link config {add,remove,show,list}` group manages persistent ConnectSpec templates under `~/.config/xscore/links/`.
+**Background:** this is the revised CLI surface from the user-feedback round (after ADR 0005's reversal of `--link=existing`). The old `xscore connect <url>` is now `xscore link add <url>` (always-new). Re-attach-to-existing moved to `xscore link open` (tmux only). The `link config {add,remove,show,list}` group keeps managing persistent ConnectSpec templates under `~/.config/xscore/links/` unchanged.
 
 **Files:**
 - Create: `crates/xscore/src/cli/{mod,link,pane}.rs`
 - Delete: `crates/xscore/src/cli/connect.rs` (replaced by `link::add`)
 - Delete: `crates/xscore/src/cli/data.rs` (handled in Task 11)
 - Modify: `crates/xscore/src/main.rs`
-- Extend: `crates/xscore/src/core/manager.rs` (rename `connect` → `add_link` + add 4 new methods)
+- Modify: `crates/xscore/src/core/manager.rs` (per ADR 0005: drop `link_existing` from `add_link`, rename `attach_link` → `open_link`, rename old `close_link` → `del_link`, redefine `close_link` as in-memory detach)
 - Modify: `crates/xscore/src/config/{paths,loader}.rs` (new `links/` + `state/` paths)
 
 ---
@@ -17,11 +17,11 @@
 ## Command reference
 
 ```
-xscore link add <url> [-c CONFIG] [--link=existing]   # create link + first pane
-xscore link open <link-id>                       # re-attach existing link
-xscore link close <link-id>                      # kill transport + sink + all panes
-xscore link remove <link-id>                     # unregister only, leave tmux/server alive
-xscore link show <link-id>
+xscore link add <url?> [-c CONFIG]              # always create new; url OR -c CONFIG required
+xscore link del --id <link-id>                  # full teardown: kill transport + sink + every pane
+xscore link open <url?> [-c CONFIG]             # attach existing; tmux only — others error OpenOnlyForTmux
+xscore link close --id <link-id>                # tmux-detach only (unregister in-memory); others error CloseOnlyForTmux
+xscore link show --id <link-id>
 xscore link list
 
 xscore link config add <name> <url>              # save ConnectSpec template (no start)
@@ -48,18 +48,18 @@ xscore config unset <key>
 
 ### add vs open — create vs re-attach (semantics table)
 
-| Verb | Creates a new external resource? | Touches in-memory registry? | Forgetting this leaks: |
-| --- | --- | --- | --- |
-| `link add`    | yes (transport + sink + 1 pane) | yes | processes / SSH channels / tmux sessions |
-| `link open`   | no (re-attaches existing ones)  | yes | nothing — already running |
-| `link close`  | no (kills them)                 | yes | nothing — already gone |
-| `link remove` | no                              | yes | in-memory state only (tmux server stays) |
-| `pane add`    | yes (one tmux window)           | yes | tmux window |
-| `pane open`   | no                              | yes | nothing — window already exists |
-| `pane close`  | no                              | yes | nothing — window already killed |
-| `pane remove` | no                              | yes | in-memory state only (window stays) |
+| Verb | Creates a new external resource? | Touches in-memory registry? | Allowed transports | Forgetting this leaks: |
+| --- | --- | --- | --- | --- |
+| `link add`    | yes (transport + sink + 1 pane)   | yes | all                          | processes / SSH channels / tmux sessions |
+| `link del`    | no (kills them)                   | yes | all                          | nothing — already gone |
+| `link open`   | no (re-attaches existing tmux)    | yes | tmux only — others err       | nothing — already running |
+| `link close`  | no (detaches — leaves tmux alive) | yes | tmux only — others err       | nothing — tmux server stays |
+| `pane add`    | yes (one tmux window)             | yes | tmux only                    | tmux window |
+| `pane open`   | no                                | yes | tmux only                    | nothing — window already exists |
+| `pane close`  | no (kills)                        | yes | tmux only                    | nothing — window already killed |
+| `pane remove` | no                                | yes | tmux only                    | in-memory state only (window stays) |
 
-**Naming intent:** Linux file semantics — `add` creates, `remove` deletes the registration only, `close` releases the underlying resource, `open` connects/reconnects.
+**Naming intent:** Linux file semantics adapted — `add` creates, `del` is universal teardown, `open` re-attaches to existing (tmux only), `close` releases the in-memory registration only (tmux-detach). Pane verbs are unchanged from the prior round (pane `remove` keeps its in-memory-only semantics since a pane has no separate kill verb).
 
 ---
 
@@ -107,17 +107,17 @@ use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum LinkCmd {
-    /// Create a new link + first pane from a URL (or via a saved config template)
+    /// Create a new link + first pane (URL or `-c CONFIG` is required)
     Add(LinkAddArgs),
 
-    /// Re-attach to an existing link (rebuild transport + sink; panes still register)
-    Open { #[arg(long)] id: String },
+    /// Attach to an existing tmux session by URL or `-c CONFIG` (tmux only)
+    Open(LinkOpenArgs),
 
-    /// Kill transport + sink + every pane on this link
+    /// Detach a tmux link from in-memory registry (tmux session keeps running; non-tmux errors)
     Close { #[arg(long)] id: String },
 
-    /// Unregister the link only. External resources (tmux / ssh / child) keep running.
-    Remove { #[arg(long)] id: String },
+    /// Full teardown: kill transport + sink + every pane
+    Del { #[arg(long)] id: String },
 
     /// Print LinkInfo JSON
     Show { #[arg(long)] id: String },
@@ -134,8 +134,18 @@ pub enum LinkCmd {
 
 #[derive(Args)]
 pub struct LinkAddArgs {
-    /// URL: shell://, ssh://, serial://
-    pub url: String,
+    /// URL: shell://, ssh://, serial://, or omit if `-c CONFIG` is provided
+    pub url: Option<String>,
+
+    /// Use a saved config template (resolves through `link config show <name>`)
+    #[arg(short = 'c', long)]
+    pub config: Option<String>,
+}
+
+#[derive(Args)]
+pub struct LinkOpenArgs {
+    /// URL of the existing tmux session to attach (or omit if `-c CONFIG` is provided)
+    pub url: Option<String>,
 
     /// Use a saved config template (resolves through `link config show <name>`)
     #[arg(short = 'c', long)]
@@ -162,9 +172,9 @@ pub enum LinkConfigCmd {
 pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
     match cmd {
         LinkCmd::Add(args) => add(mgr, args).await,
-        LinkCmd::Open { id } => open(mgr, &id).await,
+        LinkCmd::Open(args) => open(mgr, args).await,
         LinkCmd::Close { id } => close(mgr, &id).await,
-        LinkCmd::Remove { id } => remove(mgr, &id).await,
+        LinkCmd::Del { id } => del(mgr, &id).await,
         LinkCmd::Show { id } => show(mgr, &id).await,
         LinkCmd::List => list(mgr).await,
         LinkCmd::Config { cmd } => config_cmd(cmd).await,
@@ -172,28 +182,20 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 }
 
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
-    // If -c is set, the user passed a name + url. The template supplies
-    // sink + name; the CLI URL supplies transport detail (port, identity, ...)
-    // and LinkAddress (used for `--link=existing` later).
-    let (spec, address) = if let Some(cname) = &args.config {
-        let template_path = xscore::config::link_config_path(cname);
-        let base_spec = xscore::config::load_connect_spec(&template_path)?;
-        let (cli_spec, cli_addr) = url::parse(&args.url)?;
-        (merge_specs(base_spec, cli_spec), cli_addr)
-    } else {
-        url::parse(&args.url)?
-    };
-
+    // Resolve to (spec, address): either via URL, via saved template, or URL+template merge.
+    let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let (link_id, pane_id) = mgr.add_link(spec, address).await?;
     eprintln!("link:  {link_id}");
     println!("pane:  {pane_id}");
     Ok(())
 }
 
-async fn open(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
-    let lid = LinkId::parse(id)?;
-    mgr.attach_link(lid).await?;
-    println!("opened: {lid}");
+async fn open(mgr: Arc<SessionManager>, args: LinkOpenArgs) -> anyhow::Result<()> {
+    // Same input resolution as `add`. The manager rejects non-tmux with `OpenOnlyForTmux`.
+    let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
+    let (link_id, pane_id) = mgr.open_link(spec, address).await?;
+    println!("link:  {link_id}");
+    println!("pane:  {pane_id}");
     Ok(())
 }
 
@@ -204,11 +206,10 @@ async fn close(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn remove(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+async fn del(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     let lid = LinkId::parse(id)?;
-    mgr.unregister_link(lid).await?;
-    println!("removed: {lid}");
-    eprintln!("(tmux server / ssh channel / child process still running; use 'link open' to re-attach)");
+    mgr.del_link(lid).await?;
+    println!("deleted: {lid}");
     Ok(())
 }
 
@@ -257,9 +258,47 @@ async fn config_cmd(cmd: LinkConfigCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `link add -c <name>` means: take the saved template (with its transport + sink)
-/// and override the transport with the CLI URL. The CLI URL still controls the
-/// LinkAddress (used for `--link=existing` later). This lets users say:
+/// Resolve `(url?, -c CONFIG?)` to `(ConnectSpec, LinkAddress)`. Used by
+/// both `link add` and `link open`. At least one input is required.
+/// Precedence (highest first): URL wins on transport detail; template
+/// supplies sink + name when present.
+///
+///   # URL only
+///   xscore link add ssh://root@new-host:22
+///
+///   # Template only (URL derived from the saved ConnectSpec)
+///   xscore link open web            # resolves to whatever URL `web` was saved with
+///
+///   # URL + template (CLI URL overrides transport detail; template supplies sink + name)
+///   xscore link config add web ssh://root@old-host:22
+///   xscore link add ssh://root@new-host:22 -c web
+fn resolve_link_input(
+    url: Option<&str>,
+    config_name: Option<&str>,
+) -> anyhow::Result<(crate::model::ConnectSpec, crate::model::LinkAddress)> {
+    match (url, config_name) {
+        (None, None) => anyhow::bail!("provide either <url> or -c CONFIG"),
+        (Some(u), None) => url::parse(u),
+        (None, Some(c)) => {
+            let template_path = xscore::config::link_config_path(c);
+            let spec = xscore::config::load_connect_spec(&template_path)?;
+            // The saved template already encodes the transport tuple and sink
+            // — its `address` is what was registered when the template was made.
+            let address = spec.address.clone();
+            Ok((spec, address))
+        }
+        (Some(u), Some(c)) => {
+            let template_path = xscore::config::link_config_path(c);
+            let base_spec = xscore::config::load_connect_spec(&template_path)?;
+            let (cli_spec, cli_addr) = url::parse(u)?;
+            Ok((merge_specs(base_spec, cli_spec), cli_addr))
+        }
+    }
+}
+
+/// `link add -c <name> <url>` means: take the saved template (with its
+/// transport + sink) and override the transport with the CLI URL. The
+/// CLI URL still controls the LinkAddress. This lets users say:
 ///
 ///   xscore link config add web ssh://root@old-host:22
 ///   xscore link add ssh://root@new-host:22 -c web   # uses web's sink + new transport
@@ -326,11 +365,16 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
         }
         PaneCmd::Open { id, link } => {
             let pid = PaneId::parse(&id)?;
-            // If link is supplied and not in registry, attach it first.
+            // If a link is supplied, it must already be in the registry.
+            // ADR 0005 retired the silent auto-attach path; the user runs
+            // `xscore link open <url>` first if they need to re-establish
+            // the link in-memory.
             if let Some(lid_str) = link {
                 let lid = LinkId::parse(&lid_str)?;
                 if mgr.links.get(lid).await.is_none() {
-                    mgr.attach_link(lid).await?;
+                    anyhow::bail!(
+                        "link {lid} is not in the registry; run `xscore link open <url> [-c CONFIG]` first"
+                    );
                 }
             }
             mgr.attach_pane(pid).await?;
@@ -387,22 +431,22 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-## Step 5: New methods on `SessionManager` (Task 6 extension)
+## Step 5: Methods on `SessionManager` (per ADR 0005)
 
-These are added to the existing `SessionManager` (Task 6 already has `close_link` / `close_pane`; rename `connect` → `add_link` and add 4 new methods):
+Task 6 establishes `add_link` / `open_link` / `close_link` / `del_link` as the four lifecycle verbs. Step 5 of this task mirrors them so the CLI can dispatch. `open_pane` and `unregister_pane` are unchanged from Task 6. Pane `attach_pane` is still a stub.
 
 ```rust
 // In core/manager.rs
 
 impl SessionManager {
     /// Was: `connect`. Now: `add_link`. Returns `(link_id, pane_id)`.
+    /// Always creates a brand-new external resource (ADR 0005 retired `--link=existing`).
     pub async fn add_link(
         &self,
         spec: ConnectSpec,
         address: LinkAddress,
     ) -> Result<(LinkId, PaneId)> {
-        // Same body as old `connect`. Returns (link_id, pane_id).
-        // See task-06 for the structural skeleton.
+        // Body as in Task 6 §Step 7 — same code path.
         let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
         let transport_kind = transport.kind();
         let mut sink = sink_for(&spec.sink, transport_kind, transport.as_mut()).await?;
@@ -447,33 +491,57 @@ impl SessionManager {
         Ok((arc_link.id, pane_id))
     }
 
-    /// Re-attach to an existing link by id.
-    /// For this slice: the link's underlying resources must already exist
-    /// (tmux server / ssh channel / child / serial port); we just rebuild
-    /// the in-memory transport/sink handles and re-register panes from
-    /// sink.list_panes().
-    pub async fn attach_link(&self, id: LinkId) -> Result<()> {
-        // 1. Find persisted state under state/links/<id>.json if present.
-        // 2. Build transport + sink from spec.
-        // 3. Register back in LinkRegistry.
-        // 4. For each pane from sink.list_panes(): re-register in
-        //    PaneRegistry + BackendRegistry with a new PaneId.
-        // For this slice the persistent-state path is stubbed:
-        // we read state only if the file exists; if not, we error with
-        // a hint to use 'link list' (which only shows in-memory).
-        todo!("stub for slice; real impl lands in attach-persistence PR")
+    /// Attach to an existing tmux session (ADR 0005). Non-tmux returns
+    /// `Error::OpenOnlyForTmux(<kind>)`. Local-tmux case wires up; remote-
+    /// tmux (ssh) lands in the SSH-integration phase.
+    pub async fn open_link(
+        &self,
+        spec: ConnectSpec,
+        address: LinkAddress,
+    ) -> Result<(LinkId, PaneId)> {
+        // Body as in Task 6 — same code path.
+        match address.kind() {
+            "shell" | "serial" | "ssh" => Err(Error::OpenOnlyForTmux(address.kind())),
+            "tmux" => {
+                // Local tmux case: lookup session name in the saved tmux server
+                // identified by spec.sink; if found, register the link without
+                // creating a session; if not found, return LinkNotFound.
+                todo!("stub for slice; real impl lands in tmux-attach persistence PR")
+            }
+            _ => unreachable!(),
+        }
     }
 
-    /// Unregister a link from in-memory state, leaving external resources alive.
-    pub async fn unregister_link(&self, id: LinkId) -> Result<()> {
+    /// Detach a tmux link from the in-memory registry (ADR 0005).
+    /// Tmux session keeps running. Non-tmux returns `Error::CloseOnlyForTmux`.
+    pub async fn close_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
-        // remove all panes from in-memory registries only
+        let kind = arc_link.info.address.kind();
+        if kind != "tmux" {
+            return Err(Error::CloseOnlyForTmux(kind));
+        }
+        // In-memory-only detach. Do NOT call sink.close() / transport.close().
         let panes = arc_link.panes.lock().await.clone();
         for pid in panes {
             self.backends.remove(pid).await;
             self.panes.remove(pid).await;
         }
-        // DO NOT call sink.close() or transport.close()
+        self.links.remove(id).await;
+        Ok(())
+    }
+
+    /// Full teardown: kill transport + sink + every pane, plus (for tmux)
+    /// the per-link tmux server. Was previously named `close_link`; renamed
+    /// to `del_link` to match the CLI verb (ADR 0005).
+    pub async fn del_link(&self, id: LinkId) -> Result<()> {
+        let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
+        let panes = arc_link.panes.lock().await.clone();
+        for pid in panes {
+            self.backends.remove(pid).await;
+            self.panes.remove(pid).await;
+        }
+        arc_link.sink.close().await?;
+        arc_link.transport.close().await?;
         self.links.remove(id).await;
         Ok(())
     }
@@ -501,12 +569,9 @@ impl SessionManager {
     }
 
     /// Re-attach to an existing tmux pane by pane_id.
-    /// For this slice: link must already be in the registry (use `pane open --link`).
+    /// For this slice: link must already be in the registry
+    /// (run `xscore link open <url>` first if needed).
     pub async fn attach_pane(&self, id: PaneId) -> Result<()> {
-        // 1. Look up pane_info; get link_id + sink_handle
-        // 2. Ensure link is in registry (caller passes link_id via `pane open --link`)
-        // 3. Re-register backend in BackendRegistry
-        // For this slice: stub; full implementation lands in attach persistence PR.
         todo!("stub for slice; real impl lands in attach-persistence PR")
     }
 
@@ -522,8 +587,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Existing close_link / close_pane — same as Task 6.
-    pub async fn close_link(&self, id: LinkId) -> Result<()> { /* task-06 */ }
+    /// close_pane — same as Task 6.
     pub async fn close_pane(&self, id: PaneId) -> Result<()> { /* task-06 */ }
 }
 ```
@@ -587,7 +651,7 @@ cargo run -p xscore -- link config list
 cargo run -p xscore -- link config show web
 cargo run -p xscore -- link config remove web
 
-# Lifecycle
+# Lifecycle (add / del — universal verbs)
 cargo run -p xscore -- link add 'shell:///bin/cat'                       # create
 cargo run -p xscore -- link list                                        # see new link
 cargo run -p xscore -- link show --id <link-id>
@@ -597,9 +661,10 @@ cargo run -p xscore -- pane list --link <link-id>
 cargo run -p xscore -- pane close --id <pane-id>                       # kill tmux pane
 cargo run -p xscore -- pane remove --id <pane-id>                      # only unregister
 
-cargo run -p xscore -- link close --id <link-id>                       # kill transport + sink + all panes
-cargo run -p xscore -- link remove --id <link-id>                      # only unregister (preserves tmux server)
-cargo run -p xscore -- link open --id <link-id>                        # re-attach (uses sink.list-panes())
+# Tmux-only verbs (open = attach existing, close = detach)
+cargo run -p xscore -- link open 'tmux://my-session'                   # attach existing
+cargo run -p xscore -- link close --id <link-id>                       # tmux-detach only
+cargo run -p xscore -- link del --id <link-id>                         # full teardown
 ```
 
 ---
@@ -608,5 +673,5 @@ cargo run -p xscore -- link open --id <link-id>                        # re-atta
 
 ```bash
 git add crates/xscore/src/cli/ crates/xscore/src/core/ crates/xscore/src/config/ crates/xscore/src/model/ crates/xscore/src/main.rs
-git commit -m "feat(cli): two-tier command tree (link add/open/close/remove/show/list, pane add/open/close/remove/show/list, link config add/remove/show/list)"
+git commit -m "feat(cli): four-verb link tree (add/del/open/close + show/list/config) — ADR 0005"
 ```

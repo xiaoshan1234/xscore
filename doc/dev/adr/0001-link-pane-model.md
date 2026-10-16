@@ -13,7 +13,8 @@ Three product realities drove the change:
 
 1. **Tmux-in-SSH is the norm.** When a developer connects to a remote box over SSH, they want `tmux` running *inside* that SSH channel. The "session" they're working with is `ssh-channel` + tmux-server + N windows. The previous single-session model treated each tmux window as a separate SSH connection, which is wrong.
 2. **Same link, multiple panes.** A single SSH connection can hold multiple useful workspaces (one window per task). The model must let one link host N panes without re-opening the SSH channel.
-3. **Address-based dedup.** Two `xscore link add ssh://u@h:22` calls — without explicit flags — should not both open SSH channels to the same host. The user opts in with `--link=existing` to attach.
+
+**Cross-process attach (separate from this ADR).** The model says nothing about how `xscore` discovers a link across CLI invocations — today the registry is in-memory only. Re-attach across invocations is owned by ADR 0005 (`add` / `open` / `close` / `del`), which routed the attach semantic through tmux's per-session identity instead of `LinkAddress`. The original "address-keyed dedup" concept that this ADR's first draft mentioned is no longer part of the design.
 
 ## Decision
 
@@ -34,19 +35,19 @@ SessionManager
 ## Consequences
 
 **Positive:**
-- `--link=existing` becomes a clean semantic: "find an existing link by `LinkAddress`; attach a new pane to it; if none, error."
-- Closing a pane does not affect the link. Killing a link kills every pane on it.
+- `link open` becomes a clean semantic: "attach to an existing tmux session by name; if none, error." (For shell/serial transports the verb returns `Error::OpenOnlyForTmux` — the surface invariant in ADR 0005.)
+- Closing a pane does not affect the link. Killing a link kills every pane on it. Detaching (`link close`) keeps the tmux session alive but unregisters the link in-memory; killing (`link del`) does both. See ADR 0005.
 - `TmuxSink` owns one tmux server (the link); `new_pane` is `tmux new-window`. The "multi-window in one tmux server" semantics fall out for free.
 - Future "live attach" (a second CLI invocation watches an existing link) is just a question of where the registry lives (in-memory today; daemon later). The model is correct.
 
 **Negative:**
 - Two IDs instead of one. CLI surface grows: `link list`/`pane list`. Documentation must explain the distinction clearly.
 - `Sink` trait gains `new_pane`/`close_pane`/`list_pane`-per-handle methods. More boilerplate than a single-session trait, but each method is small.
-- `xscore link add <same url>` (without `--link=existing`) is now the *default* behavior — users expecting dedup must opt in. This inverts the prior assumption. Documented explicitly in `--help` text and `acceptance.md`.
+- `xscore link add <same url>` always creates a **new** link — there is no `--link=existing` to opt into reuse. To attach to an existing tmux session the user runs `link open <url>` instead (ADR 0005). This is explicit at the verb level; the prior opt-in was implicit.
 
 **Risks:**
 - Users conflate link-id with pane-id and `data --id` style commands become ambiguous. Mitigated by `--pane` flag on `data` (not `--id`).
-- The `LinkAddress` for ssh currently includes `(host, port, user, identity, proxy)`. A future ssh config change (e.g. default identity switches) would silently make the same URL map to a different address. Acceptable; the user can `--link=existing` explicitly.
+- The `LinkAddress` for ssh currently includes `(host, port, user, identity, proxy)`. It's an internal concept now (ADR 0005 retired `--link=existing`); only used inside `LinkRegistry` for routing. No further change implied.
 
 ## Alternatives considered
 

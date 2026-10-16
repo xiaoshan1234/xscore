@@ -16,17 +16,21 @@ xscore link add serial:///dev/ttyUSB0?baud=115200
 xscore link config add web ssh://u@h:22?identity=~/.ssh/id_ed25519
 
 # Reuse template + attach multiple panes on the same link:
-xscore link add ssh://u@h:22 -c web
-xscore link add ssh://u@h:22 --link=existing
+xscore link add ssh://u@h:22 -c web           # 1st pane on the link
+
+# Open / detach / destroy — verb split (ADR 0005):
+xscore link open 'tmux://my-session'           # attach existing tmux session
+xscore link close --id <link-id>               # tmux-detach only (session keeps running)
+xscore link del --id <link-id>                 # full teardown (kills tmux server)
 ```
 
 ## Commands
 
 ```
-xscore link add <url> [-c CONFIG] [--link=existing]
-xscore link open --id <link-id>
-xscore link close --id <link-id>
-xscore link remove --id <link-id>
+xscore link add <url?> [-c CONFIG]            # always create new (url OR -c CONFIG required)
+xscore link del --id <link-id>                # full teardown (kills transport + sink + tmux server)
+xscore link open <url?> [-c CONFIG]           # attach existing tmux session (tmux only)
+xscore link close --id <link-id>              # tmux-detach only (session keeps running; non-tmux errs)
 xscore link show --id <link-id>
 xscore link list
 
@@ -66,11 +70,10 @@ CLI -> SessionManager
 Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Pane lives inside
 one link and addresses the link's sink via a sink_handle (e.g. tmux `%42`).
 
-**`add` vs `open`:** `add` creates a new external resource; `open` re-attaches an
-existing one. **`close` vs `remove`:** `close` kills the underlying resource (transport
-+ sink + tmux window); `remove` only unregisters from in-memory state and leaves the
-external resources alive.
+**`add` vs `del` vs `open` vs `close`** (ADR 0005, four-verb `link` tree):
+- `add` creates a brand-new external resource (transport + sink + 1st pane).
+- `del` is the universal full teardown: kill transport + sink + every pane, plus (for tmux) the per-link tmux server.
+- `open` attaches to an existing tmux session (tmux only — shell/serial/ssh return `OpenOnlyForTmux`).
+- `close` is the in-memory detach: unregister the link and its panes, but the tmux session keeps running (tmux only — shell/serial/ssh return `CloseOnlyForTmux`).
 
-`--link=existing` opts into **address-keyed dedup**: search LinkRegistry for an existing
-link matching the URL's transport address; if found, open a new pane on it; if not found,
-error. Without `--link=existing`, every `xscore link add` creates a brand-new link.
+`link open` and `link close` are tmux-only because shell/serial/ssh processes don't have cross-invocation identity to attach to or detach from. `link add <same url>` always creates a brand-new link; to re-attach to an existing resource, the verb is `link open`. See [ADR 0005](doc/dev/adr/0005-add-open-close-del-verbs.md) for the rationale.

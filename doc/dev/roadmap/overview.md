@@ -6,7 +6,7 @@
 - [ADR 0001](../adr/0001-link-pane-model.md) — why Link × Pane (not flat Session)
 - [ADR 0002](../adr/0002-transport-sink-split.md) — why Transport × Sink (not single backend)
 - [ADR 0003](../adr/0003-external-tmux-server.md) — why external `tmux -L xscore` (not embedded tmux)
-- [ADR 0004](../adr/0004-link-existing-dedup.md) — why `--link=existing` is opt-in (not default)
+- [ADR 0005](../adr/0005-add-open-close-del-verbs.md) — why `link` verbs are `add` / `del` / `open` / `close` (no `--link=existing`)
 
 **Architecture diagrams:** [diagrams/README.md](../architecture/diagrams/README.md) (Link × Pane topology, Link & Pane state machines, Module dependency rules — inline Mermaid)
 
@@ -32,7 +32,7 @@ SessionManager
 - tmux is always external, on a dedicated `xscore` socket (`tmux -L xscore ...`). One link = one tmux server name. Multiple PaneIds = multiple windows inside that server.
 - Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<name>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (reserved for future link-state persistence).
 
-**CLI entry:** `xscore link add <url> [-c CONFIG] [--link=existing]`. URLs:
+**CLI entry:** `xscore link add <url?> [-c CONFIG]` and `xscore link {del,open,close,show,list}` (ADR 0005). At least one of `<url>` / `-c CONFIG` is required. URLs:
 
 ```text
 xscore link add shell:///bin/bash
@@ -40,10 +40,13 @@ xscore link add serial:///dev/ttyUSB0?baud=115200&data_bits=8
 xscore link add ssh://user@host:22?identity=~/.ssh/id_ed25519&proxy=ssh://jump@1.2.3.4
 xscore link add ssh://user@host:22?tmux=on    # default
 
-# Multiple panes on the same link:
-xscore link add ssh://u@h:22
-xscore link add ssh://u@h:22 --link=existing   # attach pane 2 to the same link
-xscore link add ssh://u@h:22 --link=existing   # pane 3
+# Multiple panes on the same link (ADR 0005 verb split):
+xscore link add ssh://u@h:22                                            # create
+xscore link add ssh://u@h:22                                            # pane 2 (different link)
+# For tmux-attach instead of pane-2-on-new-link:
+xscore link open 'tmux://my-session'                                    # attach existing
+xscore link close --id <link-id>                                        # tmux-detach only
+xscore link del --id <link-id>                                          # full teardown
 ```
 
 Other commands are organized into two tiers (`link` for the physical connection, `pane` for the views). `--from spec.json` was removed in favor of `link config add/remove/show/list` templates under `~/.config/xscore/links/`.
@@ -53,11 +56,11 @@ Other commands are organized into two tiers (`link` for the physical connection,
 - `serial` → `(path)`
 - `ssh` → `(host, port, user, identity, proxy)`
 
-Two `xscore link add ssh://u@h:22` calls with no `--link=existing` flag produce **different links** (each with `link_id` = a new uuid). The `--link=existing` flag opts into attach mode: search the `LinkRegistry` for a matching address tuple; if found, attach a new pane to that link; if not, error. `--link=existing` is meaningless for `shell`/`serial` and returns `Error::LinkExistingUnsupported`.
+Two `xscore link add ssh://u@h:22` calls always produce **different links** (each with `link_id` = a new uuid). Re-attaching to an existing resource is a separate verb: `xscore link open <url?> [-c CONFIG]` (ADR 0005). `link open` and `link close` are tmux-only — shell/serial/ssh processes have no cross-invocation identity to attach to or detach from, and return `Error::OpenOnlyForTmux` / `Error::CloseOnlyForTmux`.
 
-Each alive link identifies itself only via `link_id` (uuid v7) and `address`; there is no runtime alias and the registry has no `by_alias` map. For persistent templates use `xscore link config add <name> <url>`.
+Each alive link identifies itself only via `link_id` (uuid v7) and the internal `LinkAddress` used for routing inside `LinkRegistry`. `LinkAddress` is not a user-facing dedup key (ADR 0005 retired `--link=existing`). For persistent templates use `xscore link config add <name> <url>`.
 
-> ⚠️ **Open question (does not block the slice):** "Same link reuse" on SSH means tmux inside the SSH channel — second `xscore link add` to the same SSH with `--link=existing` should ssh-attached tmux, NOT a new SSH channel. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (return error from `--link=existing` for ssh transport too, since the stub doesn't have a real channel — see acceptance criteria below).
+> ⚠️ **Open question (does not block the slice):** For SSH the same-address attach path needs an SSH channel + tmux-over-the-wire before it lands. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (no `link open` for ssh yet — it returns an unimplemented-stub error until the SSH-integration phase resolves the remote tmux case).
 
 **Tech Stack (locked from user):**
 - CLI: `clap` v4 derive
@@ -91,14 +94,14 @@ crates/xscore/
 │   │   └── config.rs                 # config show/path/set/unset
 │   ├── core/
 │   │   ├── mod.rs                    # pub SessionManager, re-exports
-│   │   ├── manager.rs                # add_link/attach_link/close/remove/unregister for links and panes
+│   │   ├── manager.rs                # add_link / open_link / close_link / del_link
 │   │   ├── link.rs                   # Link struct (transport + sink + pane list)
 │   │   ├── pane.rs                   # Pane struct (handle + state)
-│   │   ├── link_registry.rs          # LinkRegistry (address-keyed dedup)
+│   │   ├── link_registry.rs          # LinkRegistry (by_id; address used internally for routing)
 │   │   ├── pane_registry.rs          # PaneRegistry (pane_id -> PaneInfo)
 │   │   ├── address.rs                # LinkAddress hashable key per transport
 │   │   ├── id.rs                     # LinkId + PaneId (uuid v7)
-│   │   └── error.rs                  # thiserror enum (LinkNotFound, ...)
+│   │   └── error.rs                  # thiserror enum (LinkNotFound, OpenOnlyForTmux, CloseOnlyForTmux, ...)
 │   ├── model/
 │   │   ├── mod.rs
 │   │   ├── session.rs                # ConnectSpec / LinkInfo / PaneInfo / TransportConfig / SinkConfig
@@ -225,4 +228,4 @@ pub struct Link {
 }
 ```
 
-`SessionManager::connect(spec, address, mode)` returns `(LinkId, PaneId)` — the new link's id and the first pane's id. With `--link=existing`, the link is the existing match and the pane is a new pane inside it.
+`SessionManager::add_link(spec, address)` returns `(LinkId, PaneId)` — the new link's id and the first pane's id (ADR 0005: always creates a brand-new link; no `--link=existing` branch). `SessionManager::open_link(spec, address)` attaches an existing tmux session (tmux only) and returns `(LinkId, PaneId)` for the registered link and its first pane.

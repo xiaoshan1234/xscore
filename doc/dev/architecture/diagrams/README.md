@@ -23,7 +23,7 @@ Read first if you want to know "what are the moving parts".
 graph TB
     subgraph CLI ["CLI (clap)"]
         Connect["xscore link add<br/>-c CONFIG"]
-        LinkCmd["xscore link<br/>add/open/close/remove<br/>show/list/config {add,remove,show,list}"]
+        LinkCmd["xscore link<br/>add/del/open/close<br/>show/list/config {add,remove,show,list}"]
         PaneCmd["xscore pane<br/>add/open/close/remove<br/>show/list"]
         DataCmd["xscore data<br/>read/write/resize<br/>--pane"]
         ConfigCmd["xscore config<br/>show/path/set/unset"]
@@ -105,16 +105,20 @@ graph TB
 
 Two parallel state diagrams.
 
-- **Link lifecycle**: `Idle → Constructing → Open → Ready → Closing → Closed`,
-  with a sub-machine `Active (N panes)` for the steady state
-  (`Empty ↔ OnePane ↔ ManyPanes`).
+- **Link lifecycle**: `Idle → Constructing → Open → Ready → Closing → Closed` for the **resource**
+  (tmux session stays alive across `Closing` — i.e. `close` is tmux-detach). For full teardown the path
+  is `Ready → Deleting → Closed` (deletes the tmux server). Both paths emerge from `Ready`.
+  A sub-machine `Active (N panes)` for the steady state (`Empty ↔ OnePane ↔ ManyPanes`).
 - **Pane lifecycle**: `Created → Open → ReadWrite ↔ Closing → Closed`.
 
-Key invariants:
+Key invariants (ADR 0005 verb split):
 
+- `close_link()` (which is `xscore link close`) is **tmux-detach only** — the link is unregistered
+  in-memory, panes go away, the tmux session keeps running. Re-attach with `link open`.
+- `del_link()` (which is `xscore link del`) is the **full teardown** — it kills the per-link
+  tmux server and every pane, and only then reaches `Closed`.
 - Link stays Alive across pane lifecycle (Pane close ≠ Link close).
-- Failed state is reachable from any transport / sink error; cleanup is
-  best-effort.
+- Failed state is reachable from any transport / sink error; cleanup is best-effort.
 
 ```mermaid
 stateDiagram-v2
@@ -126,8 +130,13 @@ stateDiagram-v2
         Constructing --> Failed: transport.open() err
         Open --> Ready: sink_for().attach() ok
         Open --> Failed: sink err
-        Ready --> Closing: close_link()
-        Closing --> Closed: transport.close() ok
+
+        Ready --> Active
+        Ready --> Closing: close_link()    # ADR 0005: tmux-detach only
+        Closing --> Active: link open      # ADR 0005: re-attach (tmux session kept alive)
+        Ready --> Deleting: del_link()     # ADR 0005: full teardown starts
+        Deleting --> Closed: transport.close() / server killed
+
         Failed --> Closed: best-effort cleanup
 
         state "Active (N panes)" as Active {
@@ -150,8 +159,6 @@ stateDiagram-v2
 
     Idle --> Constructing: xscore link add
     Constructing --> Ready: success
-    Ready --> Active
-    Ready --> Closing: close_link
     Closed --> [*]
 
     note right of Active
@@ -249,7 +256,7 @@ graph LR
 - [ADR 0001](../../adr/0001-link-pane-model.md) — Link × Pane model rationale
 - [ADR 0002](../../adr/0002-transport-sink-split.md) — Transport × Sink split rationale
 - [ADR 0003](../../adr/0003-external-tmux-server.md) — External tmux server rationale
-- [ADR 0004](../../adr/0004-link-existing-dedup.md) — `--link=existing` semantics rationale
+- [ADR 0005](../../adr/0005-add-open-close-del-verbs.md) — four-verb `link` tree (replaces the archived ADR 0004)
 
 ## Updating
 
