@@ -1,28 +1,53 @@
 # xscore CLI First Implementation Plan
 
-**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions behind a single `Session` API, callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
+**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions behind a single `Link × Pane` abstraction, callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
 
-**Architecture (Transport × Sink):**
-- Every session is the product of **one Transport** × **one Sink**.
-  - **Transport** = raw IO transport: local process (`stdin/stdout`), serial port (`tokio-serial`), SSH (`russh` channel). Owns bytes only.
-  - **Sink** = terminal/PTY semantics layer. First impl: `TmuxSink` which wraps an external tmux server via `tmux -L xscore ...`. Sink owns PTY sizing / line buffering / ANSI framing.
-- `core::SessionManager` owns `Vec<(SessionId, Arc<dyn SessionBackend>)>` where `SessionBackend` is the **composite** of Transport + Sink. CLI calls `manager.create(...)`, `manager.read/write/resize`, etc. — the same methods MCP server will call next.
-- tmux is always external, on a dedicated `xscore` socket (`tmux -L xscore ...`). For "ssh + tmux-in-ssh", tmux runs **inside the SSH channel** — we tell remote tmux to use its own server, no local tmux server needed for that transport.
-- Config = `~/.config/xscore/config.json` + per-session JSON snippets under `~/.config/xscore/sessions/`.
+**Architecture (Link × Pane):**
 
-**CLI entry:** `xscore connect <url> [--save]`. URLs:
+A **Link** is one physical connection. A **Pane** is one logical view into a link. One link can host N panes; panes on the same link share Transport + Sink infrastructure but hold independent buffers, IDs, and lifecycle.
+
+```
+Link  ── owns ──> Transport + Sink (the physical connection + terminal semantics)
+       +─ hosts ─> [Pane_1, Pane_2, ..., Pane_N]   (N independent views)
+```
+
+- **Link** = `(Transport + Sink)` pair (the same architecture we already settled on). One link is one tmux server, or one SSH channel, or one serial port, or one local child process — the physical layer.
+- **Pane** = one SessionId. Each pane is what users `data read/write/resize` against. Each pane has its own window inside the link's tmux server (when sink is `TmuxSink`), or its own buffered slice (when sink is `RawSink`).
+
+```
+SessionManager
+├─ LinkRegistry: link_id  -> Arc<Link>      { transport + sink + pane-list }
+├─ PaneRegistry: pane_id  -> PaneInfo       { link_id, sink_handle, ... }
+└─ BackendRegistry: pane_id -> Arc<dyn PaneBackend>   { wraps (Link, sink_handle) }
+```
+
+- tmux is always external, on a dedicated `xscore` socket (`tmux -L xscore ...`). One link = one tmux server name. Multiple PaneIds = multiple windows inside that server.
+- Config = `~/.config/xscore/config.json` + per-link JSON snippets under `~/.config/xscore/sessions/`.
+
+**CLI entry:** `xscore connect <url> [--save] [--link=existing]`. URLs:
 
 ```
 xscore connect shell:///bin/bash
 xscore connect serial:///dev/ttyUSB0?baud=115200&data_bits=8
 xscore connect ssh://user@host:22?identity=~/.ssh/id_ed25519&proxy=ssh://jump@1.2.3.4
 xscore connect ssh://user@host:22?tmux=on    # default
-xscore connect ssh://user@host:22?tmux=off     # sink = RawSink — see open question
+
+# Multiple panes on the same link:
+xscore connect ssh://u@h:22
+xscore connect ssh://u@h:22 --link=existing   # attach pane 2 to the same link
+xscore connect ssh://u@h:22 --link=existing   # pane 3
 ```
 
-All other commands (`list`, `show`, `close`, `data read/write/resize`, `config ...`) take `--id <uuid>`. URLs are the entry point; `--from spec.json` is **removed**.
+Other commands take `--id <link-id>` or `--id <pane-id>`. URLs are the entry point; `--from spec.json` is **removed**.
 
-> ⚠️ **Open question (will not block the slice):** `serial + TmuxSink` — tmux expects a PTY, serial doesn't. The slice resolves this by running tmux locally and bridging serial bytes through tmux's pane input/output. Acceptable for CLI-first; revisit if a real "tmux attach to serial" demand surfaces.
+**Link uniqueness rule (locked from user):** A link is uniquely identified by the `(transport_kind, address-tuple)`:
+- `shell` → `(command, args-tuple)`
+- `serial` → `(path)`
+- `ssh` → `(host, port, user, identity, proxy)`
+
+Two `xscore connect ssh://u@h:22` calls with no `--link=existing` flag produce **different links** (each with `link_id` = a new uuid). The `--link=existing` flag opts into attach mode: search the `LinkRegistry` for a matching address tuple; if found, attach a new pane to that link; if not, error. `--link=existing` is meaningless for `shell`/`serial` and returns `Error::LinkExistingUnsupported`.
+
+> ⚠️ **Open question (does not block the slice):** "Same link reuse" on SSH means tmux inside the SSH channel — second `xscore connect` to the same SSH with `--link=existing` should ssh-attached tmux, NOT a new SSH channel. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (return error from `--link=existing` for ssh transport too, since the stub doesn't have a real channel — see acceptance criteria below).
 
 **Tech Stack (locked from user):**
 - CLI: `clap` v4 derive
@@ -32,7 +57,7 @@ All other commands (`list`, `show`, `close`, `data read/write/resize`, `config .
 - Serial: `tokio-serial`
 - tmux: external `tmux` binary over CLI (`tmux -L xscore ...`)
 - URL parsing: `url` crate
-- Persistence: JSON files (config + per-session). No SQLite this phase.
+- Persistence: JSON files (config + per-link JSON). No SQLite this phase.
 - Logging: `tracing` + `tracing-subscriber`
 - Errors: `thiserror` (library) + `anyhow` (CLI top-level)
 - Testing: `mockall` for trait impls + integration tests against real `tmux -L xscore-test`
@@ -50,84 +75,99 @@ crates/xscore/
 │   ├── main.rs                       # clap entry, tracing init, dispatch
 │   ├── cli/
 │   │   ├── mod.rs                    # Cli struct, derive top-level
-│   │   ├── connect.rs                # xscore connect <url> [--save]
-│   │   ├── session.rs                # session list/show/close/save/load
-│   │   ├── data.rs                   # session data read/write/resize
+│   │   ├── connect.rs                # xscore connect <url> [--save] [--link=existing]
+│   │   ├── link.rs                   # link list/show/close/save/load
+│   │   ├── pane.rs                   # pane list/show/close
+│   │   ├── data.rs                   # pane data read/write/resize
 │   │   └── config.rs                 # config show/path/set/unset
 │   ├── core/
 │   │   ├── mod.rs                    # pub SessionManager, re-exports
-│   │   ├── manager.rs               # create/get/list/close + URL dispatch
-│   │   ├── session.rs               # Session = Transport + Sink (struct)
-│   │   ├── registry.rs               # in-memory Vec<(SessionId, SessionInfo)>
-│   │   ├── id.rs                     # SessionId (uuid v7)
-│   │   └── error.rs                  # thiserror enum (NotFound, Transport, Sink, ...)
+│   │   ├── manager.rs                # connect/list/close for links and panes
+│   │   ├── link.rs                   # Link struct (transport + sink + pane list)
+│   │   ├── pane.rs                   # Pane struct (handle + state)
+│   │   ├── link_registry.rs          # LinkRegistry (address-keyed dedup)
+│   │   ├── pane_registry.rs          # PaneRegistry (pane_id -> PaneInfo)
+│   │   ├── address.rs                # LinkAddress hashable key per transport
+│   │   ├── id.rs                     # LinkId + PaneId (uuid v7)
+│   │   └── error.rs                  # thiserror enum (LinkNotFound, ...)
 │   ├── model/
 │   │   ├── mod.rs
-│   │   ├── session.rs                # ConnectSpec / SessionInfo / TransportConfig / SinkConfig
-│   │   └── config.rs                 # AppConfig (default server, ssh defaults, ...)
+│   │   ├── session.rs                # ConnectSpec / LinkInfo / PaneInfo / TransportConfig / SinkConfig
+│   │   └── config.rs                 # AppConfig
 │   ├── url/
 │   │   ├── mod.rs                    # URL parser entry
-│   │   ├── scheme.rs                 # shell | serial | ssh (placeholder)
-│   │   └── connect.rs                # ConnectUrl → (TransportConfig, SinkConfig)
+│   │   ├── scheme.rs                 # placeholder
+│   │   └── connect.rs                # ConnectUrl -> ConnectSpec + LinkAddress
 │   ├── transport/
-│   │   ├── mod.rs                    # pub trait Transport
+│   │   ├── mod.rs                    # pub trait Transport + address()
 │   │   ├── factory.rs                # transport_for(TransportConfig) -> Box<dyn Transport>
 │   │   ├── shell.rs                  # tokio::process::Command
-│   │   ├── serial.rs                 # tokio-serial (stub, real open deferred)
-│   │   └── ssh.rs                    # russh channel (stub, real open deferred)
+│   │   ├── serial.rs                 # tokio-serial stub
+│   │   └── ssh.rs                    # russh stub
 │   ├── sink/
-│   │   ├── mod.rs                    # pub trait Sink
-│   │   ├── factory.rs                # sink_for(SinkConfig, transport_kind, transport) -> Box<dyn Sink>
-│   │   ├── tmux.rs                   # TmuxSink (PTY/ANSI, wraps external tmux server)
-│   │   └── raw.rs                    # RawSink (passthrough for tmux=off)
+│   │   ├── mod.rs                    # pub trait Sink + pane ops
+│   │   ├── factory.rs                # sink_for(...)
+│   │   ├── tmux.rs                   # TmuxSink (PTY/ANSI), new_pane() per attach
+│   │   └── raw.rs                    # RawSink (no-op stub for ?tmux=off)
 │   ├── backends/
-│   │   ├── mod.rs                    # pub trait SessionBackend (composite)
-│   │   └── composite.rs              # SessionBackend impl for (Transport + Sink)
+│   │   ├── mod.rs                    # pub trait PaneBackend + BackendRegistry
+│   │   └── composite.rs              # PaneBackend impl for (Link, sink_handle)
 │   ├── config/
 │   │   ├── mod.rs
 │   │   ├── loader.rs                 # load/save ConnectSpec JSON, xdg dirs
 │   │   └── paths.rs                  # xdg path resolution
 │   └── util/
 │       ├── mod.rs
-│       └── tmux_socket.rs            # socket name constant + helpers
+│       └── tmux_socket.rs            # socket name + helpers
 └── tests/
     ├── cli_smoke.rs                  # spawn xscore binary, assert outputs
     ├── manager_mock.rs               # SessionManager with mockall Transport/Sink
-    ├── url_parse.rs                  # URL → Transport/Sink config
+    ├── url_parse.rs                  # URL -> ConnectSpec + LinkAddress
     └── tmux_integration.rs           # real tmux -L xscore-test, gated by env
 ```
 
 **Module rules (hard):**
 - `cli` may depend on `core`, `model`, `url`, `config`. Never on `transport` / `sink` directly.
-- `core` depends on `model`, `backends`, `sink::factory`, `transport::factory`. Never on `cli` or `config`.
-- `backends` depends on `transport`, `sink`, `model`, `core::error`. Never on `cli`.
+- `core` depends on `model`, `url`, `sink::factory`, `transport::factory`, `backends`. Never on `cli` or `config`.
+- `backends` depends on `transport` (trait), `sink` (trait), `model`, `core::error`. Never on `cli`.
 - `transport` depends on `model`, `core::error`. Never on `sink` or `cli`.
-- `sink` depends on `model`, `core::error`, `transport` (to attach). Never on `cli`.
+- `sink` depends on `model`, `core::error`, `transport` (to wire at attach). Never on `cli`.
 - `url` depends on `model`. Pure parsing layer, no I/O.
 - `config` depends on `model`. Never on anything else.
 - All cross-module state goes through `core::SessionManager` — no global statics.
 
-**Why split `transport` and `sink` (vs the old single `backends/`):**
+**Why Link × Pane (vs single-session model):**
 
-The old design treated each `SessionKind` as one backend. That broke the moment a session wants to combine layers — e.g. "ssh transport + tmux-in-ssh sink" (no local tmux), or "shell transport + local tmux sink" (local tmux). Splitting into orthogonal traits lets the same SessionManager serve all four combinations without combinator explosion:
+| Layer | Concern | Lifetime |
+| --- | --- | --- |
+| Transport | bytes/PTY | 1 per link; killed when link closes |
+| Sink | tmux server / passthrough | 1 per link; killed when link closes |
+| Pane | one working view | N per link; each pane independently closeable |
 
-| Transport → / Sink → | TmuxSink (local tmux) | TmuxSink (in-ssh tmux) | RawSink |
-| --- | --- | --- | --- |
-| Shell   | local shell, local tmux | n/a (local tmux already local) | passthrough |
-| Serial  | serial over local tmux wrapper | n/a | raw serial |
-| Ssh     | ssh over local tmux, ssh channel raw | ssh + run `tmux -L ssh <remote>` inside channel | raw ssh channel |
-
-The "where the tmux server runs" decision is a **Sink config** (`TmuxSink::mode` = `local` / `remote` / `auto`), not a Transport config — that's the seam.
+Each pane has its own `id`, its own data read/write state, its own `PaneInfo`. Killing one pane does not affect its siblings. Killing a link kills the transport + sink + every pane on it.
 
 ---
 
-## Core Trait Design (preview, refined in Tasks 4–6)
+## Core Type Design (preview, refined in Tasks 2–6)
 
 ```rust
+// core/id.rs
+pub struct LinkId(Uuid);   // identifies a link (transport + sink + tmux server)
+pub struct PaneId(Uuid);   // identifies one pane inside a link
+
+// core/address.rs
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum LinkAddress {
+    Shell { command: String, args: Vec<String> },
+    Serial { path: String },
+    Ssh { host: String, port: u16, user: String, identity: Option<String>, proxy: Option<String> },
+}
+
 // transport/mod.rs
 #[async_trait]
 pub trait Transport: Send + Sync {
     fn kind(&self) -> &'static str;
+    fn address(&self) -> LinkAddress;          // used for link dedup
     async fn open(&mut self) -> Result<()>;
     async fn write(&self, data: &[u8]) -> Result<usize>;
     async fn read(&self, buf: &mut [u8]) -> Result<usize>;
@@ -139,27 +179,44 @@ pub trait Transport: Send + Sync {
 #[async_trait]
 pub trait Sink: Send + Sync {
     fn kind(&self) -> &'static str;
-    /// Wire this sink to the running transport's IO.
+    /// Wire this sink to a transport. Called once per link lifetime.
     async fn attach(&mut self, transport: &dyn Transport) -> Result<()>;
-    async fn write(&self, data: &[u8]) -> Result<usize>;
-    /// Snapshot current displayed output (for tmux: capture-pane).
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
+    /// Open a new pane within this sink. Returns a sink-side handle (e.g. tmux window id "%42").
+    async fn new_pane(&self) -> Result<String>;
+    /// Drop one pane. Transport + sink stay alive.
+    async fn close_pane(&self, pane_handle: &str) -> Result<()>;
+    /// List panes — used by LinkRegistry recovery / `pane list`.
+    async fn list_panes(&self) -> Result<Vec<String>>;
+    /// Snapshot one pane's output.
+    async fn snapshot(&self, pane_handle: &str, buf: &mut [u8]) -> Result<usize>;
+    /// Write to one pane.
+    async fn write(&self, pane_handle: &str, data: &[u8]) -> Result<usize>;
+    /// Resize one pane (and propagate to transport).
+    async fn resize(&self, pane_handle: &str, cols: u16, rows: u16) -> Result<()>;
     async fn close(&self) -> Result<()>;
 }
 
 // backends/mod.rs
 #[async_trait]
-pub trait SessionBackend: Send + Sync {
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;  // → sink
-    async fn write(&self, data: &[u8]) -> Result<usize>;        // → sink
-    async fn write_raw(&self, data: &[u8]) -> Result<usize>;    // → transport
+pub trait PaneBackend: Send + Sync {
+    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;
+    async fn write(&self, data: &[u8]) -> Result<usize>;
+    async fn write_raw(&self, data: &[u8]) -> Result<usize>;
     async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
     async fn close(&self) -> Result<()>;
 }
+
+// core/link.rs
+pub struct Link {
+    pub id: LinkId,
+    pub info: LinkInfo,
+    pub transport: Box<dyn Transport>,
+    pub sink: Box<dyn Sink>,
+    pub panes: Mutex<Vec<PaneId>>,
+}
 ```
 
-`backends::composite::CompositeBackend` glues one Transport + one Sink into one `SessionBackend`. `SessionManager` only knows `SessionBackend`.
+`SessionManager::connect(spec, address, mode)` returns `(LinkId, PaneId)` — the new link's id and the first pane's id. With `--link=existing`, the link is the existing match and the pane is a new pane inside it.
 
 ---
 
@@ -268,17 +325,18 @@ git commit -m "feat: scaffold xscore workspace and empty binary"
 
 ---
 
-#### Task 2: Core error type and SessionId
+#### Task 2: Core IDs + error type + LinkAddress
 
-**Objective:** Define `core::Error` (thiserror enum) and `core::SessionId` (uuid v7 newtype).
+**Objective:** Define `LinkId` (uuid v7), `PaneId` (uuid v7), `LinkAddress` (hashable transport identity), `core::Error`.
 
 **Files:**
 - Create: `crates/xscore/src/core/mod.rs`
 - Create: `crates/xscore/src/core/id.rs`
+- Create: `crates/xscore/src/core/address.rs`
 - Create: `crates/xscore/src/core/error.rs`
-- Create: `crates/xscore/src/core/{manager,registry,session}.rs` (empty placeholders)
+- Create: `crates/xscore/src/core/{manager,link,pane,link_registry,pane_registry}.rs` (placeholders)
 
-**Step 1: Write failing test** (`crates/xscore/src/core/id.rs` top)
+**Step 1: Write failing tests** (`id.rs` top)
 
 ```rust
 #[cfg(test)]
@@ -286,26 +344,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_id_roundtrip_via_string() {
-        let id = SessionId::new();
+    fn link_id_roundtrip_via_string() {
+        let id = LinkId::new();
         let s = id.to_string();
-        let parsed = SessionId::parse(&s).unwrap();
+        let parsed = LinkId::parse(&s).unwrap();
         assert_eq!(id, parsed);
     }
 
     #[test]
-    fn session_id_parse_rejects_garbage() {
-        assert!(SessionId::parse("not-a-uuid").is_err());
+    fn pane_id_roundtrip_via_string() {
+        let id = PaneId::new();
+        let s = id.to_string();
+        let parsed = PaneId::parse(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn link_and_pane_ids_distinct_types() {
+        // LinkId and PaneId share string form but are distinct newtypes.
+        let lid = LinkId::parse("01928e0a-7d10-7000-8000-000000000000").unwrap();
+        let pid = PaneId::parse("01928e0a-7d10-7000-8000-000000000001").unwrap();
+        // cannot compare directly (different types); just exercise parse.
+        let _ = (lid, pid);
     }
 }
 ```
 
-**Step 2: Run test to verify failure**
-
-Run: `cargo test -p xscore core::id`
-Expected: FAIL — `SessionId` not defined.
-
-**Step 3: Implement `SessionId`**
+**Step 2: Implement IDs**
 
 ```rust
 // core/id.rs
@@ -313,43 +378,112 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(Uuid);
+macro_rules! uuid_newtype {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
 
-impl SessionId {
-    pub fn new() -> Self { Self(Uuid::now_v7()) }
-    pub fn as_uuid(&self) -> Uuid { self.0 }
-    pub fn parse(s: &str) -> Result<Self, uuid::Error> {
-        Ok(Self(Uuid::parse(s)?))
-    }
+        impl $name {
+            pub fn new() -> Self { Self(Uuid::now_v7()) }
+            pub fn as_uuid(&self) -> Uuid { self.0 }
+            pub fn parse(s: &str) -> Result<Self, uuid::Error> {
+                Ok(Self(Uuid::parse(s)?))
+            }
+        }
+
+        impl Default for $name { fn default() -> Self { Self::new() } }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { self.0.fmt(f) }
+        }
+    };
 }
 
-impl Default for SessionId {
-    fn default() -> Self { Self::new() }
+uuid_newtype!(LinkId);
+uuid_newtype!(PaneId);
+```
+
+**Step 3: Implement `LinkAddress`** (`core/address.rs`)
+
+```rust
+// core/address.rs
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum LinkAddress {
+    Shell { command: String, args: Vec<String> },
+    Serial { path: String },
+    Ssh { host: String, port: u16, user: String, identity: Option<String>, proxy: Option<String> },
 }
 
-impl fmt::Display for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+impl LinkAddress {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LinkAddress::Shell { .. } => "shell",
+            LinkAddress::Serial { .. } => "serial",
+            LinkAddress::Ssh { .. } => "ssh",
+        }
     }
 }
 ```
 
-**Step 4: Implement `core::Error`**
+**Step 4: Failing test for LinkAddress**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_address_equal_when_full_tuple_matches() {
+        let a = LinkAddress::Ssh {
+            host: "h".into(), port: 22, user: "u".into(),
+            identity: Some("id".into()), proxy: None,
+        };
+        let b = LinkAddress::Ssh {
+            host: "h".into(), port: 22, user: "u".into(),
+            identity: Some("id".into()), proxy: None,
+        };
+        assert_eq!(a, b);
+        let mut h = std::collections::HashSet::new();
+        h.insert(a.clone()); h.insert(b.clone());
+        assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn ssh_address_different_when_port_differs() {
+        let a = LinkAddress::Ssh {
+            host: "h".into(), port: 22, user: "u".into(),
+            identity: None, proxy: None,
+        };
+        let b = LinkAddress::Ssh {
+            host: "h".into(), port: 2222, user: "u".into(),
+            identity: None, proxy: None,
+        };
+        assert_ne!(a, b);
+    }
+}
+```
+
+**Step 5: Implement `core::Error`**
 
 ```rust
 // core/error.rs
 use thiserror::Error;
-use super::id::SessionId;
+use super::id::{LinkId, PaneId};
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("session not found: {0}")]
-    NotFound(SessionId),
+    #[error("link not found: {0}")]
+    LinkNotFound(LinkId),
 
-    #[error("session already exists: {0}")]
-    AlreadyExists(String),
+    #[error("pane not found: {0}")]
+    PaneNotFound(PaneId),
+
+    #[error("--link=existing not supported for transport: {0}")]
+    LinkExistingUnsupported(&'static str),
 
     #[error("url parse error: {0}")]
     Url(String),
@@ -376,49 +510,54 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 ```
 
-**Step 5: `core/mod.rs`**
+**Step 6: `core/mod.rs`**
 
 ```rust
+pub mod address;
 pub mod error;
 pub mod id;
-pub mod manager;       // placeholder
-pub mod registry;      // placeholder
-pub mod session;       // placeholder
+pub mod link;
+pub mod link_registry;
+pub mod manager;
+pub mod pane;
+pub mod pane_registry;
 
+pub use address::LinkAddress;
 pub use error::{Error, Result};
-pub use id::SessionId;
+pub use id::{LinkId, PaneId};
 ```
 
-**Step 6: Run tests**
+**Step 7: Run tests**
 
-Run: `cargo test -p xscore`
-Expected: 2 passed.
+Run: `cargo test -p xscore core::id core::address`
+Expected: 4 passed.
 
-**Step 7: Commit**
+**Step 8: Commit**
 
 ```bash
 git add crates/xscore/src/core/
-git commit -m "feat(core): add SessionId (uuid v7), Error enum with Transport/Sink variants"
+git commit -m "feat(core): LinkId/PaneId (uuid v7) + LinkAddress + Error"
 ```
 
 ---
 
-#### Task 3: URL → TransportConfig + SinkConfig parsing
+#### Task 3: URL → ConnectSpec + LinkAddress
 
-**Objective:** Pure parser for `xscore connect <url>` → `ConnectSpec`. No I/O.
+**Objective:** Pure parser for `xscore connect <url>` → `(ConnectSpec, LinkAddress)`.
 
 **Files:**
-- Create: `crates/xscore/src/model/session.rs` (TransportConfig, SinkConfig, ConnectSpec, SessionInfo)
+- Create: `crates/xscore/src/model/session.rs`
 - Create: `crates/xscore/src/model/mod.rs`
 - Create: `crates/xscore/src/url/mod.rs`
 - Create: `crates/xscore/src/url/scheme.rs` (placeholder)
 - Create: `crates/xscore/src/url/connect.rs`
 
-**Step 1: Define config types** (in `model/session.rs`)
+**Step 1: Define config types** (`model/session.rs`)
 
 ```rust
 // model/session.rs
 use serde::{Deserialize, Serialize};
+use crate::core::{LinkAddress, LinkId, PaneId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -433,7 +572,6 @@ pub enum TransportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "sink", rename_all = "snake_case")]
 pub enum SinkConfig {
-    /// Tmux sink. `mode`: "local" | "remote" | "auto" | "off".
     Tmux {
         #[serde(default = "default_tmux_mode")]
         mode: String,
@@ -460,65 +598,65 @@ pub struct ConnectSpec {
 fn default_name() -> String { uuid::Uuid::now_v7().to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SessionInfo {
-    pub id: super::super::core::SessionId,
+pub struct LinkInfo {
+    pub id: LinkId,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    pub address: LinkAddress,
     pub transport: TransportConfig,
     pub sink: SinkConfig,
 }
 
-impl SessionInfo {
-    pub fn transport_str(&self) -> &'static str {
-        match &self.transport {
-            TransportConfig::Shell { .. } => "shell",
-            TransportConfig::Serial { .. } => "serial",
-            TransportConfig::Ssh { .. } => "ssh",
-        }
-    }
+impl LinkInfo {
+    pub fn transport_str(&self) -> &'static str { self.address.kind() }
     pub fn sink_str(&self) -> &'static str {
         match &self.sink {
             SinkConfig::Tmux { .. } => "tmux",
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PaneInfo {
+    pub id: PaneId,
+    pub link_id: LinkId,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub sink_handle: String,    // e.g. "%42"
+    pub pane_index: u32,        // 0-based, set by sink
+}
 ```
 
-**Step 2: Write failing test for URL parsing**
+**Step 2: Write failing tests**
 
 ```rust
-// url/connect.rs (test module)
+// url/connect.rs (test)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{SinkConfig, TransportConfig};
+    use crate::core::LinkAddress;
 
     #[test]
-    fn parse_ssh_url_with_tmux_on() {
-        let s = parse("ssh://root@10.0.0.1:22?identity=~/.ssh/id_ed25519&tmux=on").unwrap();
-        match s.transport {
-            TransportConfig::Ssh { ref host, port, ref user, .. } => {
-                assert_eq!(host, "10.0.0.1"); assert_eq!(port, 22); assert_eq!(user, "root");
-            }
-            _ => panic!("expected ssh"),
-        }
-        match s.sink { SinkConfig::Tmux { mode, .. } => assert_eq!(mode, "auto"), }
+    fn parse_ssh_url_with_tmux() {
+        let (spec, addr) = parse("ssh://root@10.0.0.1:22?identity=~/.ssh/id_ed25519").unwrap();
+        assert!(matches!(spec.transport, TransportConfig::Ssh { .. }));
+        assert_eq!(addr, LinkAddress::Ssh {
+            host: "10.0.0.1".into(), port: 22, user: "root".into(),
+            identity: Some("~/.ssh/id_ed25519".into()), proxy: None,
+        });
     }
 
     #[test]
-    fn parse_shell_url() {
-        let s = parse("shell:///bin/bash").unwrap();
-        assert!(matches!(s.transport, TransportConfig::Shell { .. }));
+    fn parse_shell_url_yields_shell_address() {
+        let (_, addr) = parse("shell:///bin/bash").unwrap();
+        assert_eq!(addr, LinkAddress::Shell { command: "/bin/bash".into(), args: vec![] });
     }
 
     #[test]
-    fn parse_serial_url_with_query() {
-        let s = parse("serial:///dev/ttyUSB0?baud=115200&data_bits=8").unwrap();
-        match s.transport {
-            TransportConfig::Serial { ref path, baud, data_bits, .. } => {
-                assert_eq!(path, "/dev/ttyUSB0"); assert_eq!(baud, 115200); assert_eq!(data_bits, 8);
-            }
-            _ => panic!("expected serial"),
-        }
+    fn parse_serial_url_yields_serial_address() {
+        let (_, addr) = parse("serial:///dev/ttyUSB0?baud=115200").unwrap();
+        assert_eq!(addr, LinkAddress::Serial { path: "/dev/ttyUSB0".into() });
     }
 
     #[test]
@@ -527,22 +665,23 @@ mod tests {
     }
 
     #[test]
-    fn tmux_query_overrides_sink_mode() {
-        let s = parse("ssh://u@h:22?tmux=off").unwrap();
-        match s.sink { SinkConfig::Tmux { mode, .. } => assert_eq!(mode, "off"), }
+    fn ssh_with_different_identity_different_address() {
+        let (_, a1) = parse("ssh://u@h:22?identity=k1").unwrap();
+        let (_, a2) = parse("ssh://u@h:22?identity=k2").unwrap();
+        assert_ne!(a1, a2);
     }
 }
 ```
 
-**Step 3: Implement URL parser**
+**Step 3: Implement parser**
 
 ```rust
 // url/connect.rs
-use crate::core::{Error, Result};
+use crate::core::{Error, LinkAddress, Result};
 use crate::model::{ConnectSpec, SinkConfig, TransportConfig};
 use std::collections::HashMap;
 
-pub fn parse(s: &str) -> Result<ConnectSpec> {
+pub fn parse(s: &str) -> Result<(ConnectSpec, LinkAddress)> {
     let url = url::Url::parse(s).map_err(|e| Error::Url(e.to_string()))?;
     let scheme = url.scheme();
     let host = url.host_str().map(|s| s.to_string());
@@ -553,11 +692,12 @@ pub fn parse(s: &str) -> Result<ConnectSpec> {
     let tmux_mode = pairs.remove("tmux").unwrap_or_else(|| "auto".into());
     let name = pairs.remove("name").unwrap_or_default();
 
-    let transport = match scheme {
+    let (transport, address) = match scheme {
         "shell" | "sh" => {
-            let path = url.path().trim_start_matches('/').to_string();
-            if path.is_empty() { return Err(Error::Url("shell URL needs command".into())); }
-            TransportConfig::Shell { command: path, args: vec![], cwd: None }
+            let command = url.path().trim_start_matches('/').to_string();
+            if command.is_empty() { return Err(Error::Url("shell URL needs command".into())); }
+            (TransportConfig::Shell { command: command.clone(), args: vec![], cwd: None },
+             LinkAddress::Shell { command, args: vec![] })
         }
         "serial" => {
             let path = url.path().to_string();
@@ -570,7 +710,8 @@ pub fn parse(s: &str) -> Result<ConnectSpec> {
             let parity = pairs.remove("parity").unwrap_or_else(|| "n".into());
             let stop_bits: u8 = pairs.remove("stop_bits").unwrap_or_else(|| "1".into()).parse()
                 .map_err(|e: std::num::ParseIntError| Error::Url(e.to_string()))?;
-            TransportConfig::Serial { path, baud, data_bits, parity, stop_bits }
+            (TransportConfig::Serial { path: path.clone(), baud, data_bits, parity, stop_bits },
+             LinkAddress::Serial { path })
         }
         "ssh" => {
             let host = host.ok_or_else(|| Error::Url("ssh URL needs host".into()))?;
@@ -578,7 +719,9 @@ pub fn parse(s: &str) -> Result<ConnectSpec> {
             let port = url.port().unwrap_or(22);
             let identity = pairs.remove("identity");
             let proxy = pairs.remove("proxy");
-            TransportConfig::Ssh { host, port, user, identity, proxy }
+            (TransportConfig::Ssh { host: host.clone(), port, user: user.clone(),
+                                   identity: identity.clone(), proxy: proxy.clone() },
+             LinkAddress::Ssh { host, port, user, identity, proxy })
         }
         other => return Err(Error::Url(format!("unknown scheme: {other}"))),
     };
@@ -588,7 +731,7 @@ pub fn parse(s: &str) -> Result<ConnectSpec> {
         session_name: (!name.is_empty()).then(|| name.clone()),
     };
 
-    Ok(ConnectSpec { name, transport, sink })
+    Ok((ConnectSpec { name, transport, sink }, address))
 }
 ```
 
@@ -600,18 +743,13 @@ pub mod scheme;
 pub use connect::parse;
 ```
 
-```rust
-// url/scheme.rs  (placeholder for future per-scheme validation)
-// (empty)
-```
-
-**Step 4: Update `model/mod.rs`** to export.
+**Step 4: Update `model/mod.rs`**
 
 ```rust
 pub mod session;
 pub mod config;       // placeholder
 
-pub use session::{ConnectSpec, SessionInfo, SinkConfig, TransportConfig};
+pub use session::{ConnectSpec, LinkInfo, PaneInfo, SinkConfig, TransportConfig};
 ```
 
 **Step 5: Run tests**
@@ -623,34 +761,34 @@ Expected: 5 passing.
 
 ```bash
 git add crates/xscore/src/url/ crates/xscore/src/model/
-git commit -m "feat(url): parse connect URL into TransportConfig + SinkConfig"
+git commit -m "feat(url): parse connect URL into (ConnectSpec, LinkAddress)"
 ```
 
 ---
 
 #### Task 4: Transport trait + echo stub
 
-**Objective:** Define `Transport` async trait with `open/write/read/resize/close`. Echo impl for tests.
+**Objective:** Define `Transport` async trait with `address()` for dedup.
 
 **Files:**
 - Create: `crates/xscore/src/transport/mod.rs`
 - Create: `crates/xscore/src/transport/{shell,serial,ssh}.rs` (stubs)
 - Create: `crates/xscore/src/transport/factory.rs` (placeholder)
 
-**Step 1: Write failing test**
+**Step 1: Failing test**
 
 ```rust
-// transport/mod.rs (test module)
+// transport/mod.rs (test)
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
 
     struct Echo;
-
     #[async_trait]
     impl Transport for Echo {
         fn kind(&self) -> &'static str { "echo" }
+        fn address(&self) -> LinkAddress { LinkAddress::Shell { command: "echo".into(), args: vec![] } }
         async fn open(&mut self) -> Result<()> { Ok(()) }
         async fn write(&self, data: &[u8]) -> Result<usize> { Ok(data.len()) }
         async fn read(&self, _buf: &mut [u8]) -> Result<usize> { Ok(0) }
@@ -659,7 +797,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_transport_writes_through() {
+    async fn echo_transport_roundtrip() {
         let mut t = Echo;
         t.open().await.unwrap();
         assert_eq!(t.write(b"hi").await.unwrap(), 2);
@@ -672,12 +810,13 @@ mod tests {
 
 ```rust
 // transport/mod.rs
-use crate::core::Result;
+use crate::core::{LinkAddress, Result};
 use async_trait::async_trait;
 
 #[async_trait]
 pub trait Transport: Send + Sync {
     fn kind(&self) -> &'static str;
+    fn address(&self) -> LinkAddress;
     async fn open(&mut self) -> Result<()>;
     async fn write(&self, data: &[u8]) -> Result<usize>;
     async fn read(&self, buf: &mut [u8]) -> Result<usize>;
@@ -691,8 +830,6 @@ pub mod shell;
 pub mod ssh;
 ```
 
-Stub modules contain `// Transport stub` only.
-
 **Step 3: Run tests**
 
 Run: `cargo test -p xscore transport`
@@ -702,14 +839,14 @@ Expected: 1 passing.
 
 ```bash
 git add crates/xscore/src/transport/
-git commit -m "feat(transport): Transport async trait + echo stub"
+git commit -m "feat(transport): Transport async trait with address()"
 ```
 
 ---
 
-#### Task 5: Sink trait + tmux + raw + factory
+#### Task 5: Sink trait with per-pane ops + TmuxSink + RawSink
 
-**Objective:** Define `Sink` trait; implement TmuxSink on external tmux socket; RawSink stub for `tmux=off`. Factory decides mode (local vs remote vs raw) from `SinkConfig` + transport kind.
+**Objective:** Define `Sink` trait with `new_pane`/`close_pane`/`list_panes`/`snapshot(pane_handle, ...)`/`write(pane_handle, ...)`/`resize(pane_handle, ...)`. TmuxSink wraps tmux; RawSink stub.
 
 **Files:**
 - Create: `crates/xscore/src/sink/mod.rs`
@@ -719,57 +856,24 @@ git commit -m "feat(transport): Transport async trait + echo stub"
 - Create: `crates/xscore/src/util/mod.rs`
 - Create: `crates/xscore/src/util/tmux_socket.rs`
 
-**Step 1: Write failing test for tmux_socket helper**
-
-```rust
-// util/tmux_socket.rs (test)
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_socket_is_xscore() {
-        let prev = std::env::var("XSCORE_SOCKET").ok();
-        std::env::remove_var("XSCORE_SOCKET");
-        assert_eq!(socket_name(), "xscore");
-        if let Some(v) = prev { std::env::set_var("XSCORE_SOCKET", v); }
-    }
-
-    #[test]
-    fn override_socket_via_env() {
-        std::env::set_var("XSCORE_SOCKET", "xscore-test");
-        assert_eq!(socket_name(), "xscore-test");
-        std::env::remove_var("XSCORE_SOCKET");
-    }
-}
-```
-
-**Step 2: Implement socket helper**
+**Step 1: socket helper**
 
 ```rust
 // util/tmux_socket.rs
 pub const DEFAULT_SOCKET: &str = "xscore";
-
 pub fn socket_name() -> String {
     std::env::var("XSCORE_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.to_string())
 }
-
-pub fn tmux_arg_socket() -> Vec<String> {
-    vec!["-L".into(), socket_name()]
-}
+pub fn tmux_arg_socket() -> Vec<String> { vec!["-L".into(), socket_name()] }
 ```
-
-`util/mod.rs`:
 
 ```rust
+// util/mod.rs
 pub mod tmux_socket;
-pub use tmux_socket::{socket_name as _socket_name_impl};
-pub use tmux_socket::tmux_arg_socket;
+pub use tmux_socket::{socket_name, tmux_arg_socket};
 ```
 
-(Note: `socket_name` re-export collides if used at sink/util boundary — keep consumers referring to `tmux_arg_socket` only.)
-
-**Step 3: Write failing test for Sink trait**
+**Step 2: Failing test for Sink**
 
 ```rust
 // sink/mod.rs (test)
@@ -783,26 +887,27 @@ mod tests {
     #[async_trait]
     impl Sink for Noop {
         fn kind(&self) -> &'static str { "noop" }
-        async fn attach(&mut self, _t: &dyn Transport) -> Result<()> { Ok(()) }
-        async fn write(&self, data: &[u8]) -> Result<usize> { Ok(data.len()) }
-        async fn snapshot(&self, _buf: &mut [u8]) -> Result<usize> { Ok(0) }
-        async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
+        async fn attach(&mut self, _: &dyn Transport) -> Result<()> { Ok(()) }
+        async fn new_pane(&self) -> Result<String> { Ok("pane-stub".into()) }
+        async fn close_pane(&self, _: &str) -> Result<()> { Ok(()) }
+        async fn list_panes(&self) -> Result<Vec<String>> { Ok(vec![]) }
+        async fn snapshot(&self, _: &str, _: &mut [u8]) -> Result<usize> { Ok(0) }
+        async fn write(&self, _: &str, data: &[u8]) -> Result<usize> { Ok(data.len()) }
+        async fn resize(&self, _: &str, _: u16, _: u16) -> Result<()> { Ok(()) }
         async fn close(&self) -> Result<()> { Ok(()) }
     }
 
     #[tokio::test]
-    async fn noop_sink_attaches_and_writes() {
-        let mut s = Noop;
-        let t = crate::transport::tests_only::EchoStub;
-        s.attach(&t).await.unwrap();
-        assert_eq!(s.write(b"x").await.unwrap(), 1);
+    async fn noop_sink_creates_and_closes_pane() {
+        let s = Noop;
+        let p = s.new_pane().await.unwrap();
+        assert_eq!(p, "pane-stub");
+        s.close_pane(&p).await.unwrap();
     }
 }
 ```
 
-(For `crate::transport::tests_only::EchoStub` see the dev-helper note in step 4.)
-
-**Step 4: Implement Sink trait**
+**Step 3: Implement Sink trait**
 
 ```rust
 // sink/mod.rs
@@ -813,10 +918,15 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait Sink: Send + Sync {
     fn kind(&self) -> &'static str;
+    /// Wire this sink to the link's transport. Called once per link lifetime.
     async fn attach(&mut self, transport: &dyn Transport) -> Result<()>;
-    async fn write(&self, data: &[u8]) -> Result<usize>;
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
+    /// Open a new pane inside this link. Returns sink-side handle.
+    async fn new_pane(&self) -> Result<String>;
+    async fn close_pane(&self, pane_handle: &str) -> Result<()>;
+    async fn list_panes(&self) -> Result<Vec<String>>;
+    async fn snapshot(&self, pane_handle: &str, buf: &mut [u8]) -> Result<usize>;
+    async fn write(&self, pane_handle: &str, data: &[u8]) -> Result<usize>;
+    async fn resize(&self, pane_handle: &str, cols: u16, rows: u16) -> Result<()>;
     async fn close(&self) -> Result<()>;
 }
 
@@ -825,7 +935,7 @@ pub mod raw;
 pub mod tmux;
 ```
 
-**Step 5: TmuxSink**
+**Step 4: TmuxSink**
 
 ```rust
 // sink/tmux.rs
@@ -836,8 +946,8 @@ use async_trait::async_trait;
 use tokio::process::Command;
 
 pub struct TmuxSink {
-    pub mode: String,           // "local" | "remote" (post-resolution)
-    pub session_name: String,
+    pub mode: String,             // "local" | "remote" (post-resolution)
+    pub session_name: String,     // tmux server session name == the link key
 }
 
 impl TmuxSink {
@@ -854,6 +964,12 @@ impl TmuxSink {
         }
         Ok(Self { mode: mode.into(), session_name: session_name.into() })
     }
+
+    fn tmux(&self) -> Command {
+        let mut c = Command::new("tmux");
+        c.args(tmux_arg_socket());
+        c
+    }
 }
 
 #[async_trait]
@@ -861,26 +977,45 @@ impl super::Sink for TmuxSink {
     fn kind(&self) -> &'static str { "tmux" }
 
     async fn attach(&mut self, _transport: &dyn Transport) -> Result<()> {
-        // Wiring is done in create(); attach is reserved for future sink modes that
-        // need transport IO after the fact (e.g. ssh channel gets tmux ssh channel pipe).
+        // tmux already running on its own socket; attach is reserved for ssh-channel
+        // wiring in the SSH-integration PR. No-op for now.
         Ok(())
     }
 
-    async fn write(&self, data: &[u8]) -> Result<usize> {
-        let s = std::str::from_utf8(data).map_err(|e| Error::Invalid(e.to_string()))?;
-        let mut cmd = Command::new("tmux");
-        cmd.args(tmux_arg_socket());
-        cmd.arg("send-keys").arg("-t").arg(&self.session_name);
-        for ch in s.chars() { cmd.arg(ch.to_string()); }
-        let status = cmd.status().await?;
-        if !status.success() { return Err(Error::Sink(format!("send-keys exit {status}"))); }
-        Ok(data.len())
+    async fn new_pane(&self) -> Result<String> {
+        // tmux new-window returns pane id like "%42"; we capture stdout
+        let out = self.tmux()
+            .args(["new-window", "-t", &self.session_name, "-P", "-F", "#{pane_id}"])
+            .output().await?;
+        if !out.status.success() {
+            return Err(Error::Sink(format!("tmux new-window: {:?}", out.status)));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize> {
-        let out = Command::new("tmux")
-            .args(tmux_arg_socket())
-            .args(["capture-pane", "-p", "-t", &self.session_name, "-J"])
+    async fn close_pane(&self, pane_handle: &str) -> Result<()> {
+        let status = self.tmux()
+            .args(["kill-pane", "-t", pane_handle])
+            .status().await?;
+        if !status.success() {
+            return Err(Error::Sink(format!("kill-pane exit {status}")));
+        }
+        Ok(())
+    }
+
+    async fn list_panes(&self) -> Result<Vec<String>> {
+        let out = self.tmux()
+            .args(["list-panes", "-t", &self.session_name, "-F", "#{pane_id}"])
+            .output().await?;
+        if !out.status.success() {
+            return Err(Error::Sink(format!("list-panes exit {:?}", out.status)));
+        }
+        Ok(out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    }
+
+    async fn snapshot(&self, pane_handle: &str, buf: &mut [u8]) -> Result<usize> {
+        let out = self.tmux()
+            .args(["capture-pane", "-p", "-t", pane_handle, "-J"])
             .output().await?;
         if !out.status.success() {
             return Err(Error::Sink(format!("capture-pane exit {:?}", out.status)));
@@ -891,19 +1026,27 @@ impl super::Sink for TmuxSink {
         Ok(n)
     }
 
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let status = Command::new("tmux")
-            .args(tmux_arg_socket())
-            .args(["resize-window", "-t", &self.session_name,
+    async fn write(&self, pane_handle: &str, data: &[u8]) -> Result<usize> {
+        let s = std::str::from_utf8(data).map_err(|e| Error::Invalid(e.to_string()))?;
+        let mut cmd = self.tmux();
+        cmd.arg("send-keys").arg("-t").arg(pane_handle);
+        for ch in s.chars() { cmd.arg(ch.to_string()); }
+        let status = cmd.status().await?;
+        if !status.success() { return Err(Error::Sink(format!("send-keys exit {status}"))); }
+        Ok(data.len())
+    }
+
+    async fn resize(&self, pane_handle: &str, cols: u16, rows: u16) -> Result<()> {
+        let status = self.tmux()
+            .args(["resize-pane", "-t", pane_handle,
                    "-x", &cols.to_string(), "-y", &rows.to_string()])
             .status().await?;
-        if !status.success() { return Err(Error::Sink(format!("resize exit {status}"))); }
+        if !status.success() { return Err(Error::Sink(format!("resize-pane exit {status}"))); }
         Ok(())
     }
 
     async fn close(&self) -> Result<()> {
-        let _ = Command::new("tmux")
-            .args(tmux_arg_socket())
+        let _ = self.tmux()
             .args(["kill-session", "-t", &self.session_name])
             .status().await?;
         Ok(())
@@ -911,7 +1054,7 @@ impl super::Sink for TmuxSink {
 }
 ```
 
-**Step 6: RawSink** (`sink/raw.rs`)
+**Step 5: RawSink** (one pane per link; no-op semantics)
 
 ```rust
 // sink/raw.rs
@@ -919,22 +1062,23 @@ use crate::core::Result;
 use crate::transport::Transport;
 use async_trait::async_trait;
 
-/// Passthrough sink for `tmux=off` (or auto-resolved to off). Today a no-op
-/// stub; future PR wires direct transport I/O passthrough.
 pub struct RawSink;
 
 #[async_trait]
 impl super::Sink for RawSink {
     fn kind(&self) -> &'static str { "raw" }
     async fn attach(&mut self, _: &dyn Transport) -> Result<()> { Ok(()) }
-    async fn write(&self, _: &[u8]) -> Result<usize> { Ok(0) }
-    async fn snapshot(&self, _: &mut [u8]) -> Result<usize> { Ok(0) }
-    async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
+    async fn new_pane(&self) -> Result<String> { Ok("raw-pane-0".into()) }
+    async fn close_pane(&self, _: &str) -> Result<()> { Ok(()) }
+    async fn list_panes(&self) -> Result<Vec<String>> { Ok(vec!["raw-pane-0".into()]) }
+    async fn snapshot(&self, _: &str, _: &mut [u8]) -> Result<usize> { Ok(0) }
+    async fn write(&self, _: &str, _: &[u8]) -> Result<usize> { Ok(0) }
+    async fn resize(&self, _: &str, _: u16, _: u16) -> Result<()> { Ok(()) }
     async fn close(&self) -> Result<()> { Ok(()) }
 }
 ```
 
-**Step 7: Factory** (`sink/factory.rs`)
+**Step 6: factory**
 
 ```rust
 // sink/factory.rs
@@ -966,243 +1110,168 @@ pub async fn sink_for(
 }
 ```
 
-Add `pub mod factory;` in `sink/mod.rs`.
-
-**Step 8: Run tests**
+**Step 7: Run tests**
 
 Run: `cargo test -p xscore sink:: util::`
-Expected: sink test + util tests pass.
+Expected: passing.
 
-**Step 9: Commit**
+**Step 8: Commit**
 
 ```bash
 git add crates/xscore/src/sink/ crates/xscore/src/util/
-git commit -m "feat(sink): Sink trait + TmuxSink + RawSink + sink_for factory"
+git commit -m "feat(sink): Sink trait with per-pane ops + TmuxSink (multi-pane) + RawSink"
 ```
 
 ---
 
-#### Task 6: Composite SessionBackend + SessionManager
+#### Task 6: Link + Pane + Registries + SessionManager
 
-**Objective:** Glue Transport + Sink into one `SessionBackend` (for SessionManager). SessionManager uses the composite, never sees the layers.
+**Objective:** LinkRegistry (address-keyed dedup), PaneRegistry, BackendRegistry, SessionManager that knows about all three.
 
 **Files:**
-- Create: `crates/xscore/src/core/session.rs`
+- Create: `crates/xscore/src/core/link.rs`
+- Create: `crates/xscore/src/core/pane.rs`
+- Create: `crates/xscore/src/core/link_registry.rs`
+- Create: `crates/xscore/src/core/pane_registry.rs`
 - Create: `crates/xscore/src/backends/mod.rs`
 - Create: `crates/xscore/src/backends/composite.rs`
-- Create: `crates/xscore/src/transport/factory.rs` (real impl, replaces placeholder)
-- Modify: `crates/xscore/src/core/registry.rs`
+- Create: `crates/xscore/src/transport/factory.rs` (real impl)
 - Modify: `crates/xscore/src/core/manager.rs`
-- Modify: `crates/xscore/src/core/mod.rs`
 
-**Step 1: Define `core::Session`** (`core/session.rs`)
-
-```rust
-// core/session.rs
-use crate::transport::Transport;
-use crate::sink::Sink;
-
-pub struct Session {
-    pub transport: Box<dyn Transport>,
-    pub sink: Box<dyn Sink>,
-}
-```
-
-**Step 2: SessionBackend trait** (`backends/mod.rs`)
+**Step 1: Link** (`core/link.rs`)
 
 ```rust
-// backends/mod.rs
-use crate::core::Result;
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait SessionBackend: Send + Sync {
-    /// Snapshot current displayed output (composite: sink first).
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;
-
-    /// Write bytes downstream via sink (PTY/ANSI semantics).
-    async fn write(&self, data: &[u8]) -> Result<usize>;
-
-    /// Forward bytes upstream directly to the transport (bypass sink).
-    async fn write_raw(&self, data: &[u8]) -> Result<usize>;
-
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
-    async fn close(&self) -> Result<()>;
-}
-
-pub mod composite;
-```
-
-**Step 3: Composite impl** (`backends/composite.rs`)
-
-```rust
-// backends/composite.rs
-use crate::core::session::Session;
-use crate::core::Result;
-use async_trait::async_trait;
+// core/link.rs
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use super::id::{LinkId, PaneId};
+use crate::model::LinkInfo;
+use crate::sink::Sink;
+use crate::transport::Transport;
 
-pub struct CompositeBackend {
-    inner: Arc<Mutex<Session>>,
+pub struct Link {
+    pub id: LinkId,
+    pub info: LinkInfo,
+    pub transport: Box<dyn Transport>,
+    pub sink: Box<dyn Sink>,
+    pub panes: Mutex<Vec<PaneId>>,
 }
 
-impl CompositeBackend {
-    pub fn new(session: Session) -> Self {
-        Self { inner: Arc::new(Mutex::new(session)) }
-    }
+pub type ArcLink = Arc<Link>;
+```
+
+**Step 2: Pane** (`core/pane.rs`)
+
+```rust
+// core/pane.rs
+use super::id::{LinkId, PaneId};
+use crate::model::PaneInfo;
+
+pub struct Pane {
+    pub info: PaneInfo,
 }
 
-#[async_trait]
-impl super::SessionBackend for CompositeBackend {
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize> {
-        let g = self.inner.lock().await;
-        g.sink.snapshot(buf).await
-    }
-
-    async fn write(&self, data: &[u8]) -> Result<usize> {
-        let g = self.inner.lock().await;
-        g.sink.write(data).await
-    }
-
-    async fn write_raw(&self, data: &[u8]) -> Result<usize> {
-        let g = self.inner.lock().await;
-        g.transport.write(data).await
-    }
-
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let g = self.inner.lock().await;
-        g.transport.resize(cols, rows).await?;
-        g.sink.resize(cols, rows).await?;
-        Ok(())
-    }
-
-    async fn close(&self) -> Result<()> {
-        let mut g = self.inner.lock().await;
-        let _ = g.sink.close().await;
-        g.transport.close().await?;
-        Ok(())
-    }
+impl Pane {
+    pub fn id(&self) -> PaneId { self.info.id }
+    pub fn link_id(&self) -> LinkId { self.info.link_id }
 }
 ```
 
-**Step 4: Registry** (`core/registry.rs`)
+**Step 3: LinkRegistry** (`core/link_registry.rs`)
 
 ```rust
-// core/registry.rs
+// core/link_registry.rs
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use super::id::SessionId;
-use crate::model::SessionInfo;
+use super::address::LinkAddress;
+use super::id::LinkId;
+use super::link::{ArcLink, Link};
 
 #[derive(Default)]
-pub struct Registry {
-    inner: RwLock<Vec<(SessionId, SessionInfo)>>,
+pub struct LinkRegistry {
+    inner: RwLock<LinkRegistryInner>,
 }
 
-impl Registry {
+#[derive(Default)]
+struct LinkRegistryInner {
+    by_id: HashMap<LinkId, ArcLink>,
+    by_address: HashMap<LinkAddress, LinkId>,
+}
+
+impl LinkRegistry {
     pub fn new() -> Self { Self::default() }
 
-    pub async fn insert(&self, id: SessionId, info: SessionInfo) { self.inner.write().await.push((id, info)); }
-    pub async fn list(&self) -> Vec<(SessionId, SessionInfo)> { self.inner.read().await.clone() }
-    pub async fn get(&self, id: SessionId) -> Option<SessionInfo> {
-        self.inner.read().await.iter().find(|(k, _)| *k == id).map(|(_, v)| v.clone())
-    }
-    pub async fn remove(&self, id: SessionId) -> Option<SessionInfo> {
+    pub async fn insert(&self, link: Link) -> ArcLink {
+        let id = link.id;
+        let address = link.info.address.clone();
+        let arc = Arc::new(link);
         let mut g = self.inner.write().await;
-        let pos = g.iter().position(|(k, _)| *k == id)?;
-        Some(g.remove(pos).1)
+        g.by_address.insert(address, id);
+        g.by_id.insert(id, arc.clone());
+        arc
+    }
+
+    pub async fn get(&self, id: LinkId) -> Option<ArcLink> {
+        self.inner.read().await.by_id.get(&id).cloned()
+    }
+
+    pub async fn find_by_address(&self, address: &LinkAddress) -> Option<ArcLink> {
+        let g = self.inner.read().await;
+        let id = g.by_address.get(address).copied()?;
+        g.by_id.get(&id).cloned()
+    }
+
+    pub async fn list(&self) -> Vec<ArcLink> {
+        self.inner.read().await.by_id.values().cloned().collect()
+    }
+
+    pub async fn remove(&self, id: LinkId) -> Option<ArcLink> {
+        let mut g = self.inner.write().await;
+        let arc = g.by_id.remove(&id)?;
+        let info = &arc.info;
+        let addr = info.address.clone();
+        // only delete from by_address if still pointing at this id (id may have been re-inserted)
+        if g.by_address.get(&addr) == Some(&id) {
+            g.by_address.remove(&addr);
+        }
+        Some(arc)
     }
 }
-
-pub type ArcRegistry = Arc<Registry>;
 ```
 
-**Step 5: SessionManager** (`core/manager.rs`)
+**Step 4: PaneRegistry** (`core/pane_registry.rs`)
 
 ```rust
-// core/manager.rs
+// core/pane_registry.rs
+use std::collections::HashMap;
 use std::sync::Arc;
-use super::{Error, Result, SessionId};
-use super::registry::Registry;
-use super::session::Session as CoreSession;
-use crate::backends::SessionBackend;
-use crate::backends::composite::CompositeBackend;
-use crate::model::{ConnectSpec, SessionInfo};
-use crate::sink::factory::sink_for;
-use crate::transport::factory as transport_factory;
+use tokio::sync::RwLock;
+use super::id::{LinkId, PaneId};
+use crate::model::PaneInfo;
 
-pub struct SessionManager {
-    backends: tokio::sync::RwLock<Vec<(SessionId, Arc<dyn SessionBackend>)>>,
-    registry: Arc<Registry>,
+#[derive(Default)]
+pub struct PaneRegistry {
+    inner: RwLock<HashMap<PaneId, PaneInfo>>,
 }
 
-impl Default for SessionManager {
-    fn default() -> Self { Self::new() }
-}
-
-impl SessionManager {
-    pub fn new() -> Self {
-        Self {
-            backends: tokio::sync::RwLock::new(Vec::new()),
-            registry: Arc::new(Registry::new()),
-        }
+impl PaneRegistry {
+    pub fn new() -> Self { Self::default() }
+    pub async fn insert(&self, info: PaneInfo) { self.inner.write().await.insert(info.id, info); }
+    pub async fn get(&self, id: PaneId) -> Option<PaneInfo> { self.inner.read().await.get(&id).cloned() }
+    pub async fn remove(&self, id: PaneId) -> Option<PaneInfo> { self.inner.write().await.remove(&id) }
+    pub async fn list_for_link(&self, link_id: LinkId) -> Vec<PaneInfo> {
+        self.inner.read().await.values().filter(|p| p.link_id == link_id).cloned().collect()
     }
-
-    pub async fn create(&self, spec: ConnectSpec) -> Result<SessionId> {
-        let transport_kind_for_factory = match &spec.transport {
-            crate::model::TransportConfig::Shell { .. } => "shell",
-            crate::model::TransportConfig::Serial { .. } => "serial",
-            crate::model::TransportConfig::Ssh { .. } => "ssh",
-        };
-
-        let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
-        let sink_kind_hint = transport.kind();
-        let sink = sink_for(&spec.sink, transport_kind_for_factory, transport.as_mut()).await?;
-        // attach is a no-op for current sinks but kept for forward-compat
-        let mut transport: Box<dyn crate::transport::Transport> = transport;
-        sink.attach(transport.as_mut()).await?;
-
-        let session = CoreSession { transport, sink: sink };
-        let id = SessionId::new();
-        let info = SessionInfo {
-            id,
-            name: if spec.name.is_empty() { id.to_string() } else { spec.name.clone() },
-            created_at: chrono::Utc::now(),
-            transport: spec.transport.clone(),
-            sink: spec.sink.clone(),
-        };
-        let composite: Arc<dyn SessionBackend> = Arc::new(CompositeBackend::new(session));
-        self.backends.write().await.push((id, composite));
-        self.registry.insert(id, info).await;
-        Ok(id)
-    }
-
-    pub async fn get(&self, id: SessionId) -> Result<SessionInfo> {
-        self.registry.get(id).await.ok_or(Error::NotFound(id))
-    }
-
-    pub async fn list(&self) -> Vec<(SessionId, SessionInfo)> {
-        self.registry.list().await
-    }
-
-    pub async fn backend(&self, id: SessionId) -> Result<Arc<dyn SessionBackend>> {
-        let g = self.backends.read().await;
-        g.iter().find(|(k, _)| *k == id).map(|(_, b)| b.clone())
-            .ok_or(Error::NotFound(id))
-    }
-
-    pub async fn close(&self, id: SessionId) -> Result<()> {
-        let backend = self.backend(id).await?;
-        backend.close().await?;
-        self.backends.write().await.retain(|(k, _)| *k != id);
-        self.registry.remove(id).await;
-        Ok(())
+    pub async fn list_all(&self) -> Vec<PaneInfo> {
+        self.inner.read().await.values().cloned().collect()
     }
 }
+
+pub type ArcPaneRegistry = Arc<PaneRegistry>;
 ```
 
-**Step 6: Transport factory** (`transport/factory.rs`)
+**Step 5: Transport factory** (`transport/factory.rs`)
 
 ```rust
 // transport/factory.rs
@@ -1225,17 +1294,231 @@ pub async fn transport_for(config: TransportConfig) -> Result<Box<dyn Transport>
 }
 ```
 
-**Step 7: Update `core/mod.rs`**
+**Step 6: PaneBackend + Composite** (`backends/`)
 
 ```rust
-pub mod error;
-pub mod id;
-pub mod manager;
-pub mod registry;
-pub mod session;
+// backends/mod.rs
+use crate::core::Result;
+use crate::core::PaneId;
+use async_trait::async_trait;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-pub use error::{Error, Result};
-pub use id::SessionId;
+#[async_trait]
+pub trait PaneBackend: Send + Sync {
+    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;
+    async fn write(&self, data: &[u8]) -> Result<usize>;
+    async fn write_raw(&self, data: &[u8]) -> Result<usize>;
+    async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
+    async fn close(&self) -> Result<()>;
+}
+
+#[derive(Default)]
+pub struct BackendRegistry {
+    inner: RwLock<HashMap<PaneId, Arc<dyn PaneBackend>>>,
+}
+
+impl BackendRegistry {
+    pub fn new() -> Self { Self::default() }
+    pub async fn insert(&self, id: PaneId, b: Arc<dyn PaneBackend>) { self.inner.write().await.insert(id, b); }
+    pub async fn get(&self, id: PaneId) -> Option<Arc<dyn PaneBackend>> { self.inner.read().await.get(&id).cloned() }
+    pub async fn remove(&self, id: PaneId) -> Option<Arc<dyn PaneBackend>> { self.inner.write().await.remove(&id) }
+}
+
+pub mod composite;
+```
+
+```rust
+// backends/composite.rs
+use crate::core::link::ArcLink;
+use crate::core::PaneId;
+use crate::core::Result;
+use async_trait::async_trait;
+
+pub struct CompositeBackend {
+    pane_id: PaneId,
+    link: ArcLink,
+    sink_handle: String,
+}
+
+impl CompositeBackend {
+    pub fn new(pane_id: PaneId, link: ArcLink, sink_handle: String) -> Self {
+        Self { pane_id, link, sink_handle }
+    }
+}
+
+#[async_trait]
+impl super::PaneBackend for CompositeBackend {
+    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize> {
+        self.link.sink.snapshot(&self.sink_handle, buf).await
+    }
+    async fn write(&self, data: &[u8]) -> Result<usize> {
+        self.link.sink.write(&self.sink_handle, data).await
+    }
+    async fn write_raw(&self, data: &[u8]) -> Result<usize> {
+        self.link.transport.write(data).await
+    }
+    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.link.transport.resize(cols, rows).await?;
+        self.link.sink.resize(&self.sink_handle, cols, rows).await?;
+        Ok(())
+    }
+    async fn close(&self) -> Result<()> {
+        // close the pane only — link survives
+        self.link.sink.close_pane(&self.sink_handle).await
+    }
+}
+```
+
+**Step 7: SessionManager** (`core/manager.rs`)
+
+```rust
+// core/manager.rs
+use std::sync::Arc;
+use super::{Error, LinkAddress};
+use super::id::{LinkId, PaneId};
+use super::link::Link;
+use super::link_registry::LinkRegistry;
+use super::pane_registry::PaneRegistry;
+use crate::backends::{BackendRegistry, PaneBackend};
+use crate::backends::composite::CompositeBackend;
+use crate::model::{LinkInfo, PaneInfo};
+use crate::sink::factory::sink_for;
+use crate::transport::factory as transport_factory;
+use crate::model::ConnectSpec;
+
+#[derive(Clone)]
+pub struct SessionManager {
+    pub links: Arc<LinkRegistry>,
+    pub panes: Arc<PaneRegistry>,
+    pub backends: Arc<BackendRegistry>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self { Self::new() }
+}
+
+impl SessionManager {
+    pub fn new() -> Self {
+        Self {
+            links: Arc::new(LinkRegistry::new()),
+            panes: Arc::new(PaneRegistry::new()),
+            backends: Arc::new(BackendRegistry::new()),
+        }
+    }
+
+    /// Connect: returns (link_id, pane_id).
+    /// - If `link_existing=false`: always create a new link (with new address uuid).
+    /// - If `link_existing=true`: search by LinkAddress; if found, attach new pane;
+    ///   if not found, return Error::LinkExistingUnsupported (for non-ssh) /
+    ///   Error::LinkNotFound for ssh-but-not-yet-implemented (deferred to SSH phase).
+    pub async fn connect(
+        &self,
+        spec: ConnectSpec,
+        address: LinkAddress,
+        link_existing: bool,
+    ) -> Result<(LinkId, PaneId)> {
+        if link_existing {
+            // For ssh: defer until real russh wiring (returns NotFound since stub never opens).
+            // For shell/serial: refuse up front — no "same link" semantics.
+            match address.kind() {
+                "shell" | "serial" => return Err(Error::LinkExistingUnsupported(address.kind())),
+                "ssh" => {
+                    // Search first; if found, attach. If not, error (real russh channel
+                    // opening for "ssh --link=existing" lands in SSH-integration PR).
+                    if self.links.find_by_address(&address).await.is_none() {
+                        return Err(Error::LinkNotFound(LinkId::default()));
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        // Resolve the link to use.
+        let arc_link = match (link_existing, self.links.find_by_address(&address).await) {
+            (true, Some(existing)) => existing,
+            _ => {
+                // Create a brand new link.
+                let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
+                let transport_kind = transport.kind();
+                let mut sink = sink_for(&spec.sink, transport_kind, transport.as_mut()).await?;
+                let mut transport = transport; // Box<dyn Transport>
+                sink.attach(transport.as_mut()).await?;
+
+                let link_id = LinkId::new();
+                let link_info = LinkInfo {
+                    id: link_id,
+                    name: if spec.name.is_empty() { link_id.to_string() } else { spec.name.clone() },
+                    created_at: chrono::Utc::now(),
+                    address: address.clone(),
+                    transport: spec.transport.clone(),
+                    sink: spec.sink.clone(),
+                };
+                let link = Link {
+                    id: link_id,
+                    info: link_info,
+                    transport,
+                    sink,
+                    panes: tokio::sync::Mutex::new(Vec::new()),
+                };
+                self.links.insert(link).await
+            }
+        };
+
+        // Open a new pane inside the link.
+        let sink_handle = arc_link.sink.new_pane().await?;
+        let pane_index = arc_link.panes.lock().await.len() as u32;
+        let pane_id = PaneId::new();
+        let pane_name = format!("pane-{}", pane_index);
+        let pane_info = PaneInfo {
+            id: pane_id,
+            link_id: arc_link.id,
+            name: pane_name,
+            created_at: chrono::Utc::now(),
+            sink_handle: sink_handle.clone(),
+            pane_index,
+        };
+
+        arc_link.panes.lock().await.push(pane_id);
+        self.panes.insert(pane_info).await;
+
+        let backend: Arc<dyn PaneBackend> = Arc::new(CompositeBackend::new(pane_id, arc_link.clone(), sink_handle));
+        self.backends.insert(pane_id, backend).await;
+
+        Ok((arc_link.id, pane_id))
+    }
+
+    pub async fn backend(&self, id: PaneId) -> Result<Arc<dyn PaneBackend>> {
+        self.backends.get(id).await.ok_or(Error::PaneNotFound(id))
+    }
+
+    pub async fn close_link(&self, id: LinkId) -> Result<()> {
+        let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
+        // remove all panes
+        let panes = arc_link.panes.lock().await.clone();
+        for pid in panes {
+            self.backends.remove(pid).await;
+            self.panes.remove(pid).await;
+        }
+        // close sink + transport
+        arc_link.sink.close().await?;
+        arc_link.transport.close().await?;
+        // remove from registry (ArcLink stays alive via this stack frame until end of fn)
+        self.links.remove(id).await;
+        Ok(())
+    }
+
+    pub async fn close_pane(&self, id: PaneId) -> Result<()> {
+        let backend = self.backends.remove(id).await.ok_or(Error::PaneNotFound(id))?;
+        let info = self.panes.remove(id).await.ok_or(Error::PaneNotFound(id))?;
+        backend.close().await?;
+        if let Some(link) = self.links.get(info.link_id).await {
+            link.panes.lock().await.retain(|p| *p != id);
+        }
+        Ok(())
+    }
+}
 ```
 
 **Step 8: Run tests**
@@ -1247,43 +1530,21 @@ Expected: existing tests still pass.
 
 ```bash
 git add crates/xscore/src/core/ crates/xscore/src/backends/ crates/xscore/src/transport/factory.rs crates/xscore/src/sink/
-git commit -m "feat(core): SessionManager wires Transport + Sink via CompositeBackend"
+git commit -m "feat(core): Link + Pane + Registries + SessionManager.connect (with --link=existing)"
 ```
 
 ---
 
-#### Task 7: ShellTransport (tokio::process::Command)
+#### Task 7: ShellTransport (real)
 
-**Objective:** Concrete `Transport` impl that spawns a local child process with stdin/stdout pipes.
+**Objective:** `Transport` impl that spawns a local child with stdin/stdout pipes; `address()` returns `LinkAddress::Shell`.
 
 **Files:**
 - Modify: `crates/xscore/src/transport/shell.rs`
 
-**Step 1: Write failing test**
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn shell_transport_roundtrip() {
-        let mut t = ShellTransport::new("cat".into(), vec![], None).await.unwrap();
-        t.open().await.unwrap();
-        t.write(b"hi\n").await.unwrap();
-        let mut buf = [0u8; 16];
-        let n = t.read(&mut buf).await.unwrap();
-        assert!(std::str::from_utf8(&buf[..n]).unwrap().contains("hi"));
-        t.close().await.unwrap();
-    }
-}
-```
-
-**Step 2: Implement**
-
 ```rust
 // transport/shell.rs
-use crate::core::{Error, Result};
+use crate::core::{Error, LinkAddress, Result};
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
@@ -1305,6 +1566,9 @@ impl ShellTransport {
 #[async_trait]
 impl super::Transport for ShellTransport {
     fn kind(&self) -> &'static str { "shell" }
+    fn address(&self) -> LinkAddress {
+        LinkAddress::Shell { command: self.command.clone(), args: self.args.clone() }
+    }
 
     async fn open(&mut self) -> Result<()> {
         let mut cmd = Command::new(&self.command);
@@ -1331,11 +1595,7 @@ impl super::Transport for ShellTransport {
         Ok(stdout.read(buf).await?)
     }
 
-    async fn resize(&self, _: u16, _: u16) -> Result<()> {
-        // ShellTransport without pty: resize is a no-op. For pty, switch to portable-pty.
-        Ok(())
-    }
-
+    async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
     async fn close(&self) -> Result<()> {
         let mut g = self.child.lock().await;
         if let Some(c) = g.as_mut() { c.kill().await?; }
@@ -1345,39 +1605,48 @@ impl super::Transport for ShellTransport {
 }
 ```
 
-**Step 3: Run tests**
+**Step 1: Test**
 
-Run: `cargo test -p xscore transport::shell`
-Expected: 1 passing.
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn shell_transport_roundtrip() {
+        let mut t = ShellTransport::new("cat".into(), vec![], None).await.unwrap();
+        t.open().await.unwrap();
+        t.write(b"hi\n").await.unwrap();
+        let mut buf = [0u8; 16];
+        let n = t.read(&mut buf).await.unwrap();
+        assert!(std::str::from_utf8(&buf[..n]).unwrap().contains("hi"));
+        t.close().await.unwrap();
+    }
+}
+```
 
-**Step 4: Commit**
+**Step 2: Commit**
 
 ```bash
 git add crates/xscore/src/transport/shell.rs
-git commit -m "feat(transport/shell): tokio::process::Command Transport impl"
+git commit -m "feat(transport/shell): real ShellTransport with address()"
 ```
 
 ---
 
-#### Task 8: SerialTransport (tokio-serial) — stub open
+#### Task 8: SerialTransport (stub) + SshTransport (stub)
 
-**Objective:** Concrete `Transport` impl skeleton; real port open deferred to integration phase.
+Same shape as Task 7 but with `address()` returning the corresponding `LinkAddress` variant.
 
 **Files:**
 - Modify: `crates/xscore/src/transport/serial.rs`
+- Modify: `crates/xscore/src/transport/ssh.rs`
 
 ```rust
 // transport/serial.rs
-use crate::core::{Error, Result};
+use crate::core::{Error, LinkAddress, Result};
 use async_trait::async_trait;
 
-pub struct SerialTransport {
-    pub path: String,
-    pub baud: u32,
-    pub data_bits: u8,
-    pub parity: String,
-    pub stop_bits: u8,
-}
+pub struct SerialTransport { pub path: String, pub baud: u32, pub data_bits: u8, pub parity: String, pub stop_bits: u8 }
 
 impl SerialTransport {
     pub async fn new(path: String, baud: u32, data_bits: u8, parity: String, stop_bits: u8) -> Result<Self> {
@@ -1388,10 +1657,8 @@ impl SerialTransport {
 #[async_trait]
 impl super::Transport for SerialTransport {
     fn kind(&self) -> &'static str { "serial" }
-    async fn open(&mut self) -> Result<()> {
-        // tokio-serial integration deferred to serial-port integration phase.
-        Err(Error::Transport("SerialTransport::open pending integration phase".into()))
-    }
+    fn address(&self) -> LinkAddress { LinkAddress::Serial { path: self.path.clone() } }
+    async fn open(&mut self) -> Result<()> { Err(Error::Transport("SerialTransport::open pending integration phase".into())) }
     async fn write(&self, _: &[u8]) -> Result<usize> { Err(Error::Transport("not open".into())) }
     async fn read(&self, _: &mut [u8]) -> Result<usize> { Err(Error::Transport("not open".into())) }
     async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
@@ -1399,37 +1666,14 @@ impl super::Transport for SerialTransport {
 }
 ```
 
-**Step 1: Compile**
-
-Run: `cargo build -p xscore`. Expected: success.
-
-**Step 2: Commit**
-
-```bash
-git add crates/xscore/src/transport/serial.rs
-git commit -m "feat(transport/serial): SerialTransport skeleton (open deferred)"
-```
-
----
-
-#### Task 9: SshTransport (russh) — stub
-
-**Objective:** Concrete `Transport` impl skeleton; real russh channel deferred.
-
-**Files:**
-- Modify: `crates/xscore/src/transport/ssh.rs`
-
 ```rust
 // transport/ssh.rs
-use crate::core::{Error, Result};
+use crate::core::{Error, LinkAddress, Result};
 use async_trait::async_trait;
 
 pub struct SshTransport {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
-    pub identity: Option<String>,
-    pub proxy: Option<String>,
+    pub host: String, pub port: u16, pub user: String,
+    pub identity: Option<String>, pub proxy: Option<String>,
 }
 
 impl SshTransport {
@@ -1441,9 +1685,13 @@ impl SshTransport {
 #[async_trait]
 impl super::Transport for SshTransport {
     fn kind(&self) -> &'static str { "ssh" }
-    async fn open(&mut self) -> Result<()> {
-        Err(Error::Transport("SshTransport::open pending integration phase".into()))
+    fn address(&self) -> LinkAddress {
+        LinkAddress::Ssh {
+            host: self.host.clone(), port: self.port, user: self.user.clone(),
+            identity: self.identity.clone(), proxy: self.proxy.clone(),
+        }
     }
+    async fn open(&mut self) -> Result<()> { Err(Error::Transport("SshTransport::open pending integration phase".into())) }
     async fn write(&self, _: &[u8]) -> Result<usize> { Err(Error::Transport("not open".into())) }
     async fn read(&self, _: &mut [u8]) -> Result<usize> { Err(Error::Transport("not open".into())) }
     async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
@@ -1451,29 +1699,22 @@ impl super::Transport for SshTransport {
 }
 ```
 
-**Step 1: Compile**
-
-Run: `cargo build -p xscore`. Expected: success.
-
-**Step 2: Commit**
+**Step 1: Compile + commit**
 
 ```bash
-git add crates/xscore/src/transport/ssh.rs
-git commit -m "feat(transport/ssh): SshTransport skeleton (open deferred)"
+cargo build -p xscore
+git add crates/xscore/src/transport/serial.rs crates/xscore/src/transport/ssh.rs
+git commit -m "feat(transport): Serial/Ssh stubs with address()"
 ```
 
 ---
 
-#### Task 10: Config loader (XDG paths + ConnectSpec JSON)
+#### Task 9: Config loader
 
-**Objective:** Resolve `~/.config/xscore/config.json` + per-session `~/.config/xscore/sessions/<uuid>.json`. Save + load `ConnectSpec`.
+Save/load `ConnectSpec` JSON to `~/.config/xscore/sessions/link-<link-id>.json`.
 
 **Files:**
-- Create: `crates/xscore/src/config/mod.rs`
-- Create: `crates/xscore/src/config/paths.rs`
-- Create: `crates/xscore/src/config/loader.rs`
-
-**Step 1: paths.rs**
+- Create: `crates/xscore/src/config/{mod,paths,loader}.rs`
 
 ```rust
 // config/paths.rs
@@ -1488,7 +1729,7 @@ pub fn ensure_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(sessions_dir())?;
     Ok(())
 }
-pub fn session_path(id: &str) -> std::path::PathBuf { sessions_dir().join(format!("{id}.json")) }
+pub fn link_path(link_id: &str) -> std::path::PathBuf { sessions_dir().join(format!("link-{link_id}.json")) }
 ```
 
 ```rust
@@ -1513,10 +1754,10 @@ pub mod loader;
 pub mod paths;
 
 pub use loader::{load_connect_spec, save_connect_spec};
-pub use paths::{config_dir, config_file, ensure_dirs, session_path, sessions_dir};
+pub use paths::{config_dir, config_file, ensure_dirs, link_path, sessions_dir};
 ```
 
-**Step 2: Commit**
+**Step 1: Commit**
 
 ```bash
 git add crates/xscore/src/config/
@@ -1525,31 +1766,28 @@ git commit -m "feat(config): XDG paths + ConnectSpec save/load"
 
 ---
 
-#### Task 11: CLI — clap skeleton + `connect` subcommand
+#### Task 10: CLI — `connect`, `link`, `pane` subcommands
 
-**Objective:** `xscore connect <url> [--save]` works end-to-end against a real local tmux session.
+**Objective:** Wire `connect <url> [--save] [--link=existing]`, `link list/show/close/save/load`, `pane list/show/close`.
 
 **Files:**
-- Create: `crates/xscore/src/cli/mod.rs`
-- Create: `crates/xscore/src/cli/connect.rs`
-- Create: `crates/xscore/src/cli/session.rs` (placeholder)
-- Create: `crates/xscore/src/cli/data.rs` (placeholder)
-- Create: `crates/xscore/src/cli/config.rs` (placeholder)
+- Create: `crates/xscore/src/cli/{mod,connect,link,pane}.rs`
 - Modify: `crates/xscore/src/main.rs`
 
-**Step 1: Cli struct**
+**Step 1: cli/mod.rs**
 
 ```rust
 // cli/mod.rs
 pub mod config;
-pub mod data;
-pub mod session;
 pub mod connect;
+pub mod data;
+pub mod link;
+pub mod pane;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "xscore", version, about = "Manage SSH / shell / serial sessions")]
+#[command(name = "xscore", version, about = "Manage SSH / shell / serial sessions as Link x Pane")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -1557,16 +1795,20 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Open a session from a URL
+    /// Open a session from a URL (creates or attaches to a link, returns a pane id)
     Connect(connect::ConnectArgs),
-    /// List / show / close / save / load sessions
-    Session(session::SessionCmd),
-    /// Read / write / resize data on a live session
+    /// Inspect / close a link (the physical connection)
+    Link(link::LinkCmd),
+    /// Inspect / close a pane (one view into a link)
+    Pane(pane::PaneCmd),
+    /// Read / write / resize data on a pane
     Data(data::DataCmd),
     /// Show / edit config values
     Config(config::ConfigCmd),
 }
 ```
+
+**Step 2: cli/connect.rs**
 
 ```rust
 // cli/connect.rs
@@ -1578,25 +1820,135 @@ pub struct ConnectArgs {
     /// URL: shell://, ssh://, serial://
     pub url: String,
 
-    /// Save the parsed spec to ~/.config/xscore/sessions/<id>.json
+    /// Save the parsed spec to ~/.config/xscore/sessions/link-<id>.json
     #[arg(long)]
     pub save: bool,
+
+    /// Attach a new pane to an existing link matching the address tuple.
+    #[arg(long)]
+    pub link_existing: bool,
 }
 
 pub async fn run(mgr: Arc<SessionManager>, args: ConnectArgs) -> anyhow::Result<()> {
-    let spec = xscore::url::parse(&args.url)?;
-    let id = mgr.create(spec.clone()).await?;
-    println!("created: {id}");
+    let (spec, address) = xscore::url::parse(&args.url)?;
+    let (link_id, pane_id) = mgr.connect(spec.clone(), address, args.link_existing).await?;
+    eprintln!("link:  {link_id}");
+    println!("pane:  {pane_id}");
     if args.save {
         xscore::config::ensure_dirs()?;
         xscore::config::save_connect_spec(
-            &xscore::config::session_path(&id.to_string()), &spec)?;
+            &xscore::config::link_path(&link_id.to_string()), &spec)?;
     }
     Ok(())
 }
 ```
 
-**Step 2: main.rs**
+**Step 3: cli/link.rs**
+
+```rust
+// cli/link.rs
+use crate::core::LinkId;
+use crate::core::SessionManager;
+use clap::Subcommand;
+use std::sync::Arc;
+
+#[derive(Subcommand)]
+pub enum LinkCmd {
+    List,
+    Show { #[arg(long)] id: String },
+    Close { #[arg(long)] id: String },
+    Save { #[arg(long)] id: String },
+    Load { #[arg(long)] path: String },
+}
+
+pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
+    match cmd {
+        LinkCmd::List => {
+            for link in mgr.links.list().await {
+                let info = &link.info;
+                println!("{}\t{}\t{}", info.id, info.transport_str(), info.name);
+            }
+        }
+        LinkCmd::Show { id } => {
+            let lid = LinkId::parse(&id)?;
+            let link = mgr.links.get(lid).await.ok_or(crate::core::Error::LinkNotFound(lid))?;
+            println!("{}", serde_json::to_string_pretty(&link.info)?);
+        }
+        LinkCmd::Close { id } => {
+            let lid = LinkId::parse(&id)?;
+            mgr.close_link(lid).await?;
+            println!("closed link: {lid}");
+        }
+        LinkCmd::Save { id } => {
+            let lid = LinkId::parse(&id)?;
+            let link = mgr.links.get(lid).await.ok_or(crate::core::Error::LinkNotFound(lid))?;
+            let spec = link_to_spec(&link.info);
+            xscore::config::ensure_dirs()?;
+            xscore::config::save_connect_spec(
+                &xscore::config::link_path(&lid.to_string()), &spec)?;
+            println!("saved: {lid}");
+        }
+        LinkCmd::Load { path } => {
+            let spec = xscore::config::load_connect_spec(std::path::Path::new(&path))?;
+            println!("{}", serde_json::to_string_pretty(&spec)?);
+        }
+    }
+    Ok(())
+}
+
+fn link_to_spec(info: &crate::model::LinkInfo) -> xscore::model::ConnectSpec {
+    xscore::model::ConnectSpec {
+        name: info.name.clone(),
+        transport: info.transport.clone(),
+        sink: info.sink.clone(),
+    }
+}
+```
+
+**Step 4: cli/pane.rs**
+
+```rust
+// cli/pane.rs
+use crate::core::PaneId;
+use crate::core::SessionManager;
+use clap::Subcommand;
+use std::sync::Arc;
+
+#[derive(Subcommand)]
+pub enum PaneCmd {
+    /// List panes (optionally filtered by --link <link-id>)
+    List { #[arg(long)] link: Option<String> },
+    Show { #[arg(long)] id: String },
+    Close { #[arg(long)] id: String },
+}
+
+pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
+    match cmd {
+        PaneCmd::List { link } => {
+            let all = mgr.panes.list_all().await;
+            for p in all {
+                if let Some(lid) = &link {
+                    if p.link_id.to_string() != *lid { continue; }
+                }
+                println!("{}\t{}\t{}", p.id, p.link_id, p.sink_handle);
+            }
+        }
+        PaneCmd::Show { id } => {
+            let pid = PaneId::parse(&id)?;
+            let info = mgr.panes.get(pid).await.ok_or(crate::core::Error::PaneNotFound(pid))?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        PaneCmd::Close { id } => {
+            let pid = PaneId::parse(&id)?;
+            mgr.close_pane(pid).await?;
+            println!("closed pane: {pid}");
+        }
+    }
+    Ok(())
+}
+```
+
+**Step 5: main.rs**
 
 ```rust
 #[tokio::main]
@@ -1606,7 +1958,8 @@ async fn main() -> anyhow::Result<()> {
     let mgr = std::sync::Arc::new(xscore::core::SessionManager::new());
     match cli.command {
         xscore::cli::Commands::Connect(c) => xscore::cli::connect::run(mgr, c).await?,
-        xscore::cli::Commands::Session(_c) => println!("session (todo)"),
+        xscore::cli::Commands::Link(c) => xscore::cli::link::run(mgr, c).await?,
+        xscore::cli::Commands::Pane(c) => xscore::cli::pane::run(mgr, c).await?,
         xscore::cli::Commands::Data(_c) => println!("data (todo)"),
         xscore::cli::Commands::Config(_c) => println!("config (todo)"),
     }
@@ -1614,148 +1967,58 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-**Step 3: Smoke**
+**Step 6: Smoke**
 
 ```bash
 cargo run -p xscore -- connect 'shell:///bin/cat' --save
-tmux -L xscore ls
+cargo run -p xscore -- link list
+cargo run -p xscore -- pane list
+cargo run -p xscore -- pane close --id <pane-id>     # closes pane, link stays
+cargo run -p xscore -- link close --id <link-id>     # closes the connection
 ```
 
-Expected: `created: <uuid>` printed; tmux session `xscore-<uuid>` exists in `tmux -L xscore ls`.
-
-**Step 4: Commit**
+**Step 7: Commit**
 
 ```bash
 git add crates/xscore/src/cli/ crates/xscore/src/main.rs
-git commit -m "feat(cli): xscore connect <url> opens a session via URL + factory"
+git commit -m "feat(cli): connect/link/pane subcommands over Link x Pane"
 ```
 
 ---
 
-#### Task 12: CLI `session` subcommand — list/show/close/save/load
+#### Task 11: CLI `data` subcommand — read/write/resize
 
-**Objective:** Wire `xscore session list/show/close/save/load` to `SessionManager` + `config::loader`.
-
-**Files:**
-- Modify: `crates/xscore/src/cli/session.rs`
-
-```rust
-// cli/session.rs
-use crate::core::SessionId;
-use crate::core::SessionManager;
-use clap::Subcommand;
-use std::sync::Arc;
-
-#[derive(Subcommand)]
-pub enum SessionCmd {
-    List,
-    Show { #[arg(long)] id: String },
-    Close { #[arg(long)] id: String },
-    Save { #[arg(long)] id: String },
-    Load { #[arg(long)] path: String },
-}
-
-pub async fn run(mgr: Arc<SessionManager>, cmd: SessionCmd) -> anyhow::Result<()> {
-    match cmd {
-        SessionCmd::List => {
-            for (id, info) in mgr.list().await {
-                println!("{id}\t{}\t{}\t{}", info.transport_str(), info.sink_str(), info.name);
-            }
-        }
-        SessionCmd::Show { id } => {
-            let sid = SessionId::parse(&id)?;
-            let info = mgr.get(sid).await?;
-            println!("{}", serde_json::to_string_pretty(&info)?);
-        }
-        SessionCmd::Close { id } => {
-            let sid = SessionId::parse(&id)?;
-            mgr.close(sid).await?;
-            println!("closed: {sid}");
-        }
-        SessionCmd::Save { id } => {
-            let sid = SessionId::parse(&id)?;
-            let info = mgr.get(sid).await?;
-            let spec = xscore::model::ConnectSpec {
-                name: info.name.clone(),
-                transport: info.transport.clone(),
-                sink: info.sink.clone(),
-            };
-            xscore::config::ensure_dirs()?;
-            xscore::config::save_connect_spec(
-                &xscore::config::session_path(&sid.to_string()), &spec)?;
-            println!("saved: {sid}");
-        }
-        SessionCmd::Load { path } => {
-            let spec = xscore::config::load_connect_spec(std::path::Path::new(&path))?;
-            println!("{}", serde_json::to_string_pretty(&spec)?);
-        }
-    }
-    Ok(())
-}
-```
-
-**Step 2: Wire to main**
-
-```rust
-match cli.command {
-    xscore::cli::Commands::Connect(c) => xscore::cli::connect::run(mgr.clone(), c).await?,
-    xscore::cli::Commands::Session(c) => xscore::cli::session::run(mgr, c).await?,
-    xscore::cli::Commands::Data(_c) => println!("data (todo)"),
-    xscore::cli::Commands::Config(_c) => println!("config (todo)"),
-}
-```
-
-**Step 3: Smoke**
-
-```bash
-ID=$(cargo run -p xscore -- session list | awk '{print $1}' | head -1)
-cargo run -p xscore -- session show --id "$ID"
-cargo run -p xscore -- session close --id "$ID"
-cargo run -p xscore -- session list   # should be empty
-```
-
-**Step 4: Commit**
-
-```bash
-git add crates/xscore/src/cli/session.rs crates/xscore/src/main.rs
-git commit -m "feat(cli): session list/show/close/save/load"
-```
-
----
-
-#### Task 13: CLI `data` subcommand — read/write/resize
-
-**Objective:** `xscore data write --id <id> [--from-file FILE]`, `xscore data read --id <id> [--bytes N]`, `xscore data resize --id <id> --cols 120 --rows 30`.
+Per-pane data ops (the only place pane_id is needed).
 
 **Files:**
 - Modify: `crates/xscore/src/cli/data.rs`
 
 ```rust
 // cli/data.rs
-use crate::core::SessionId;
+use crate::core::PaneId;
 use crate::core::SessionManager;
 use clap::Subcommand;
 use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum DataCmd {
-    Read { #[arg(long)] id: String, #[arg(long, default_value_t = 4096)] bytes: usize },
-    Write { #[arg(long)] id: String, #[arg(long)] from_file: Option<String> },
-    Resize { #[arg(long)] id: String, #[arg(long)] cols: u16, #[arg(long)] rows: u16 },
+    Read { #[arg(long)] pane: String, #[arg(long, default_value_t = 4096)] bytes: usize },
+    Write { #[arg(long)] pane: String, #[arg(long)] from_file: Option<String> },
+    Resize { #[arg(long)] pane: String, #[arg(long)] cols: u16, #[arg(long)] rows: u16 },
 }
 
 pub async fn run(mgr: Arc<SessionManager>, cmd: DataCmd) -> anyhow::Result<()> {
     match cmd {
-        DataCmd::Read { id, bytes } => {
-            let sid = SessionId::parse(&id)?;
-            let backend = mgr.backend(sid).await?;
+        DataCmd::Read { pane, bytes } => {
+            let pid = PaneId::parse(&pane)?;
+            let backend = mgr.backend(pid).await?;
             let mut buf = vec![0u8; bytes];
             let n = backend.snapshot(&mut buf).await?;
             std::io::Write::write_all(&mut std::io::stdout(), &buf[..n])?;
         }
-        DataCmd::Write { id, from_file } => {
-            let sid = SessionId::parse(&id)?;
-            let backend = mgr.backend(sid).await?;
+        DataCmd::Write { pane, from_file } => {
+            let pid = PaneId::parse(&pane)?;
+            let backend = mgr.backend(pid).await?;
             let data = if let Some(p) = from_file { std::fs::read(p)? } else {
                 let mut s = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?;
@@ -1764,9 +2027,9 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: DataCmd) -> anyhow::Result<()> {
             let n = backend.write(&data).await?;
             eprintln!("wrote {n} bytes");
         }
-        DataCmd::Resize { id, cols, rows } => {
-            let sid = SessionId::parse(&id)?;
-            let backend = mgr.backend(sid).await?;
+        DataCmd::Resize { pane, cols, rows } => {
+            let pid = PaneId::parse(&pane)?;
+            let backend = mgr.backend(pid).await?;
             backend.resize(cols, rows).await?;
             eprintln!("resized to {cols}x{rows}");
         }
@@ -1779,42 +2042,28 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: DataCmd) -> anyhow::Result<()> {
 
 ```rust
 match cli.command {
-    xscore::cli::Commands::Connect(c) => xscore::cli::connect::run(mgr.clone(), c).await?,
-    xscore::cli::Commands::Session(c) => xscore::cli::session::run(mgr.clone(), c).await?,
+    // ...
     xscore::cli::Commands::Data(c) => xscore::cli::data::run(mgr, c).await?,
-    xscore::cli::Commands::Config(_c) => println!("config (todo)"),
+    // ...
 }
 ```
 
-**Step 3: Smoke**
-
-```bash
-cargo run -p xscore -- connect 'shell:///bin/cat' --save
-ID=$(cargo run -p xscore -- session list | awk '{print $1}' | head -1)
-echo "ping" | cargo run -p xscore -- data write --id "$ID"
-cargo run -p xscore -- data resize --id "$ID" --cols 200 --rows 50
-cargo run -p xscore -- data read --id "$ID" --bytes 4096
-cargo run -p xscore -- session close --id "$ID"
-```
-
-**Step 4: Commit**
+**Step 3: Commit**
 
 ```bash
 git add crates/xscore/src/cli/data.rs crates/xscore/src/main.rs
-git commit -m "feat(cli): data read/write/resize over composite SessionBackend"
+git commit -m "feat(cli): data read/write/resize over pane-id"
 ```
 
 ---
 
-#### Task 14: CLI `config` subcommand
+#### Task 12: CLI `config` subcommand
 
-**Objective:** `xscore config show/path/set/unset` over `AppConfig`.
+Same shape as before (AppConfig JSON).
 
 **Files:**
 - Modify: `crates/xscore/src/cli/config.rs`
 - Modify: `crates/xscore/src/model/config.rs`
-
-**Step 1: AppConfig** (`model/config.rs`)
 
 ```rust
 // model/config.rs
@@ -1829,8 +2078,6 @@ pub struct AppConfig {
     pub tmux_socket: Option<String>,
 }
 ```
-
-**Step 2: config CLI** (`cli/config.rs`)
 
 ```rust
 // cli/config.rs
@@ -1901,43 +2148,19 @@ fn apply_unset(cfg: &mut AppConfig, key: &str) {
 }
 ```
 
-**Step 3: Wire to main**
-
-```rust
-match cli.command {
-    xscore::cli::Commands::Connect(c) => xscore::cli::connect::run(mgr.clone(), c).await?,
-    xscore::cli::Commands::Session(c) => xscore::cli::session::run(mgr.clone(), c).await?,
-    xscore::cli::Commands::Data(c) => xscore::cli::data::run(mgr.clone(), c).await?,
-    xscore::cli::Commands::Config(c) => xscore::cli::config::run(c).await?,
-}
-```
-
-**Step 4: Smoke**
+**Step 4: Commit**
 
 ```bash
-cargo run -p xscore -- config path
-cargo run -p xscore -- config show
-cargo run -p xscore -- config set tmux_socket mysock
-cargo run -p xscore -- config show
-cargo run -p xscore -- config unset tmux_socket
-```
-
-**Step 5: Commit**
-
-```bash
-git add crates/xscore/src/cli/config.rs crates/xscore/src/model/config.rs crates/xscore/src/main.rs
+git add crates/xscore/src/cli/config.rs crates/xscore/src/model/config.rs
 git commit -m "feat(cli): config show/path/set/unset over AppConfig JSON"
 ```
 
 ---
 
-#### Task 15: Integration tests + README
-
-**Objective:** Real binary tests + URL-driven README rewrite.
+#### Task 13: Integration tests + README
 
 **Files:**
 - Create: `crates/xscore/tests/cli_smoke.rs`
-- Create: `crates/xscore/tests/url_parse.rs`
 - Modify: `README.md`
 
 **Step 1: CLI smoke test**
@@ -1952,70 +2175,110 @@ fn xscore_help_exits_zero() {
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
     assert!(s.contains("connect"));
-    assert!(s.contains("session"));
-    assert!(s.contains("data"));
-    assert!(s.contains("config"));
+    assert!(s.contains("link"));
+    assert!(s.contains("pane"));
 }
 
 #[test]
-fn xscore_connect_shell_cat_and_close() {
-    let create = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["connect", "shell:///bin/cat"]).output().unwrap();
-    assert!(create.status.success(), "create stderr: {}", String::from_utf8_lossy(&create.stderr));
-    let id = String::from_utf8(create.stdout).unwrap()
-        .trim().strip_prefix("created: ").unwrap().to_string();
-
-    let list = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["session", "list"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&list.stdout).contains(&id));
-
-    let close = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["session", "close", "--id", &id]).output().unwrap();
-    assert!(close.status.success());
-}
-
-#[test]
-fn xscore_config_path_prints_paths() {
+fn xscore_connect_creates_link_and_pane() {
     let out = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["config", "path"]).output().unwrap();
+        .args(["connect", "shell:///bin/cat"]).output().unwrap();
     assert!(out.status.success());
-    let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("xscore"));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("link:"));
+    assert!(s.contains("pane:"));
+
+    let link_line = s.lines().find(|l| l.starts_with("link:")).unwrap();
+    let pane_line = s.lines().find(|l| l.starts_with("pane:")).unwrap();
+    let link_id = link_line.trim().strip_prefix("link:").unwrap().trim();
+    let pane_id = pane_line.trim().strip_prefix("pane:").unwrap().trim();
+
+    let list_out = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "list"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&list_out.stdout).contains(link_id));
+
+    let close_pane = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["pane", "close", "--id", pane_id]).output().unwrap();
+    assert!(close_pane.status.success());
+
+    let close_link = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "close", "--id", link_id]).output().unwrap();
+    assert!(close_link.status.success());
+}
+
+#[test]
+fn xscore_connect_default_creates_two_links_for_same_url() {
+    // First connect
+    let out1 = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["connect", "shell:///bin/echo"]).output().unwrap();
+    let id1 = String::from_utf8_lossy(&out1.stdout).lines()
+        .find(|l| l.starts_with("link:")).unwrap().trim().strip_prefix("link:").unwrap().trim().to_string();
+
+    // Second connect with same URL but no --link=existing → second link
+    let out2 = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["connect", "shell:///bin/echo"]).output().unwrap();
+    let id2 = String::from_utf8_lossy(&out2.stdout).lines()
+        .find(|l| l.starts_with("link:")).unwrap().trim().strip_prefix("link:").unwrap().trim().to_string();
+
+    assert_ne!(id1, id2, "two connect() calls should produce distinct link_ids");
+
+    // Cleanup
+    let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "close", "--id", &id1]).output();
+    let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "close", "--id", &id2]).output();
+}
+
+#[test]
+fn xscore_link_existing_unsupported_for_shell() {
+    let out = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["connect", "shell:///bin/cat", "--link-existing"]).output().unwrap();
+    assert!(!out.status.success(), "shell + --link=existing must fail");
+    let s = String::from_utf8_lossy(&out.stderr);
+    assert!(s.contains("not supported") || s.contains("LinkExistingUnsupported"),
+            "expected LinkExistingUnsupported error, got: {s}");
 }
 ```
 
-**Step 2: URL parser test (unit, in url/connect.rs — already covered by Task 3)**
-
-**Step 3: README**
+**Step 2: README**
 
 ```markdown
 # xscore
 
-Rust session manager for SSH / shell / serial. Sessions are opened from URLs and routed
-through a `Transport × Sink` composition so the same CLI works for local tmux, remote
-tmux-in-ssh, and plain shells.
+Rust session manager for SSH / shell / serial, modeled as **Link x Pane**.
+
+- **Link** = one physical connection (SSH channel, serial port, local child, or tmux server).
+- **Pane** = one working view into a link. N panes per link; each pane has its own id, snapshot, write state.
 
 ## Quick start
 
 \`\`\`
 xscore connect shell:///bin/bash
-xscore connect ssh://user@host:22?tmux=on
+xscore connect ssh://user@host:22
 xscore connect serial:///dev/ttyUSB0?baud=115200
+
+# Multiple panes on the same link:
+xscore connect ssh://u@h:22
+xscore connect ssh://u@h:22 --link=existing   # opens a 2nd pane in the same tmux server
 \`\`\`
 
 ## Commands
 
 \`\`\`
-xscore connect <url> [--save]
-xscore session list
-xscore session show --id <uuid>
-xscore session close --id <uuid>
-xscore session save --id <uuid>
-xscore session load --path <file>
+xscore connect <url> [--save] [--link=existing]
+xscore link list
+xscore link show --id <link-id>
+xscore link close --id <link-id>
+xscore link save --id <link-id>
+xscore link load --path <file>
 
-xscore data read --id <uuid> [--bytes N]
-xscore data write --id <uuid> [--from-file FILE]
-xscore data resize --id <uuid> --cols C --rows R
+xscore pane list [--link <link-id>]
+xscore pane show --id <pane-id>
+xscore pane close --id <pane-id>
+
+xscore data read --pane <pane-id> [--bytes N]
+xscore data write --pane <pane-id> [--from-file FILE]
+xscore data resize --pane <pane-id> --cols C --rows R
 
 xscore config show
 xscore config path
@@ -2026,20 +2289,21 @@ xscore config unset <key>
 ## Architecture
 
 \`\`\`
-CLI  →  SessionManager  →  CompositeBackend(Transport, Sink)
-                               │
-            ┌──────────────────┼──────────────────┐
-        Transport             Sink              Result
-     shell/serial/ssh     tmux/raw            bytes
-            │                  │
-            ▼                  ▼
-     local / ssh channel   external tmux server
-                           on -L xscore socket
+CLI -> SessionManager
+       +-- LinkRegistry     (address-keyed dedup)
+       |    +-- Link { transport + sink + Vec<PaneId> }
+       +-- PaneRegistry     (pane_id -> PaneInfo)
+       +-- BackendRegistry  (pane_id -> Arc<dyn PaneBackend>)
+                                  ^ wraps (Link, sink_handle)
 \`\`\`
 
-Every session pairs one Transport with one Sink. The same `TmuxSink` works on shell (local tmux),
-ssh (remote tmux running inside the channel), and serial (passthrough wrapper). A future
-`RawSink` (or `tmux=off`) supports passthrough.
+Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Pane lives inside
+one link and addresses the link's sink via a sink_handle (e.g. tmux `%42`). Closing a
+pane does not close the link; closing a link drops every pane on it.
+
+`--link=existing` opts into **address-keyed dedup**: search LinkRegistry for an existing
+link matching the URL's transport address; if found, open a new pane on it; if not found,
+error. Without `--link=existing`, every `xscore connect` creates a brand-new link.
 ```
 
 **Step 4: Run all tests**
@@ -2050,8 +2314,8 @@ Expected: all unit + integration tests pass.
 **Step 5: Commit**
 
 ```bash
-git add tests/ README.md crates/xscore/src/cli/
-git commit -m "test+docs: URL-driven CLI smoke tests + README rewrite"
+git add tests/ README.md
+git commit -m "test+docs: Link x Pane smoke tests + README"
 ```
 
 ---
@@ -2060,31 +2324,34 @@ git commit -m "test+docs: URL-driven CLI smoke tests + README rewrite"
 
 - `cargo build -p xscore` → success
 - `cargo test -p xscore` → all tests pass (unit + integration)
-- `xscore --help` lists `connect`, `session`, `data`, `config`
-- `xscore connect shell:///bin/bash` creates a session + tmux pane on `-L xscore`
-- `xscore connect ssh://...` works in URL form (SshTransport still deferred but URL parsing passes)
-- `xscore connect serial:///dev/ttyUSB0?baud=115200` parses and validates
-- `xscore session list/show/close/save/load` all function over `ConnectSpec`
-- `xscore data read/write/resize` round-trips through `CompositeBackend`
+- `xscore --help` lists `connect`, `link`, `pane`, `data`, `config`
+- `xscore connect shell:///bin/bash` creates a link + pane; stdout prints both ids
+- `xscore connect <same url>` (no `--link=existing`) creates a **second** link (default = no dedup)
+- `xscore connect <shell url> --link=existing` returns `Error::LinkExistingUnsupported("shell")`
+- `xscore link list/show/close/save/load` over `LinkInfo`
+- `xscore pane list/show/close` over `PaneInfo`
+- `xscore data read/write/resize` over pane-id (NOT link-id)
 - `xscore config show/path/set/unset` operates on `~/.config/xscore/config.json`
-- Transport × Sink composition is observable: the same TmuxSink works on shell/serial/ssh transports without per-case glue code in `SessionManager` — the factory decides.
+- Address-keyed dedup: `LinkAddress` Hash impl + `LinkRegistry::find_by_address` is the single source of truth for "is this a new link or attach"
 
 ## What's deferred (explicitly NOT in this slice)
 
-- Real russh connect + pty channel (Task 9 skeleton; SSH-integration phase)
+- Real russh connect + pty channel (Task 8 skeleton; SSH-integration phase)
 - Real serial port open (Task 8 skeleton; serial-integration phase)
-- TmuxSink `attach()` for "remote" mode (currently a no-op; will wire when SshTransport gets real IO)
-- Live streaming subscribe (`Sink::snapshot` only for now)
-- TmuxSink per-char send-keys perf optimization (one char = one tmux spawn; fix in next PR)
+- `Sink::attach()` for "remote" mode in TmuxSink (current no-op; will wire when SshTransport gets real IO)
+- Live streaming subscribe (`PaneBackend::snapshot` only for now)
+- Tmux per-char send-keys perf optimization
 - Cross-process manager state (CLI = in-memory; MCP server = daemon later)
-- MCP server, IPC server, web UI — land in subsequent slices once this URL surface stabilizes
-- RawSink full implementation (currently a passthrough stub — `?tmux=off` works at parse time but the sink does nothing useful; tracked in open question below)
+- MCP server, IPC server, web UI — land in subsequent slices once this surface stabilizes
+- RawSink full implementation (`?tmux=off` today is a no-op; tracked in open question)
+- `ssh + --link=existing` (returns no-match today; defer to SSH-integration phase)
 
 ## Open questions (will be revisited, do not block the slice)
 
-1. **Serial + TmuxSink:** tmux expects a PTY. The slice resolves this by running tmux locally and bridging serial bytes through tmux's pane input/output. A "real" tmux-attach-to-serial design is deferred.
-2. **?tmux=off semantics:** `tmux=off` produces a `RawSink` that today is a no-op for capture/write. Future PR will wire it to a passthrough mode (raw transport I/O exposed directly).
-3. **TmuxSink "auto" mode:** Resolves to `local` for shell/serial, `remote` for ssh. Future: an explicit `tmux_socket` query param to override.
+1. **Link uniqueness across CLI invocations.** Today `LinkRegistry` is in-memory; restarting `xscore` forgets all links. Real dedup across runs requires a persistence layer (likely a daemon). For this slice, address-keyed dedup is **per-process**.
+2. **`?tmux=off` semantics.** RawSink is a no-op stub for capture/write. Future PR will wire it to a passthrough mode.
+3. **TmuxSink "auto" mode.** Resolves to `local` for shell/serial, `remote` for ssh. Future: explicit `tmux_socket` query param to override.
+4. **Pane persistence.** Closing the CLI remounts the pane from tmux (via `list-panes`) — for recovery, but in this slice the CLI is in-memory only.
 
 ## Execution Handoff
 
