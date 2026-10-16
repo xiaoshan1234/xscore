@@ -56,7 +56,7 @@ This plan is split across files in `doc/dev/roadmap/`:
 Adjacent directories (also tracked in git):
 
 - `../adr/0001-link-pane-model.md` through `0004-link-existing-dedup.md` — design rationale
-- `../architecture/diagrams/*.mmd` — Link×Pane topology, lifecycle, module-deps (parse-validated against mermaid@9)
+- `../architecture/diagrams/README.md` — Link×Pane topology, lifecycle, module-deps rendered as inline Mermaid (parse-validated against mermaid@9)
 
 Next step: execute via `subagent-driven-development` skill — fresh subagent per task, two-stage review (spec compliance then code quality). Each task ends with `cargo test -p xscore` + `cargo build -p xscore` before commit.
 

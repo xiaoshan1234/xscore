@@ -8,10 +8,7 @@
 - [ADR 0003](../adr/0003-external-tmux-server.md) — why external `tmux -L xscore` (not embedded tmux)
 - [ADR 0004](../adr/0004-link-existing-dedup.md) — why `--link=existing` is opt-in (not default)
 
-**Architecture diagrams** ([source](../architecture/diagrams/README.md)):
-- [Link × Pane topology](../architecture/diagrams/link-pane-topology.mmd)
-- [Link & Pane lifecycle](../architecture/diagrams/lifecycle.mmd)
-- [Module dependency rules](../architecture/diagrams/module-deps.mmd)
+**Architecture diagrams:** [diagrams/README.md](../architecture/diagrams/README.md) (Link × Pane topology, Link & Pane state machines, Module dependency rules — inline Mermaid)
 
 **Architecture (Link × Pane):**
 
