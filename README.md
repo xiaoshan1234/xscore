@@ -16,23 +16,23 @@ xscore link add serial:///dev/ttyUSB0?baud=115200
 xscore link config add web ssh://u@h:22?identity=~/.ssh/id_ed25519
 
 # Reuse template + attach multiple panes on the same link:
-xscore link add ssh://u@h:22 -c web -a web1
-xscore link add ssh://u@h:22 --link=existing -a web2
+xscore link add ssh://u@h:22 -c web
+xscore link add ssh://u@h:22 --link=existing
 ```
 
 ## Commands
 
 ```
-xscore link add <url> [-c CONFIG] [-a ALIAS] [--link=existing]
+xscore link add <url> [-c CONFIG] [--link=existing]
 xscore link open --id <link-id>
 xscore link close --id <link-id>
 xscore link remove --id <link-id>
 xscore link show --id <link-id>
 xscore link list
 
-xscore link config add <alias> <url>
-xscore link config remove <alias>
-xscore link config show <alias>
+xscore link config add <name> <url>
+xscore link config remove <name>
+xscore link config show <name>
 xscore link config list
 
 xscore pane add --link <link-id> [--name=NAME]
@@ -56,7 +56,7 @@ xscore config unset <key>
 
 ```
 CLI -> SessionManager
-       +-- LinkRegistry     (by_id, by_address, by_alias)
+       +-- LinkRegistry     (by_id, by_address)
        |    +-- Link { transport + sink + Vec<PaneId> }
        +-- PaneRegistry     (pane_id -> PaneInfo)
        +-- BackendRegistry  (pane_id -> Arc<dyn PaneBackend>)

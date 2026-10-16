@@ -30,9 +30,9 @@ SessionManager
 ```
 
 - tmux is always external, on a dedicated `xscore` socket (`tmux -L xscore ...`). One link = one tmux server name. Multiple PaneIds = multiple windows inside that server.
-- Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<alias>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (reserved for future link-state persistence).
+- Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<name>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (reserved for future link-state persistence).
 
-**CLI entry:** `xscore link add <url> [-c CONFIG] [-a ALIAS]`. URLs:
+**CLI entry:** `xscore link add <url> [-c CONFIG] [--link=existing]`. URLs:
 
 ```text
 xscore link add shell:///bin/bash
@@ -55,7 +55,7 @@ Other commands are organized into two tiers (`link` for the physical connection,
 
 Two `xscore link add ssh://u@h:22` calls with no `--link=existing` flag produce **different links** (each with `link_id` = a new uuid). The `--link=existing` flag opts into attach mode: search the `LinkRegistry` for a matching address tuple; if found, attach a new pane to that link; if not, error. `--link=existing` is meaningless for `shell`/`serial` and returns `Error::LinkExistingUnsupported`.
 
-Each alive link can also have a runtime alias (`xscore link add ... -a <alias>`); aliases live in the in-memory `LinkRegistry.by_alias` and are lost on process exit. For persistent templates use `xscore link config add <alias> <url>`.
+Each alive link identifies itself only via `link_id` (uuid v7) and `address`; there is no runtime alias and the registry has no `by_alias` map. For persistent templates use `xscore link config add <name> <url>`.
 
 > ⚠️ **Open question (does not block the slice):** "Same link reuse" on SSH means tmux inside the SSH channel — second `xscore link add` to the same SSH with `--link=existing` should ssh-attached tmux, NOT a new SSH channel. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (return error from `--link=existing` for ssh transport too, since the stub doesn't have a real channel — see acceptance criteria below).
 

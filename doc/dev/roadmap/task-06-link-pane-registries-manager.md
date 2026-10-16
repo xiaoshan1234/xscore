@@ -289,9 +289,7 @@ impl SessionManager {
     ///   Error::LinkNotFound for ssh-but-not-yet-implemented (deferred to SSH phase).
     ///
     /// Note: this is renamed from `connect` to align with `xscore link add`.
-    /// The full implementation lives in `task-10-cli-connect-link-pane.md`
-    /// (where it takes `alias` and writes `by_alias`). This task keeps the
-    /// skeleton without alias; link-pane-cli adds alias.
+    /// The full implementation lives in `task-10-cli-connect-link-pane.md`.
     pub async fn add_link(
         &self,
         spec: ConnectSpec,
@@ -409,5 +407,5 @@ Expected: existing tests still pass.
 
 ```bash
 git add crates/xscore/src/core/ crates/xscore/src/backends/ crates/xscore/src/transport/factory.rs crates/xscore/src/sink/
-git commit -m "feat(core): Link + Pane + Registries + SessionManager.add_link (with --link=existing, alias support added in task-10)"
+git commit -m "feat(core): Link + Pane + Registries + SessionManager.add_link (with --link=existing)"
 ```

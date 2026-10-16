@@ -24,8 +24,6 @@ Introduce a **two-level model**:
 
 Every CLI command operates on either a `link-id` or a `pane-id` — never a generic "session id".
 
-In addition, each alive link may carry a **runtime alias** (`xscore link add ... -a <alias>`) for human-readable reference. Aliases live in `LinkRegistry.by_alias` (in-memory only, lost on process exit) and are not the dedup key — `LinkAddress` is. Persistent templates use a separate `link config add <alias> <url>` flow under `~/.config/xscore/links/`.
-
 ```
 SessionManager
 ├─ LinkRegistry (link_id -> Arc<Link>, address -> LinkId)

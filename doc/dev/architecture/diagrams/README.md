@@ -22,7 +22,7 @@ Read first if you want to know "what are the moving parts".
 ```mermaid
 graph TB
     subgraph CLI ["CLI (clap)"]
-        Connect["xscore link add<br/>-c CONFIG -a ALIAS"]
+        Connect["xscore link add<br/>-c CONFIG"]
         LinkCmd["xscore link<br/>add/open/close/remove<br/>show/list/config {add,remove,show,list}"]
         PaneCmd["xscore pane<br/>add/open/close/remove<br/>show/list"]
         DataCmd["xscore data<br/>read/write/resize<br/>--pane"]

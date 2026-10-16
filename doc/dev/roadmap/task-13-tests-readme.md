@@ -72,19 +72,6 @@ fn xscore_link_add_default_creates_two_links_for_same_url() {
 }
 
 #[test]
-fn xscore_link_add_with_alias_registers_alias() {
-    let out = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["link", "add", "shell:///bin/cat", "-a", "cat1"]).output().unwrap();
-    assert!(out.status.success());
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("alias: cat1"));
-
-    let list = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["link", "list"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&list.stdout).contains("cat1"));
-}
-
-#[test]
 fn xscore_link_existing_unsupported_for_shell() {
     let out = Command::new(env!("CARGO_BIN_EXE_xscore"))
         .args(["link", "add", "shell:///bin/cat", "--link-existing"]).output().unwrap();
@@ -106,7 +93,7 @@ fn xscore_link_config_add_and_list_roundtrip() {
     let list = Command::new(env!("CARGO_BIN_EXE_xscore"))
         .args(["link", "config", "list"]).output().unwrap();
     let s = String::from_utf8_lossy(&list.stdout);
-    assert!(s.contains("web"), "expected alias 'web' in config list, got: {s}");
+    assert!(s.contains("web"), "expected name 'web' in config list, got: {s}");
 
     let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
         .args(["link", "config", "remove", "web"]).output();
@@ -135,23 +122,23 @@ xscore link add serial:///dev/ttyUSB0?baud=115200
 xscore link config add web ssh://u@h:22?identity=~/.ssh/id_ed25519
 
 # Reuse template + attach multiple panes on the same link:
-xscore link add ssh://u@h:22 -c web -a web1
-xscore link add ssh://u@h:22 --link=existing -a web2
+xscore link add ssh://u@h:22 -c web
+xscore link add ssh://u@h:22 --link=existing
 \`\`\`
 
 ## Commands
 
 \`\`\`
-xscore link add <url> [-c CONFIG] [-a ALIAS] [--link=existing]
+xscore link add <url> [-c CONFIG] [--link=existing]
 xscore link open --id <link-id>
 xscore link close --id <link-id>
 xscore link remove --id <link-id>
 xscore link show --id <link-id>
 xscore link list
 
-xscore link config add <alias> <url>
-xscore link config remove <alias>
-xscore link config show <alias>
+xscore link config add <name> <url>
+xscore link config remove <name>
+xscore link config show <name>
 xscore link config list
 
 xscore pane add --link <link-id> [--name=NAME]
@@ -175,7 +162,7 @@ xscore config unset <key>
 
 \`\`\`
 CLI -> SessionManager
-       +-- LinkRegistry     (by_id, by_address, by_alias)
+       +-- LinkRegistry     (by_id, by_address)
        |    +-- Link { transport + sink + Vec<PaneId> }
        +-- PaneRegistry     (pane_id -> PaneInfo)
        +-- BackendRegistry  (pane_id -> Arc<dyn PaneBackend>)

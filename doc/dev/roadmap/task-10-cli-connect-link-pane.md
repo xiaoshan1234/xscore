@@ -10,25 +10,23 @@
 - Delete: `crates/xscore/src/cli/data.rs` (handled in Task 11)
 - Modify: `crates/xscore/src/main.rs`
 - Extend: `crates/xscore/src/core/manager.rs` (rename `connect` → `add_link` + add 4 new methods)
-- Extend: `crates/xscore/src/core/link_registry.rs` (add `by_alias`)
-- Extend: `crates/xscore/src/model/session.rs` (LinkInfo gains `alias`)
-- Extend: `crates/xscore/src/config/{paths,loader}.rs` (new `links/` + `state/` paths)
+- Modify: `crates/xscore/src/config/{paths,loader}.rs` (new `links/` + `state/` paths)
 
 ---
 
 ## Command reference
 
 ```
-xscore link add <url> [-c CONFIG] [-a ALIAS]     # create link + first pane
+xscore link add <url> [-c CONFIG] [--link=existing]   # create link + first pane
 xscore link open <link-id>                       # re-attach existing link
 xscore link close <link-id>                      # kill transport + sink + all panes
 xscore link remove <link-id>                     # unregister only, leave tmux/server alive
 xscore link show <link-id>
 xscore link list
 
-xscore link config add <alias> <url>             # save ConnectSpec template (no start)
-xscore link config remove <alias>                # delete template
-xscore link config show <alias>                  # read template
+xscore link config add <name> <url>              # save ConnectSpec template (no start)
+xscore link config remove <name>                 # delete template
+xscore link config show <name>                   # read template
 xscore link config list                          # list templates
 
 xscore pane add <link-id> [--name=NAME]          # new_pane() inside the link
@@ -142,17 +140,13 @@ pub struct LinkAddArgs {
     /// Use a saved config template (resolves through `link config show <name>`)
     #[arg(short = 'c', long)]
     pub config: Option<String>,
-
-    /// Runtime alias for this alive link (in-memory only, NOT persisted)
-    #[arg(short = 'a', long)]
-    pub alias: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum LinkConfigCmd {
     /// Save a ConnectSpec template (does not start the link)
     Add {
-        /// Alias for the template
+        /// Name for the template (also the file basename under `links/`)
         name: String,
         /// URL to remember
         url: String,
@@ -178,7 +172,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 }
 
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
-    // If -c is set, the user passed an alias + url. The template supplies
+    // If -c is set, the user passed a name + url. The template supplies
     // sink + name; the CLI URL supplies transport detail (port, identity, ...)
     // and LinkAddress (used for `--link=existing` later).
     let (spec, address) = if let Some(cname) = &args.config {
@@ -190,12 +184,9 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
         url::parse(&args.url)?
     };
 
-    let (link_id, pane_id) = mgr.add_link(spec, address, args.alias.clone()).await?;
+    let (link_id, pane_id) = mgr.add_link(spec, address).await?;
     eprintln!("link:  {link_id}");
     println!("pane:  {pane_id}");
-    if let Some(a) = &args.alias {
-        eprintln!("alias: {a}");
-    }
     Ok(())
 }
 
@@ -231,9 +222,7 @@ async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
 async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
     for link in mgr.links.list().await {
         let info = &link.info;
-        let alias = info.alias.clone().unwrap_or_default();
-        let alias_field = if alias.is_empty() { String::new() } else { format!("\t{alias}") };
-        println!("{}\t{}\t{}{}", info.id, info.transport_str(), info.name, alias_field);
+        println!("{}\t{}", info.id, info.name);
     }
     Ok(())
 }
@@ -411,12 +400,8 @@ impl SessionManager {
         &self,
         spec: ConnectSpec,
         address: LinkAddress,
-        alias: Option<String>,
     ) -> Result<(LinkId, PaneId)> {
-        // Same body as old `connect` but:
-        //   - LinkInfo.alias = alias
-        //   - LinkRegistry also inserts into by_alias if Some
-        //   - Returns (link_id, pane_id)
+        // Same body as old `connect`. Returns (link_id, pane_id).
         // See task-06 for the structural skeleton.
         let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
         let transport_kind = transport.kind();
@@ -428,7 +413,6 @@ impl SessionManager {
         let link_info = LinkInfo {
             id: link_id,
             name: if spec.name.is_empty() { link_id.to_string() } else { spec.name.clone() },
-            alias: alias.clone(),
             created_at: chrono::Utc::now(),
             address: address.clone(),
             transport: spec.transport.clone(),
@@ -471,7 +455,7 @@ impl SessionManager {
     pub async fn attach_link(&self, id: LinkId) -> Result<()> {
         // 1. Find persisted state under state/links/<id>.json if present.
         // 2. Build transport + sink from spec.
-        // 3. Register back in LinkRegistry (with alias).
+        // 3. Register back in LinkRegistry.
         // 4. For each pane from sink.list_panes(): re-register in
         //    PaneRegistry + BackendRegistry with a new PaneId.
         // For this slice the persistent-state path is stubbed:
@@ -552,14 +536,14 @@ The old `sessions/link-<id>.json` path is gone. New layout:
 
 | Path | Purpose | Lifetime |
 | --- | --- | --- |
-| `~/.config/xscore/links/<alias>.json` | ConnectSpec template (`link config add`) | persistent |
-| `~/.config/xscore/state/links/<id>.json` | running-state per link (alias, panes) | optional this slice |
+| `~/.config/xscore/links/<name>.json` | ConnectSpec template (`link config add`) | persistent |
+| `~/.config/xscore/state/links/<id>.json` | running-state per link (panes) | optional this slice |
 | `~/.config/xscore/config.json` | AppConfig | persistent |
 
 Add to `config/paths.rs`:
 
 ```rust
-pub fn link_config_path(alias: &str) -> std::path::PathBuf { links_dir().join(format!("{alias}.json")) }
+pub fn link_config_path(name: &str) -> std::path::PathBuf { links_dir().join(format!("{name}.json")) }
 pub fn links_dir() -> std::path::PathBuf { config_dir().join("links") }
 pub fn state_dir() -> std::path::PathBuf { config_dir().join("state") }
 pub fn state_link_path(id: &str) -> std::path::PathBuf { state_dir().join("links").join(format!("{id}.json")) }
@@ -594,52 +578,7 @@ Update `config/mod.rs` to add the new exports.
 
 ---
 
-## Step 7: LinkInfo gains `alias`
-
-```rust
-// model/session.rs — LinkInfo
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct LinkInfo {
-    pub id: LinkId,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,    // NEW: runtime alias (in-memory only)
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub address: LinkAddress,
-    pub transport: TransportConfig,
-    pub sink: SinkConfig,
-}
-```
-
----
-
-## Step 8: LinkRegistry gains `by_alias`
-
-```rust
-// core/link_registry.rs — internal state
-
-struct LinkRegistryInner {
-    by_id: HashMap<LinkId, ArcLink>,
-    by_address: HashMap<LinkAddress, LinkId>,
-    by_alias: HashMap<String, LinkId>,   // NEW
-}
-
-impl LinkRegistry {
-    // update insert/remove to also write by_alias when info.alias.is_some()
-    pub async fn find_by_alias(&self, alias: &str) -> Option<ArcLink> {
-        let g = self.inner.read().await;
-        let id = g.by_alias.get(alias).copied()?;
-        g.by_id.get(&id).cloned()
-    }
-}
-```
-
-`insert()` writes `by_alias` when `info.alias.is_some()`. `remove()` drops from both `by_id` and `by_alias`.
-
----
-
-## Step 9: Smoke
+## Step 7: Smoke
 
 ```bash
 # Persistent template
@@ -649,8 +588,8 @@ cargo run -p xscore -- link config show web
 cargo run -p xscore -- link config remove web
 
 # Lifecycle
-cargo run -p xscore -- link add 'shell:///bin/cat' -a cat1            # create
-cargo run -p xscore -- link list                                       # see cat1
+cargo run -p xscore -- link add 'shell:///bin/cat'                       # create
+cargo run -p xscore -- link list                                        # see new link
 cargo run -p xscore -- link show --id <link-id>
 
 cargo run -p xscore -- pane add --link <link-id> --name extra          # open pane 2
@@ -665,7 +604,7 @@ cargo run -p xscore -- link open --id <link-id>                        # re-atta
 
 ---
 
-## Step 10: Commit
+## Step 8: Commit
 
 ```bash
 git add crates/xscore/src/cli/ crates/xscore/src/core/ crates/xscore/src/config/ crates/xscore/src/model/ crates/xscore/src/main.rs

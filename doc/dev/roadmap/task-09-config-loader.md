@@ -1,6 +1,6 @@
 # Task 9: Config loader
 
-Save/load `ConnectSpec` JSON. New layout uses `~/.config/xscore/links/<alias>.json` for persistent templates (Task 10's `link config ...` group). The old `sessions/` directory is removed; `state/links/<id>.json` is reserved for the future persistent-link-state feature but **not used in this slice**.
+Save/load `ConnectSpec` JSON. New layout uses `~/.config/xscore/links/<name>.json` for persistent templates (Task 10's `link config ...` group). The old `sessions/` directory is removed; `state/links/<id>.json` is reserved for the future persistent-link-state feature but **not used in this slice**.
 
 **Files:**
 - Create: `crates/xscore/src/config/{mod,paths,loader}.rs`
@@ -15,7 +15,7 @@ pub fn config_dir() -> std::path::PathBuf {
 pub fn config_file() -> std::path::PathBuf { config_dir().join("config.json") }
 
 pub fn links_dir() -> std::path::PathBuf { config_dir().join("links") }
-pub fn link_config_path(alias: &str) -> std::path::PathBuf { links_dir().join(format!("{alias}.json")) }
+pub fn link_config_path(name: &str) -> std::path::PathBuf { links_dir().join(format!("{name}.json")) }
 
 pub fn state_dir() -> std::path::PathBuf { config_dir().join("state") }
 pub fn state_link_path(id: &str) -> std::path::PathBuf { state_dir().join("links").join(format!("{id}.json")) }

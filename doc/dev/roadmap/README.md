@@ -47,9 +47,9 @@ the table above.
 
 - **Project root:** `/home/loner/prj/xscore/`
 - **Crate:** `xscore` (single binary)
-- **CLI entry:** `xscore link add <url> [-c CONFIG] [-a ALIAS]`
+- **CLI entry:** `xscore link add <url> [-c CONFIG] [--link=existing]`
 - **Two-tier CLI:** `xscore {link, pane, data, config} ...`
-- **Persistent templates:** `~/.config/xscore/links/<alias>.json` (`link config add`)
+- **Persistent templates:** `~/.config/xscore/links/<name>.json` (`link config add`)
 - **Config dir:** `~/.config/xscore/`
 - **tmux socket:** `xscore` (`-L xscore`)
 - **Env prefix:** `XSCORE_*`

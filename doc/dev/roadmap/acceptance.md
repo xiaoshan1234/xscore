@@ -6,17 +6,15 @@
 - `xscore link add shell:///bin/bash` creates a link + pane; stdout prints both ids
 - `xscore link add <same url>` (no `--link=existing`) creates a **second** link (default = no dedup)
 - `xscore link add <shell url> --link=existing` returns `Error::LinkExistingUnsupported("shell")`
-- `xscore link add ... -a <alias>` registers the link under `LinkRegistry.by_alias` for the current process lifetime
-- `xscore link config add <alias> <url>` saves a template to `~/.config/xscore/links/<alias>.json`
+- `xscore link config add <name> <url>` saves a template to `~/.config/xscore/links/<name>.json`
 - `xscore link config list/show/remove` operates on the templates directory
-- `xscore link add -c <alias> <url>` reads the saved template and overrides the transport detail from the CLI URL
+- `xscore link add -c <name> <url>` reads the saved template and overrides the transport detail from the CLI URL
 - `xscore link list/show/close/remove/open` operates on in-memory links (open is a re-attach, remove is unregister-only, close kills the transport + sink + every pane)
 - `xscore pane add <link-id> [--name=...]` opens a new pane inside a live link
 - `xscore pane list/show/close/remove/open` operates on in-memory panes (open is a re-attach, remove is unregister-only, close kills the tmux window)
 - `xscore data read/write/resize` over pane-id (NOT link-id)
 - `xscore config show/path/set/unset` operates on `~/.config/xscore/config.json`; `path` prints all 3 dirs (config, links, state)
 - Address-keyed dedup: `LinkAddress` Hash impl + `LinkRegistry::find_by_address` is the single source of truth for "is this a new link or attach"
-- Alias map: `LinkRegistry.by_alias` populated for `add_link -a`, queried by future alias-aware commands
 
 ---
 
@@ -41,7 +39,6 @@
 3. **`?tmux=off` semantics.** RawSink is a no-op stub for capture/write. Future PR will wire it to a passthrough mode.
 4. **TmuxSink "auto" mode.** Resolves to `local` for shell/serial, `remote` for ssh. Future: explicit `tmux_socket` query param to override.
 5. **Pane persistence.** Closing the CLI forgets the in-memory pane registry; `tmux -L xscore` windows keep running but are invisible to `pane list`. `pane open <pane-id>` (when link is also attached) would address this — see "deferred" list.
-6. **Alias uniqueness.** Two `link add ... -a web` calls produce different link_ids but the same `by_alias` key, so the second overwrites the first in `by_alias`. Acceptable for a runtime-only map.
 
 ---
 
