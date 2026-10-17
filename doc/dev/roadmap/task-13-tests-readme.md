@@ -39,13 +39,13 @@ fn xscore_link_add_creates_link_and_pane() {
         .args(["link", "list"]).output().unwrap();
     assert!(String::from_utf8_lossy(&list_out.stdout).contains(link_id));
 
-    let close_pane = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["pane", "close", "--id", pane_id]).output().unwrap();
-    assert!(close_pane.status.success());
+    let del_pane = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["pane", "del", "--id", pane_id]).output().unwrap();
+    assert!(del_pane.status.success());
 
-    let close_link = Command::new(env!("CARGO_BIN_EXE_xscore"))
-        .args(["link", "close", "--id", link_id]).output().unwrap();
-    assert!(close_link.status.success());
+    let del_link = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "del", "--id", link_id]).output().unwrap();
+    assert!(del_link.status.success());
 }
 
 #[test]
@@ -194,9 +194,7 @@ xscore link config show <name>
 xscore link config list
 
 xscore pane add --link <link-id> [--name=NAME]
-xscore pane open --id <pane-id> [--link <link-id>]
-xscore pane close --id <pane-id>
-xscore pane remove --id <pane-id>
+xscore pane del --id <pane-id>
 xscore pane show --id <pane-id>
 xscore pane list [--link <link-id>]
 

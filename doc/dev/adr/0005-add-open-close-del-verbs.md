@@ -59,7 +59,7 @@ The `link config {add,remove,show,list} <name> <url>` sub-tree (locked in ADR 00
 - `Error::LinkExistingUnsupported` — **deleted**.
 - `Error::OpenOnlyForTmux(&'static str)` — **new**. `link open` against shell/serial/ssh returns this.
 - `Error::CloseOnlyForTmux(&'static str)` — **new**. `link close` against shell/serial/ssh returns this.
-- `Error::AttachNotImplemented` — kept for pane operations that remain stubs (`pane open <pane-id>`).
+- `Error::AttachNotImplemented` — deleted; no `pane open` verb exists (cross-invocation re-attach happens via `xscore link open`).
 
 ## Consequences
 

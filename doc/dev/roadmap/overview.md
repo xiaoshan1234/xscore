@@ -88,13 +88,13 @@ crates/xscore/
 │   ├── main.rs                       # clap entry, tracing init, dispatch
 │   ├── cli/
 │   │   ├── mod.rs                    # Cli struct, derive top-level
-│   │   ├── link.rs                   # link add/open/close/remove/show/list + config sub-tree
-│   │   ├── pane.rs                   # pane add/open/close/remove/show/list
+│   │   ├── link.rs                   # link add/del/open/close/show/list + config sub-tree
+│   │   ├── pane.rs                   # pane add/del/show/list
 │   │   ├── data.rs                   # pane data read/write/resize
 │   │   └── config.rs                 # config show/path/set/unset
 │   ├── core/
 │   │   ├── mod.rs                    # pub SessionManager, re-exports
-│   │   ├── manager.rs                # add_link / open_link / close_link / del_link
+│   │   ├── manager.rs                # add_link / open_link / close_link / del_link; add_pane / del_pane
 │   │   ├── link.rs                   # Link struct (transport + sink + pane list)
 │   │   ├── pane.rs                   # Pane struct (handle + state)
 │   │   ├── link_registry.rs          # LinkRegistry (by_id; address used internally for routing)

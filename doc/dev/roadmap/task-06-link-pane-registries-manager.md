@@ -423,7 +423,12 @@ impl SessionManager {
         Ok(())
     }
 
-    pub async fn close_pane(&self, id: PaneId) -> Result<()> {
+    /// Full teardown of a pane: kill the tmux window + remove the backend
+    /// + unregister from in-memory. Was previously named `close_pane`;
+    /// renamed to `del_pane` to match the CLI verb (mirrors the link
+    /// tree's add/del shape). Cross-invocation re-attach goes through
+    /// `xscore link open`, not through panes.
+    pub async fn del_pane(&self, id: PaneId) -> Result<()> {
         let backend = self.backends.remove(id).await.ok_or(Error::PaneNotFound(id))?;
         let info = self.panes.remove(id).await.ok_or(Error::PaneNotFound(id))?;
         backend.close().await?;
@@ -444,5 +449,5 @@ Expected: existing tests still pass.
 
 ```bash
 git add crates/xscore/src/core/ crates/xscore/src/backends/ crates/xscore/src/transport/factory.rs crates/xscore/src/sink/
-git commit -m "feat(core): Link + Pane + Registries + SessionManager.add_link/open_link/close_link/del_link"
+git commit -m "feat(core): Link + Pane + Registries + SessionManager (link add/open/close/del, pane add/del)"
 ```

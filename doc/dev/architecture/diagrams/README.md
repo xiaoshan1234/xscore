@@ -24,7 +24,7 @@ graph TB
     subgraph CLI ["CLI (clap)"]
         Connect["xscore link add<br/>-c CONFIG"]
         LinkCmd["xscore link<br/>add/del/open/close<br/>show/list/config {add,remove,show,list}"]
-        PaneCmd["xscore pane<br/>add/open/close/remove<br/>show/list"]
+        PaneCmd["xscore pane<br/>add/del/show/list"]
         DataCmd["xscore data<br/>read/write/resize<br/>--pane"]
         ConfigCmd["xscore config<br/>show/path/set/unset"]
     end

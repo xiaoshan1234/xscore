@@ -40,9 +40,7 @@ xscore link config show <name>
 xscore link config list
 
 xscore pane add --link <link-id> [--name=NAME]
-xscore pane open --id <pane-id> [--link <link-id>]
-xscore pane close --id <pane-id>
-xscore pane remove --id <pane-id>
+xscore pane del --id <pane-id>
 xscore pane show --id <pane-id>
 xscore pane list [--link <link-id>]
 

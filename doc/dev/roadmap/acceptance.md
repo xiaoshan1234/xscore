@@ -15,7 +15,7 @@
 - `xscore link open <tmux url>` attaches to an existing tmux session (returns `(link_id, pane_id)`)
 - `xscore link close --id <link-id>` on a tmux link leaves the tmux session running on the server
 - `xscore pane add <link-id> [--name=...]` opens a new pane inside a live link
-- `xscore pane list/show/close/remove/open` operates on in-memory panes (open is a re-attach stub, remove is unregister-only, close kills the tmux window)
+- `xscore pane list/show/del` operates on in-memory panes (`del` is full teardown — kills tmux window + unregisters)
 - `xscore data read/write/resize` over pane-id (NOT link-id)
 - `xscore config show/path/set/unset` operates on `~/.config/xscore/config.json`; `path` prints all 3 dirs (config, links, state)
 - Internal routing: `LinkAddress` Hash impl + `LinkRegistry::find_by_address` are internal helpers only — not a user-facing dedup key (ADR 0005)
@@ -33,7 +33,7 @@
 - Cross-process manager state (CLI = in-memory; MCP server = daemon later). `state/links/<id>.json` is reserved but unused this slice.
 - MCP server, IPC server, web UI — land in subsequent slices once this surface stabilizes
 - RawSink full implementation (`?tmux=off` today is a no-op; tracked in open question)
-- `link open <link-id>` — there is no `link open <link-id>` verb; tmux sessions are addressed by URL/name (`link open <url>`), not by link-id. `pane open <pane-id>` is a stub (`todo!()`) — full re-attach implementation lands in attach-persistence PR.
+- `link open <link-id>` — there is no `link open <link-id>` verb; tmux sessions are addressed by URL/name (`link open <url>`), not by link-id. There is also no `pane open` verb; cross-invocation re-attach happens via `link open` at the link level.
 
 ---
 
@@ -42,7 +42,7 @@
 1. **Link uniqueness across CLI invocations.** Today `LinkRegistry` is in-memory; restarting `xscore` forgets all links + their panes. Real dedup across runs requires a persistence layer (likely a daemon). For this slice, `link open` covers tmux sessions within a single CLI invocation via the external tmux server (the server keeps running across CLI invocations), but discovery of tmux sessions created in an earlier invocation requires the persisted state file.
 3. **`?tmux=off` semantics.** RawSink is a no-op stub for capture/write. Future PR will wire it to a passthrough mode.
 4. **TmuxSink "auto" mode.** Resolves to `local` for shell/serial, `remote` for ssh. Future: explicit `tmux_socket` query param to override.
-5. **Pane persistence.** Closing the CLI forgets the in-memory pane registry; `tmux -L xscore` windows keep running but are invisible to `pane list`. `pane open <pane-id>` (when link is also attached) would address this — see "deferred" list.
+5. **Pane persistence.** Closing the CLI forgets the in-memory pane registry; `tmux -L xscore` windows keep running but are invisible to `pane list`. `xscore link open <url>` re-attaches the link and re-discovers panes from `sink.list_panes()` — see "deferred" list.
 
 ---
 

@@ -1,6 +1,6 @@
 # Task 10: CLI — `link`, `pane` subcommands
 
-**Objective:** Wire the new two-tier CLI: `link {add,del,open,close,show,list,config ...}` + `pane {add,open,close,remove,show,list}`. ADR 0005 retired `--link=existing`; `link` verbs split into `add` (always new), `open` (always attach-existing, tmux only), `close` (tmux-detach only), `del` (full teardown).
+**Objective:** Wire the new two-tier CLI: `link {add,del,open,close,show,list,config ...}` + `pane {add,del,show,list}`. ADR 0005 retired `--link=existing`; `link` verbs split into `add` (always new), `open` (always attach-existing, tmux only), `close` (tmux-detach only), `del` (full teardown). Pane verbs trimmed to a 4-verb tree mirroring the link shape: `add` (new), `del` (full teardown), `show`, `list`.
 
 **Background:** this is the revised CLI surface from the user-feedback round (after ADR 0005's reversal of `--link=existing`). The old `xscore connect <url>` is now `xscore link add <url>` (always-new). Re-attach-to-existing moved to `xscore link open` (tmux only). The `link config {add,remove,show,list}` group keeps managing persistent ConnectSpec templates under `~/.config/xscore/links/` unchanged.
 
@@ -29,12 +29,10 @@ xscore link config remove <name>                 # delete template
 xscore link config show <name>                   # read template
 xscore link config list                          # list templates
 
-xscore pane add <link-id> [--name=NAME]          # new_pane() inside the link
-xscore pane open <pane-id> [--link=ID]           # re-attach to existing tmux window
-xscore pane close <pane-id>                      # kill-pane + unregister
-xscore pane remove <pane-id>                     # unregister only
-xscore pane show <pane-id>
-xscore pane list [--link LINK-ID]
+xscore pane add --link <link-id> [--name=NAME]          # new_pane() inside the link
+xscore pane del --id <pane-id>                      # kill-pane + unregister (full teardown)
+xscore pane show --id <pane-id>
+xscore pane list [--link <link-id>]
 
 xscore data read --pane <pane-id> [--bytes N]
 xscore data write --pane <pane-id> [--from-file FILE]
@@ -55,11 +53,9 @@ xscore config unset <key>
 | `link open`   | no (re-attaches existing tmux)    | yes | tmux only — others err       | nothing — already running |
 | `link close`  | no (detaches — leaves tmux alive) | yes | tmux only — others err       | nothing — tmux server stays |
 | `pane add`    | yes (one tmux window)             | yes | tmux only                    | tmux window |
-| `pane open`   | no                                | yes | tmux only                    | nothing — window already exists |
-| `pane close`  | no (kills)                        | yes | tmux only                    | nothing — window already killed |
-| `pane remove` | no                                | yes | tmux only                    | in-memory state only (window stays) |
+| `pane del`    | no (kills the tmux window)        | yes | tmux only                    | nothing — window is gone |
 
-**Naming intent:** Linux file semantics adapted — `add` creates, `del` is universal teardown, `open` re-attaches to existing (tmux only), `close` releases the in-memory registration only (tmux-detach). Pane verbs are unchanged from the prior round (pane `remove` keeps its in-memory-only semantics since a pane has no separate kill verb).
+**Naming intent:** Linux file semantics adapted — verbs split into `add` (create new) and `del` (universal teardown). Both `link` and `pane` follow the same 4-verb shape: `add` / `del` / `show` / `list`. The tmux-only "open" and "close" attach/detach verbs are exclusive to `link` because that's where the cross-invocation identity lives.
 
 ---
 
@@ -321,7 +317,7 @@ Note: `xscore::config::link_config_path`, `xscore::config::list_link_configs`, `
 
 ```rust
 // cli/pane.rs
-use crate::core::{Error, LinkId, PaneId, SessionManager};
+use crate::core::{Error, PaneId, SessionManager};
 use clap::Subcommand;
 use std::sync::Arc;
 
@@ -335,19 +331,9 @@ pub enum PaneCmd {
         name: Option<String>,
     },
 
-    /// Re-attach to an existing tmux window (pane was already created by some link add or pane add)
-    Open {
-        #[arg(long)] id: String,
-        /// Required if the link isn't in this registry (e.g. fresh process, restart)
-        #[arg(long)]
-        link: Option<String>,
-    },
-
-    /// Kill tmux pane + remove from registry
-    Close { #[arg(long)] id: String },
-
-    /// Remove from registry only (tmux window stays alive)
-    Remove { #[arg(long)] id: String },
+    /// Kill the tmux window + remove from registry (full teardown).
+    /// Cross-invocation re-attach goes through `xscore link open`, not through panes.
+    Del { #[arg(long)] id: String },
 
     /// Print PaneInfo JSON
     Show { #[arg(long)] id: String },
@@ -359,37 +345,14 @@ pub enum PaneCmd {
 pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
     match cmd {
         PaneCmd::Add { link, name } => {
-            let lid = LinkId::parse(&link)?;
+            let lid = crate::core::LinkId::parse(&link)?;
             let pid = mgr.add_pane(lid, name).await?;
             println!("pane:  {pid}");
         }
-        PaneCmd::Open { id, link } => {
+        PaneCmd::Del { id } => {
             let pid = PaneId::parse(&id)?;
-            // If a link is supplied, it must already be in the registry.
-            // ADR 0005 retired the silent auto-attach path; the user runs
-            // `xscore link open <url>` first if they need to re-establish
-            // the link in-memory.
-            if let Some(lid_str) = link {
-                let lid = LinkId::parse(&lid_str)?;
-                if mgr.links.get(lid).await.is_none() {
-                    anyhow::bail!(
-                        "link {lid} is not in the registry; run `xscore link open <url> [-c CONFIG]` first"
-                    );
-                }
-            }
-            mgr.attach_pane(pid).await?;
-            println!("opened pane: {pid}");
-        }
-        PaneCmd::Close { id } => {
-            let pid = PaneId::parse(&id)?;
-            mgr.close_pane(pid).await?;
-            println!("closed pane: {pid}");
-        }
-        PaneCmd::Remove { id } => {
-            let pid = PaneId::parse(&id)?;
-            mgr.unregister_pane(pid).await?;
-            println!("removed pane: {pid}");
-            eprintln!("(tmux window still alive; use 'pane open' to re-attach)");
+            mgr.del_pane(pid).await?;
+            println!("deleted pane: {pid}");
         }
         PaneCmd::Show { id } => {
             let pid = PaneId::parse(&id)?;
@@ -433,7 +396,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## Step 5: Methods on `SessionManager` (per ADR 0005)
 
-Task 6 establishes `add_link` / `open_link` / `close_link` / `del_link` as the four lifecycle verbs. Step 5 of this task mirrors them so the CLI can dispatch. `open_pane` and `unregister_pane` are unchanged from Task 6. Pane `attach_pane` is still a stub.
+Task 6 establishes `add_link` / `open_link` / `close_link` / `del_link` as the four link lifecycle verbs and `add_pane` / `del_pane` as the two-pane lifecycle verbs. Step 5 of this task mirrors them so the CLI can dispatch. Pane `attach_pane` (re-attach stub) and `unregister_pane` are gone — the `pane` subcommand was trimmed to a 4-verb tree (`add` / `del` / `show` / `list`); cross-invocation re-attach happens at the link level via `xscore link open`.
 
 ```rust
 // In core/manager.rs
@@ -568,27 +531,20 @@ impl SessionManager {
         Ok(pane_id)
     }
 
-    /// Re-attach to an existing tmux pane by pane_id.
-    /// For this slice: link must already be in the registry
-    /// (run `xscore link open <url>` first if needed).
-    pub async fn attach_pane(&self, id: PaneId) -> Result<()> {
-        todo!("stub for slice; real impl lands in attach-persistence PR")
-    }
-
-    /// Unregister a pane from in-memory state, leaving the tmux window alive.
-    pub async fn unregister_pane(&self, id: PaneId) -> Result<()> {
+    /// Full teardown of a pane: kill the tmux window + remove the
+    /// backend + unregister from in-memory. Was previously named
+    /// `close_pane`; renamed to `del_pane` to match the CLI verb.
+    /// Cross-invocation re-attach goes through `xscore link open`
+    /// at the link level, not through panes.
+    pub async fn del_pane(&self, id: PaneId) -> Result<()> {
         let backend = self.backends.remove(id).await.ok_or(Error::PaneNotFound(id))?;
         let info = self.panes.remove(id).await.ok_or(Error::PaneNotFound(id))?;
-        // DO NOT call backend.close()
-        drop(backend);
+        backend.close().await?;
         if let Some(link) = self.links.get(info.link_id).await {
             link.panes.lock().await.retain(|p| *p != id);
         }
         Ok(())
     }
-
-    /// close_pane — same as Task 6.
-    pub async fn close_pane(&self, id: PaneId) -> Result<()> { /* task-06 */ }
 }
 ```
 
@@ -658,8 +614,7 @@ cargo run -p xscore -- link show --id <link-id>
 
 cargo run -p xscore -- pane add --link <link-id> --name extra          # open pane 2
 cargo run -p xscore -- pane list --link <link-id>
-cargo run -p xscore -- pane close --id <pane-id>                       # kill tmux pane
-cargo run -p xscore -- pane remove --id <pane-id>                      # only unregister
+cargo run -p xscore -- pane del --id <pane-id>                         # kill tmux pane + unregister
 
 # Tmux-only verbs (open = attach existing, close = detach)
 cargo run -p xscore -- link open 'tmux://my-session'                   # attach existing
@@ -673,5 +628,5 @@ cargo run -p xscore -- link del --id <link-id>                         # full te
 
 ```bash
 git add crates/xscore/src/cli/ crates/xscore/src/core/ crates/xscore/src/config/ crates/xscore/src/model/ crates/xscore/src/main.rs
-git commit -m "feat(cli): four-verb link tree (add/del/open/close + show/list/config) — ADR 0005"
+git commit -m "feat(cli): 4-verb link + 4-verb pane trees (add/del/show/list)"
 ```

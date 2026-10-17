@@ -21,7 +21,7 @@ The plan is split across files. **Each task lives in its own file so edits stay 
 | `task-07-shell-transport.md` | `ShellTransport` real impl |
 | `task-08-transport-stubs.md` | `SerialTransport` + `SshTransport` stubs |
 | `task-09-config-loader.md` | XDG paths + `ConnectSpec` JSON save/load (under `links/`) |
-| `task-10-cli-connect-link-pane.md` | `xscore link {add,del,open,close,show,list,config ...}` (ADR 0005 verb split) + `xscore pane {...}` CLI |
+| `task-10-cli-connect-link-pane.md` | `xscore link {add,del,open,close,show,list,config ...}` (ADR 0005 verb split) + `xscore pane {add,del,show,list}` CLI |
 | `task-11-cli-data.md` | `xscore data read/write/resize` (per-pane) |
 | `task-12-cli-config.md` | `xscore config show/path/set/unset` |
 | `task-13-tests-readme.md` | CLI smoke tests + README rewrite |
