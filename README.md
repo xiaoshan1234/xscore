@@ -2,7 +2,7 @@
 
 Rust session manager for SSH / shell / serial, modeled as **Link x Pane**.
 
-- **Link** = one physical connection (SSH channel, serial port, local child, or tmux server).
+- **Link** = one physical connection (SSH channel, serial port, local child, or one tmux session inside the shared `tmux -L xscore` server).
 - **Pane** = one working view into a link. N panes per link; each pane has its own id, snapshot, write state.
 
 ## Quick start
@@ -21,14 +21,14 @@ xscore link add ssh://u@h:22 -c web           # 1st pane on the link
 # Open / detach / destroy — verb split (ADR 0005):
 xscore link open 'tmux://my-session'           # attach existing tmux session
 xscore link close --id <link-id>               # tmux-detach only (session keeps running)
-xscore link del --id <link-id>                 # full teardown (kills tmux server)
+xscore link del --id <link-id>                 # full teardown (kills tmux session inside the link)
 ```
 
 ## Commands
 
 ```
 xscore link add <url?> [-c CONFIG]            # always create new (url OR -c CONFIG required)
-xscore link del --id <link-id>                # full teardown (kills transport + sink + tmux server)
+xscore link del --id <link-id>                # full teardown (kills transport + sink + the per-link tmux session)
 xscore link open <url?> [-c CONFIG]           # attach existing tmux session (tmux only)
 xscore link close --id <link-id>              # tmux-detach only (session keeps running; non-tmux errs)
 xscore link show --id <link-id>
@@ -70,7 +70,7 @@ one link and addresses the link's sink via a sink_handle (e.g. tmux `%42`).
 
 **`add` vs `del` vs `open` vs `close`** (ADR 0005, four-verb `link` tree):
 - `add` creates a brand-new external resource (transport + sink + 1st pane).
-- `del` is the universal full teardown: kill transport + sink + every pane, plus (for tmux) the per-link tmux server.
+- `del` is the universal full teardown: kill transport + sink + every pane, plus (for tmux) the per-link tmux session. The shared `tmux -L xscore` server stays up.
 - `open` attaches to an existing tmux session (tmux only — shell/serial/ssh return `OpenOnlyForTmux`).
 - `close` is the in-memory detach: unregister the link and its panes, but the tmux session keeps running (tmux only — shell/serial/ssh return `CloseOnlyForTmux`).
 

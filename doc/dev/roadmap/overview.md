@@ -19,8 +19,8 @@ Link  ── owns ──> Transport + Sink (the physical connection + terminal s
        +─ hosts ─> [Pane_1, Pane_2, ..., Pane_N]   (N independent views)
 ```
 
-- **Link** = `(Transport + Sink)` pair (the same architecture we already settled on). One link is one tmux server, or one SSH channel, or one serial port, or one local child process — the physical layer.
-- **Pane** = one SessionId. Each pane is what users `data read/write/resize` against. Each pane has its own window inside the link's tmux server (when sink is `TmuxSink`), or its own buffered slice (when sink is `RawSink`).
+- **Link** = `(Transport + Sink)` pair (the same architecture we already settled on). One link is one tmux session (named `xscore-link-<link_uuid>`), or one SSH channel, or one serial port, or one local child process — the physical layer.
+- **Pane** = one SessionId. Each pane is what users `data read/write/resize` against. Each pane has its own tmux window inside the link's tmux session (when sink is `TmuxSink`), or its own buffered slice (when sink is `RawSink`).
 
 ```
 SessionManager
@@ -29,7 +29,7 @@ SessionManager
 └─ BackendRegistry: pane_id -> Arc<dyn PaneBackend>   { wraps (Link, sink_handle) }
 ```
 
-- tmux is always external, on a dedicated `xscore` socket (`tmux -L xscore ...`). One link = one tmux server name. Multiple PaneIds = multiple windows inside that server.
+- tmux is always external, on one shared `xscore` socket (`tmux -L xscore`). One link = one tmux session inside that server (named `xscore-link-<link_uuid>`). Multiple PaneIds = multiple tmux windows inside the session.
 - Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<name>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (reserved for future link-state persistence).
 
 **CLI entry:** `xscore link add <url?> [-c CONFIG]` and `xscore link {del,open,close,show,list}` (ADR 0005). At least one of `<url>` / `-c CONFIG` is required. URLs:
@@ -153,7 +153,7 @@ crates/xscore/
 | Layer | Concern | Lifetime |
 | --- | --- | --- |
 | Transport | bytes/PTY | 1 per link; killed when link closes |
-| Sink | tmux server / passthrough | 1 per link; killed when link closes |
+| Sink | tmux session (or passthrough) | 1 per link; the session is killed when the link closes (the shared `-L xscore` server stays up) |
 | Pane | one working view | N per link; each pane independently closeable |
 
 Each pane has its own `id`, its own data read/write state, its own `PaneInfo`. Killing one pane does not affect its siblings. Killing a link kills the transport + sink + every pane on it.
@@ -164,7 +164,7 @@ Each pane has its own `id`, its own data read/write state, its own `PaneInfo`. K
 
 ```rust
 // core/id.rs
-pub struct LinkId(Uuid);   // identifies a link (transport + sink + tmux server)
+pub struct LinkId(Uuid);   // identifies a link (transport + sink + tmux session inside shared -L xscore)
 pub struct PaneId(Uuid);   // identifies one pane inside a link
 
 // core/address.rs

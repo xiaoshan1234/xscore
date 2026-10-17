@@ -101,7 +101,7 @@ use tokio::process::Command;
 
 pub struct TmuxSink {
     pub mode: String,             // "local" | "remote" (post-resolution)
-    pub session_name: String,     // tmux server session name == the link key
+    pub session_name: String,     // tmux session name == the link key (session lives in shared -L xscore server)
 }
 
 impl TmuxSink {

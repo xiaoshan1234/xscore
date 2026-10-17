@@ -30,11 +30,11 @@ xscore link del   --id <link-id>        # full teardown: kill the external resou
 | Verb    | External resource? | In-memory registry? | Allowed transports | What the resource does |
 |---------|-------------------|---------------------|--------------------|------------------------|
 | `add`   | creates new       | inserts new link    | all (shell/serial/ssh/tmux) | tmux: `tmux new-session -d -s <name> -t xscore`; others: native spawn/connect |
-| `open`  | re-attach only    | inserts new link record for it | tmux only — non-tmux returns `Error::OpenOnlyForTmux(<kind>)` | tmux: attach to existing session by name on existing tmux server |
-| `close` | unchanged         | removes link record only | tmux only — non-tmux returns `Error::CloseOnlyForTmux(<kind>)` | tmux session keeps running; tmux server keeps running; tmux-window tree keeps running |
-| `del`   | kills it          | removes link record | all | full teardown of transport + sink + every pane + (for tmux) `tmux kill-server` for the link's server |
+| `open`  | re-attach only    | inserts new link record for it | tmux only — non-tmux returns `Error::OpenOnlyForTmux(<kind>)` | tmux: attach to existing session by name in the shared `-L xscore` server |
+| `close` | unchanged         | removes link record only | tmux only — non-tmux returns `Error::CloseOnlyForTmux(<kind>)` | tmux session keeps running inside the shared server |
+| `del`   | kills it          | removes link record | all | full teardown of transport + sink + every pane + (for tmux) `tmux kill-session -t xscore-link-<link_uuid>` (the shared `-L xscore` server stays up) |
 
-A `close` on a tmux link leaves the tmux session alive on the tmux server; a subsequent `open` against the same session name succeeds. The window into the session lives across CLI invocations.
+A `close` on a tmux link leaves the tmux session alive inside the shared `-L xscore` server; a subsequent `open` against the same session name succeeds. The session lives across CLI invocations.
 
 ### `LinkAddress` is now an internal-only concept
 

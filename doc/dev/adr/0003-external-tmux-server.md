@@ -21,7 +21,7 @@ Each backend's `write`/`read` would otherwise have to know about resize, scrollb
 
 `TmuxSink::create` runs `tmux -L xscore new-session -d -s <link-name>` and stores the session name. `write` is `tmux send-keys`. `snapshot` is `tmux capture-pane -p -J`. `resize` is `tmux resize-pane`. `close` is `tmux kill-session`.
 
-Per-link tmux server name = the `link-id` uuid, e.g. `xscore-<uuid>`. Per-pane = `tmux new-window` inside that server.
+Per-link tmux session name = `xscore-link-<link_uuid>`. Per-pane (today's model) = `tmux new-window` inside that session. The tmux server is **one global `-L xscore` socket**, shared across every link — `xscore link add` is `tmux -L xscore new-session -d -s xscore-link-<uuid>`, not a per-link server.
 
 ```
 xscore link add shell:///bin/cat
@@ -35,7 +35,7 @@ xscore link add shell:///bin/cat
 **Positive:**
 - PTY, line buffering, ANSI parsing, scrollback, resize — all done. We just call tmux.
 - Debugging: any user can `tmux -L xscore attach` to see the live state. `tmux -L xscore ls` lists all links.
-- Multi-pane on one link = multi-window in one tmux server. Falls out naturally.
+- Multi-pane on one link = multi-window in one tmux session (the session lives in the shared `-L xscore` server). Falls out naturally.
 - "Tmux running inside SSH" becomes a Sink config: spawn tmux over the SSH channel via `Sink::attach()`. Deferred to SSH-integration phase but the seam exists.
 
 **Negative:**

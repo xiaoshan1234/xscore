@@ -14,7 +14,7 @@ separate source files to keep in sync.
 
 Runtime structure: CLI surface, `SessionManager`, three registries, the
 `Link` / `Pane` structs, `Transport` × `Sink` trait impls, and external
-processes (tmux server, local child, serial port, future SSH channel).
+processes (tmux session inside shared `-L xscore`, local child, serial port, future SSH channel).
 Color-coded by layer.
 
 Read first if you want to know "what are the moving parts".
@@ -107,7 +107,7 @@ Two parallel state diagrams.
 
 - **Link lifecycle**: `Idle → Constructing → Open → Ready → Closing → Closed` for the **resource**
   (tmux session stays alive across `Closing` — i.e. `close` is tmux-detach). For full teardown the path
-  is `Ready → Deleting → Closed` (deletes the tmux server). Both paths emerge from `Ready`.
+  is `Ready → Deleting → Closed` (deletes the per-link tmux session). Both paths emerge from `Ready`.
   A sub-machine `Active (N panes)` for the steady state (`Empty ↔ OnePane ↔ ManyPanes`).
 - **Pane lifecycle**: `Created → Open → ReadWrite ↔ Closing → Closed`.
 
@@ -115,8 +115,7 @@ Key invariants (ADR 0005 verb split):
 
 - `close_link()` (which is `xscore link close`) is **tmux-detach only** — the link is unregistered
   in-memory, panes go away, the tmux session keeps running. Re-attach with `link open`.
-- `del_link()` (which is `xscore link del`) is the **full teardown** — it kills the per-link
-  tmux server and every pane, and only then reaches `Closed`.
+- `del_link()` (which is `xscore link del`) is the **full teardown** — it kills the per-link tmux session and every pane, and only then reaches `Closed`. The shared `-L xscore` server stays up.
 - Link stays Alive across pane lifecycle (Pane close ≠ Link close).
 - Failed state is reachable from any transport / sink error; cleanup is best-effort.
 

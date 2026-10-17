@@ -365,7 +365,7 @@ impl SessionManager {
                 return Err(Error::OpenOnlyForTmux(address.kind()));
             }
             "tmux" => {
-                // Local tmux case: look up the session name in the saved tmux server
+                // Local tmux case: look up the session in the shared tmux server (identified by spec.sink.tmux_socket).
                 // identified by spec.sink.tmux_socket; if found, register the link
                 // without creating the session; if not found, LinkNotFound.
                 // For this slice the implementation is stubbed — see
@@ -404,7 +404,7 @@ impl SessionManager {
     }
 
     /// Full teardown of a link: kill transport + sink + every pane, and
-    /// for tmux, kill the per-link tmux server. Was previously named
+    /// for tmux, kill the per-link tmux session (the shared `-L xscore` server stays up).
     /// `close_link`; renamed to `del_link` to match the new CLI verb
     /// (ADR 0005: `xscore link del`).
     pub async fn del_link(&self, id: LinkId) -> Result<()> {

@@ -37,7 +37,7 @@ SessionManager
 **Positive:**
 - `link open` becomes a clean semantic: "attach to an existing tmux session by name; if none, error." (For shell/serial transports the verb returns `Error::OpenOnlyForTmux` — the surface invariant in ADR 0005.)
 - Closing a pane does not affect the link. Killing a link kills every pane on it. Detaching (`link close`) keeps the tmux session alive but unregisters the link in-memory; killing (`link del`) does both. See ADR 0005.
-- `TmuxSink` owns one tmux server (the link); `new_pane` is `tmux new-window`. The "multi-window in one tmux server" semantics fall out for free.
+- `TmuxSink` owns one tmux session (the link) inside the shared `-L xscore` server; `new_pane` is `tmux new-window`. The "multi-window in one tmux session" semantics fall out for free.
 - Future "live attach" (a second CLI invocation watches an existing link) is just a question of where the registry lives (in-memory today; daemon later). The model is correct.
 
 **Negative:**

@@ -51,7 +51,7 @@ xscore config unset <key>
 | `link add`    | yes (transport + sink + 1 pane)   | yes | all                          | processes / SSH channels / tmux sessions |
 | `link del`    | no (kills them)                   | yes | all                          | nothing — already gone |
 | `link open`   | no (re-attaches existing tmux)    | yes | tmux only — others err       | nothing — already running |
-| `link close`  | no (detaches — leaves tmux alive) | yes | tmux only — others err       | nothing — tmux server stays |
+| `link close`  | no (detaches — leaves tmux alive) | yes | tmux only — others err       | nothing — per-link session stays in shared server |
 | `pane add`    | yes (one tmux window)             | yes | tmux only                    | tmux window |
 | `pane del`    | no (kills the tmux window)        | yes | tmux only                    | nothing — window is gone |
 
@@ -466,7 +466,7 @@ impl SessionManager {
         match address.kind() {
             "shell" | "serial" | "ssh" => Err(Error::OpenOnlyForTmux(address.kind())),
             "tmux" => {
-                // Local tmux case: lookup session name in the saved tmux server
+                // Local tmux case: lookup the session in the shared tmux server (identified by spec.sink)
                 // identified by spec.sink; if found, register the link without
                 // creating a session; if not found, return LinkNotFound.
                 todo!("stub for slice; real impl lands in tmux-attach persistence PR")
@@ -494,7 +494,7 @@ impl SessionManager {
     }
 
     /// Full teardown: kill transport + sink + every pane, plus (for tmux)
-    /// the per-link tmux server. Was previously named `close_link`; renamed
+    /// the per-link tmux session (the shared `-L xscore` server stays up). Was previously named `close_link`; renamed
     /// to `del_link` to match the CLI verb (ADR 0005).
     pub async fn del_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
