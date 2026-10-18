@@ -6,6 +6,8 @@ pub mod link_registry;
 pub mod manager;
 pub mod pane;
 pub mod pane_registry;
+pub mod window;
+pub mod window_registry;
 
 pub use address::LinkAddress;
 pub use error::{Error, Result};

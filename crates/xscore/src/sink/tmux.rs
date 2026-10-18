@@ -1,16 +1,18 @@
-use crate::core::{Error, Result};
+use crate::core::{Error, LinkId, Result};
+use crate::model::WindowInfo;
 use crate::transport::Transport;
 use crate::util::tmux_arg_socket;
 use async_trait::async_trait;
 use tokio::process::Command;
 
 pub struct TmuxSink {
-    pub mode: String,             // "local" | "remote" (post-resolution)
-    pub session_name: String,     // tmux session name == the link key (session lives in shared -L xscore server)
+    pub link_id: LinkId,             // used to populate WindowInfo.link_id on new_window
+    pub mode: String,                // "local" | "remote" (post-resolution)
+    pub session_name: String,        // tmux session name == the link key (session lives in shared -L xscore server)
 }
 
 impl TmuxSink {
-    pub async fn create(mode: &str, session_name: &str, transport: &mut dyn Transport) -> Result<Self> {
+    pub async fn create(link_id: LinkId, mode: &str, session_name: &str, transport: &mut dyn Transport) -> Result<Self> {
         transport.open().await?;
         let mut args = tmux_arg_socket();
         args.extend([
@@ -21,7 +23,7 @@ impl TmuxSink {
         if !status.success() {
             return Err(Error::Sink(format!("tmux new-session: exit {status}")));
         }
-        Ok(Self { mode: mode.into(), session_name: session_name.into() })
+        Ok(Self { link_id, mode: mode.into(), session_name: session_name.into() })
     }
 
     fn tmux(&self) -> Command {
@@ -29,24 +31,64 @@ impl TmuxSink {
         c.args(tmux_arg_socket());
         c
     }
+
+    fn session_window_addr(&self, idx: u32) -> String {
+        format!("{}:{}", self.session_name, idx)
+    }
 }
 
 #[async_trait]
 impl super::Sink for TmuxSink {
     fn kind(&self) -> &'static str { "tmux" }
 
-    async fn attach(&mut self, _transport: &dyn Transport) -> Result<()> {
+    async fn attach(&self, _transport: &dyn Transport) -> Result<()> {
         // tmux already running on its own socket; attach is reserved for ssh-channel
         // wiring in the SSH-integration PR. No-op for now.
         Ok(())
     }
 
-    async fn new_pane(&self) -> Result<String> {
+    async fn new_window(&self, name: &str) -> Result<WindowInfo> {
+        // tmux's -F "#{window_id}" yields a stable "@N" id (e.g. "@42"). The
+        // numeric N is what tmux accepts on the wire for things like
+        // `kill-window -t <session>:<idx>`.
         let out = self.tmux()
-            .args(["new-window", "-t", &self.session_name, "-P", "-F", "#{pane_id}"])
+            .args(["new-window", "-t", &self.session_name, "-n", name,
+                   "-P", "-F", "#{window_id}"])
             .output().await?;
         if !out.status.success() {
             return Err(Error::Sink(format!("tmux new-window: {:?}", out.status)));
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let tmux_window_index: u32 = s.trim_start_matches('@').parse()
+            .map_err(|e| Error::Sink(format!("parse window_id {s:?}: {e}")))?;
+        Ok(WindowInfo {
+            id: crate::core::WindowId::new(),
+            link_id: self.link_id,
+            name: name.to_string(),
+            created_at: chrono::Utc::now(),
+            tmux_window_index,
+        })
+    }
+
+    async fn kill_window(&self, tmux_window_index: u32) -> Result<()> {
+        let addr = self.session_window_addr(tmux_window_index);
+        let status = self.tmux()
+            .args(["kill-window", "-t", &addr])
+            .status().await?;
+        if !status.success() {
+            return Err(Error::Sink(format!("kill-window exit {status}")));
+        }
+        Ok(())
+    }
+
+    async fn new_pane(&self, tmux_window_index: u32) -> Result<String> {
+        // Pane = a tmux split inside the named window.
+        let addr = self.session_window_addr(tmux_window_index);
+        let out = self.tmux()
+            .args(["split-window", "-t", &addr, "-P", "-F", "#{pane_id}"])
+            .output().await?;
+        if !out.status.success() {
+            return Err(Error::Sink(format!("tmux split-window: {:?}", out.status)));
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }

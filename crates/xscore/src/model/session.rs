@@ -1,6 +1,6 @@
 // model/session.rs
 use serde::{Deserialize, Serialize};
-use crate::core::{LinkAddress, LinkId, PaneId};
+use crate::core::{LinkAddress, LinkId, PaneId, WindowId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -59,12 +59,26 @@ impl LinkInfo {
     }
 }
 
+/// ADR 0006: a window is a tmux window inside the link's session. The link
+/// owns the session, windows own panes (which are tmux splits).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PaneInfo {
-    pub id: PaneId,
+pub struct WindowInfo {
+    pub id: WindowId,
     pub link_id: LinkId,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    pub sink_handle: String,    // e.g. "%42"
-    pub pane_index: u32,        // 0-based, set by sink
+    /// Index of this window inside its link's tmux session (tmux assigns
+    /// these incrementally; used to address the window via tmux wire
+    /// commands like `tmux -L xscore kill-window -t <session>:<idx>`).
+    pub tmux_window_index: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PaneInfo {
+    pub id: PaneId,
+    pub window_id: WindowId,    // was: link_id
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub sink_handle: String,    // tmux pane_id like "%7"
+    pub pane_index: u32,        // 0-based, split index inside the window
 }
