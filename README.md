@@ -6,37 +6,84 @@ Rust session manager for SSH / shell / serial, modeled as **Link × Window × Pa
 - **Window** = one tmux window inside the link's session. A link can have N named windows.
 - **Pane** = one working view — a tmux split-window inside a Window. A window can have M panes sharing its screen.
 
-## Quick start
+This is a **Rust port of the xst/script patterns** (without the xst dependency): a single CLI that orchestrates the local tmux server as the runtime + a `~/.config/xscore/` tree for persistent state.
 
+## 5-minute demo
+
+```bash
+# 1. Build (one-time). Rust 1.95+, tokio runtime. The build pulls in
+#    serialport, russh, clap, etc. — see Cargo.lock for the full list.
+cargo build --release
+
+# 2. Add a link. Each `link add` creates a fresh tmux session in the
+#    shared `tmux -L xscore` server, with one default window + one
+#    default pane. The common path stays one step.
+./target/release/xscore link add shell:///bin/bash
+# stdout:
+#   link:  01928e0a-7d10-7000-8000-000000000001
+#   window:01928e0a-7d10-7000-8000-000000000002
+#   pane:  01928e0a-7d10-7000-8000-000000000003
+
+# 3. List links (state is persisted to ~/.config/xscore/state/state.json
+#    automatically after every mutating call).
+./target/release/xscore link list
+# stdout:
+#   01928e0a-7d10-7000-8000-000000000001   01928e0a-7d10-7000-8000-000000000001
+
+# 4. Add another window to the same link (e.g. dev / ops / play).
+./target/release/xscore window add --link <link-id> --name dev
+# stdout:
+#   window:01928e0a-7d10-7000-8000-000000000004
+
+# 5. Add a split-pane to the dev window.
+./target/release/xscore pane add --window <window-id-2> --name bash
+# stdout:
+#   pane:  01928e0a-7d10-7000-8000-000000000005
+
+# 6. Read the visible content of a pane (uses tmux capture-pane).
+./target/release/xscore data read --pane <pane-id> --bytes 4096
+
+# 7. Write text into a pane (uses tmux send-keys).
+echo -n 'echo hi from xscore' | ./target/release/xscore data write --pane <pane-id>
+
+# 8. Verify state survives process exit (in another shell):
+./target/release/xscore link list
+# stdout: same <link-id> as step 3
+./target/release/xscore window list --link <link-id>
+# stdout: both window ids from steps 2 + 4
+
+# 9. Clean up.
+./target/release/xscore link del --id <link-id>
 ```
-xscore link add shell:///bin/bash
-xscore link add ssh://user@host:22
-xscore link add serial:///dev/ttyUSB0?baud=115200
 
-# Persistent template (one-time):
-xscore link config add web ssh://u@h:22?identity=~/.ssh/id_ed25519
+## Installation
 
-# Multiple windows inside one link (ADR 0006) — e.g. dev + ops + play sessions:
-xscore window add   --link <link-id> --name dev      # new tmux window
-xscore pane   add   --window <window-id> --name bash  # split-window inside that tmux window
+```bash
+# From the workspace root:
+cargo install --path .
 
-# Open / detach / destroy — verb split (ADR 0005):
-xscore link open 'tmux://my-session'           # attach existing tmux session
-xscore link close --id <link-id>               # tmux-detach only (session keeps running)
-xscore link del --id <link-id>                 # full teardown (kills the per-link tmux session)
+# Or clone and run from source:
+git clone <repo> xscore && cd xscore
+cargo build --release
+./target/release/xscore --help
 ```
+
+**Requirements:**
+- Rust 1.95+
+- `tmux` 3.0+ on `$PATH` (the `xscore` link tree is built around tmux's session/window/pane model)
+- A real serial device or SSH server for the non-shell transports (optional; shell is the test path)
 
 ## Commands
 
 ```
 xscore link add <url?> [-c CONFIG]            # always create new (url OR -c CONFIG required)
 xscore link del --id <link-id>                # full teardown (kills transport + sink + the per-link tmux session)
-xscore link open <url?> [-c CONFIG]           # attach existing tmux session (tmux only)
-xscore link close --id <link-id>              # tmux-detach only (session keeps running; non-tmux errs)
+xscore link open <url?> [-c CONFIG]           # attach existing tmux session (tmux only; non-tmux errors)
+xscore link close --id <link-id>              # tmux-detach only (session keeps running; non-tmux errors)
 xscore link show --id <link-id>
 xscore link list
 
-xscore link config add <name> <url>
+xscore link config add <name> <url>            # save a ConnectSpec template to ~/.config/xscore/links/
 xscore link config remove <name>
 xscore link config show <name>
 xscore link config list
@@ -55,11 +102,19 @@ xscore data read --pane <pane-id> [--bytes N]
 xscore data write --pane <pane-id> [--from-file FILE]
 xscore data resize --pane <pane-id> --cols C --rows R
 
-xscore config show
+xscore config show                            # stub for v0.2.0
 xscore config path
 xscore config set <key> <value>
 xscore config unset <key>
 ```
+
+### URL syntax
+
+| Scheme | Form | Example |
+|---|---|---|
+| `shell://` | Local child process | `shell:///bin/bash`, `shell:///bin/cat` |
+| `serial://` | Serial port (needs `?baud=...`) | `serial:///dev/ttyUSB0?baud=115200&data_bits=8&parity=n&stop_bits=1` |
+| `ssh://` | SSH (key-based auth, needs `?identity=...`) | `ssh://user@host:22?identity=~/.ssh/id_ed25519` |
 
 ## Architecture
 
@@ -73,7 +128,7 @@ CLI -> SessionManager
                                   ^ wraps (Link, sink_handle)
 ```
 
-Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Window inside a link is a tmux window inside the link's session. Each Pane inside a window is a tmux split-window sharing the window's screen. Killing a pane does not affect its siblings or its parent window; killing a window kills every pane inside it (via tmux kill-window); closing a link keeps the tmux session alive (re-attachable via `link open`); killing a link (`link del`) drops every window + pane and the tmux session.
+Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Window inside a link is a tmux window inside the link's session. Each Pane inside a window is a tmux split-window sharing the window's screen. Killing a pane does not affect its siblings or its parent window; killing a window kills every pane inside it (via `tmux kill-window`); closing a link keeps the tmux session alive (re-attachable via `link open`); killing a link (`link del`) drops every window + pane and the tmux session.
 
 **`add` vs `del` vs `open` vs `close`** (ADR 0005, four-verb `link` tree):
 - `add` creates a brand-new external resource: transport + sink + a default window + a default pane.
@@ -83,34 +138,126 @@ Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Window in
 
 `link open` and `link close` are tmux-only because shell/serial/ssh processes don't have cross-invocation identity to attach to or detach from. `link add <same url>` always creates a brand-new link; to re-attach to an existing resource, the verb is `link open`. See [ADR 0005](doc/dev/adr/0005-add-open-close-del-verbs.md) for the rationale.
 
-## Status (this slice)
+## Status (v0.1.0)
 
-Implemented:
-- 3-tier model: Link × Window × Pane (ADR 0006) wired end-to-end
+**Working end-to-end:**
+- 3-tier model: Link × Window × Pane (ADR 0006) wired
 - Local tmux sink: `tmux new-session / new-window / split-window / kill-*` over the shared `-L xscore` server (ADR 0003)
-- URL parser: `shell://` / `ssh://` / `serial://` with `?key=value` query (e.g. `?identity=~/.ssh/id_ed25519`, `?baud=115200`)
+- `shell://` transport (local child, real `tokio::process::Command`)
+- URL parser: `shell://` / `ssh://` / `serial://` with `?key=value` query
 - Persistent ConnectSpec templates: `xscore link config {add,remove,show,list}` at `~/.config/xscore/links/`
 - Per-pane data ops: `xscore data {read, write, resize}` over tmux's `capture-pane` / `send-keys` / `resize-pane`
 - 4-verb trees for `link` / `window` / `pane` (ADR 0005)
 - ADR 0005 invariants: `link open` and `link close` reject non-tmux transports with `OpenOnlyForTmux` / `CloseOnlyForTmux`
+- State persistence across CLI invocations (`~/.config/xscore/state/state.json`)
 
-Pending (follow-up tasks):
-- `link open` real impl for the tmux case (currently `todo!()` for the local-tmux lookup; non-tmux case correctly errors)
-- Real `SerialTransport` and `SshTransport` (currently stubs that error on `open()`)
-- State persistence across CLI invocations (task-15): the in-memory registries reset between `xscore` runs, so multi-step workflows need a single shell session today
-- `xscore config {show, path, set, unset}` for AppConfig (separate from `xscore link config`)
+**Implemented but not exercised by the test suite:**
+- `serial://` transport (real `serialport = "4.10"` impl) — needs real hardware
+- `ssh://` transport (real `russh = "0.43"` impl) — needs a real SSH server; key auth only (no `known_hosts`, no password)
+
+**Stubbed / pending (deferred to v0.2.0+):**
+- `link open` for the local-tmux case is a `todo!()` stub (manager.rs `open_link`); non-tmux correctly returns `OpenOnlyForTmux`
+- `xscore config {show, path, set, unset}` (top-level config — separate from `xscore link config`)
+- `link config edit` for in-place template editing
+- Pre-built binaries (currently install via `cargo install --path .`)
+
+**Known limitations (deferred):**
+- Hydration uses `NoopTransport` — `data read` / `data write` on a link that survives a process restart fail (the original child process / SSH channel is gone). To re-attach I/O, run `xscore link add <url>` again (creates a NEW link with a fresh transport) or `xscore link open` once that lands.
+- `xscore link open` for tmux is `todo!()` — will land in v0.2.0.
+- SSH `check_server_key` accepts any host key. Real users want `StrictHostKeyChecking=yes` with a `~/.ssh/known_hosts` lookup.
+- SSH auth is key-only (no password field in `ConnectSpec::Ssh` yet).
+- Serial `default-features = false` (no `libudev`); open by explicit path. Future `xscore link serial list` would need `libudev-dev` or `/sys/class/tty/*` scanning.
 
 ## Tests
 
 ```bash
-# Unit tests (14 tests, in-process)
+# Unit tests (14 tests, in-process, <1s)
 cargo test -p xscore --lib
 
-# Integration smoke tests (5 state-free, 6 ignored — need state persistence)
+# CLI integration tests (11 tests, ~0.5s, requires live tmux)
 cargo test -p xscore --test cli_smoke
 
-# Run the ignored tests (after task-15 lands; requires live tmux)
-cargo test -p xscore --test cli_smoke -- --ignored
+# Data-path integration tests (3 tests, single-process, real tmux round-trip)
+cargo test -p xscore --test data_smoke
+
+# Everything (28 tests total)
+cargo test -p xscore
 ```
 
-State-persistence caveat: each `xscore` invocation is a fresh process with a fresh `Arc<SessionManager>`. Tests that span multiple invocations (e.g. `link add` then `link list`) are marked `#[ignore]` until task-15 lands. See `crates/xscore/tests/cli_smoke.rs` for the breakdown.
+**Coverage map:**
+
+| Area | Where | Count |
+|---|---|---|
+| URL parsing (5 schemes) | `url::connect::tests` | 5 |
+| Core id roundtrips + distinctness | `core::id::tests` | 3 |
+| `LinkAddress` equality | `core::address::tests` | 2 |
+| `Transport` trait object-safety | `transport::tests` (echo) | 1 |
+| `ShellTransport` cat round-trip | `transport::shell::tests` | 1 |
+| `Sink` trait object-safety | `sink::tests` (noop) | 1 |
+| CLI help tree | `cli_smoke` | 1 |
+| CLI input validation (link add needs url) | `cli_smoke` | 1 |
+| ADR 0005 invariant (link open non-tmux) | `cli_smoke` | 1 |
+| Disk-based config templates (link config add/list) | `cli_smoke` | 1 |
+| Two `link add <same url>` = two distinct ids (ADR 0005) | `cli_smoke` | 1 |
+| Multi-invocation state (add → list → del_pane → del_link) | `cli_smoke` | 1 |
+| ADR 0005 invariant (link close non-tmux) | `cli_smoke` | 1 |
+| `link del` removes from list | `cli_smoke` | 1 |
+| `window add` inside link, visible in `window list` | `cli_smoke` | 1 |
+| `window del` removes from list | `cli_smoke` | 1 |
+| `pane add --window` (not `--link`) — ADR 0006 | `cli_smoke` | 1 |
+| In-process add → write → snapshot (real tmux) | `data_smoke` | 1 |
+| Double-default-window fix (1 link → 1 window) | `data_smoke` | 1 |
+| Cross-manager hydration (manager A add → manager B hydrates) | `data_smoke` | 1 |
+
+Total: **28 tests, 0 ignored.**
+
+## File layout
+
+```
+crates/xscore/src/
+  main.rs                       # binary entry — clap dispatch
+  lib.rs                        # module declarations
+  core/                         # LinkId, WindowId, PaneId, LinkAddress, Error,
+                                #   Link/Window/Pane structs, registries,
+                                #   SessionManager, state persistence
+    id.rs
+    address.rs
+    error.rs
+    link.rs, pane.rs, window.rs
+    link_registry.rs, pane_registry.rs, window_registry.rs
+    manager.rs                   # SessionManager
+    state.rs                     # save / load
+  backends/                     # PaneBackend trait + BackendRegistry + CompositeBackend
+  model/                        # ConnectSpec, TransportConfig, SinkConfig,
+                                #   LinkInfo, WindowInfo, PaneInfo
+    session.rs
+  transport/                    # Transport trait + 3 impls + factory
+    mod.rs
+    factory.rs
+    shell.rs, serial.rs, ssh.rs
+  sink/                         # Sink trait + 2 impls + factory + util
+    mod.rs
+    factory.rs
+    raw.rs, tmux.rs
+  url/                          # URL parser
+    connect.rs
+  util/                          # tmux_arg_socket() helper
+    tmux_socket.rs
+  cli/                          # clap 3-level subcommand tree
+    mod.rs
+    link.rs, window.rs, pane.rs, data.rs
+  config/                       # link templates on disk
+    mod.rs, paths.rs, loader.rs
+
+crates/xscore/tests/
+  cli_smoke.rs                  # 11 CLI integration tests
+  data_smoke.rs                  # 3 in-process data-path tests
+```
+
+## Release process
+
+See [`RELEASE.md`](RELEASE.md) for the v0.1.0 release checklist and version-bump policy.
+
+## License
+
+TBD — see [LICENSE](LICENSE) (placeholder; pick at v0.1.0 release time).
