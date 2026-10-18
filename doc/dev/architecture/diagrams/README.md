@@ -110,23 +110,27 @@ graph TB
     class TMUX,Shell,Serial,SSH external
 ```
 
-## 2. Link & Pane state machines
+## 2. Link × Window × Pane state machines
 
-Two parallel state diagrams.
+Three parallel state diagrams (ADR 0006).
 
 - **Link lifecycle**: `Idle → Constructing → Open → Ready → Closing → Closed` for the **resource**
   (tmux session stays alive across `Closing` — i.e. `close` is tmux-detach). For full teardown the path
-  is `Ready → Deleting → Closed` (deletes the per-link tmux session). Both paths emerge from `Ready`.
-  A sub-machine `Active (N panes)` for the steady state (`Empty ↔ OnePane ↔ ManyPanes`).
-- **Pane lifecycle**: `Created → Open → ReadWrite ↔ Closing → Closed`.
+  is `Ready → Deleting → Closed` (deletes the per-link tmux session; cascades every window + pane).
+  A sub-machine `Active (N windows)` for the steady state (`NoWindow ↔ OneWindow ↔ ManyWindows`).
+- **Window lifecycle**: `Created → Active → Closing → Closed` for the **tmux window** inside the link's
+  session. With its own `Active (M panes)` sub-machine.
+- **Pane lifecycle**: `Created → Open → ReadWrite ↔ Closing → Closed`. The leaf — no further sub-machine.
 
-Key invariants (ADR 0005 verb split):
+Key invariants (ADR 0005 verb split + ADR 0006 3-tier model):
 
-- `close_link()` (which is `xscore link close`) is **tmux-detach only** — the link is unregistered
-  in-memory, panes go away, the tmux session keeps running. Re-attach with `link open`.
-- `del_link()` (which is `xscore link del`) is the **full teardown** — it kills the per-link tmux session and every pane, and only then reaches `Closed`. The shared `-L xscore` server stays up.
-- Link stays Alive across pane lifecycle (Pane close ≠ Link close).
-- Failed state is reachable from any transport / sink error; cleanup is best-effort.
+- `close_link()` (which is `xscore link close`) is **tmux-detach only** — unregisters the link + every window + every pane in-memory; the tmux session + windows stay alive on the tmux server. Re-attach with `link open` (same session comes back, panes re-discovered).
+- `del_link()` (which is `xscore link del`) is **full teardown** — kills the per-link tmux session (cascades every window + pane). The shared `tmux -L xscore` server stays up.
+- `window del()` kills one tmux window; panes inside die with it (`tmux kill-window`).
+- `pane del()` kills one tmux split-window; the parent window and link are unaffected.
+- `link add` auto-creates one default window (named `w-<first 8 hex chars of link_id>`, e.g. `w-01928e0a`) and one default pane inside it — common path stays one step.
+- Pane close ≠ Window close ≠ Link close (each level is independent).
+- Failed is reachable from any transport / sink / tmux error; cleanup is best-effort.
 
 ```mermaid
 stateDiagram-v2
@@ -139,45 +143,63 @@ stateDiagram-v2
         Open --> Ready: sink_for().attach() ok
         Open --> Failed: sink err
 
-        Ready --> Active
-        Ready --> Closing: close_link()    # ADR 0005: tmux-detach only
-        Closing --> Active: link open      # ADR 0005: re-attach (tmux session kept alive)
-        Ready --> Deleting: del_link()     # ADR 0005: full teardown starts
-        Deleting --> Closed: transport.close() / server killed
-
+        Ready --> Closing: close_link()        # ADR 0005: tmux-detach only
+        Closing --> Ready: link open          # ADR 0006: re-attach (tmux session + windows stay alive)
+        Ready --> Deleting: del_link()         # ADR 0005/0006: cascade every window + pane
+        Deleting --> Closed: tmux kill-session + transport.close()
         Failed --> Closed: best-effort cleanup
 
-        state "Active (N panes)" as Active {
-            [*] --> Empty
-            Empty --> OnePane: new_pane() #1
-            OnePane --> ManyPanes: new_pane() #N
-            ManyPanes --> OnePane: close_pane()
-            OnePane --> Empty: close_pane() last
+        state "Active (N windows)" as Active {
+            [*] --> NoWindow
+            NoWindow --> OneWindow: link add (auto default window) OR window add
+            OneWindow --> ManyWindows: window add
+            ManyWindows --> OneWindow: window del
+            OneWindow --> NoWindow: window del (last default)
         }
     }
 
-    state "Pane lifecycle" as PL {
+    state "Window lifecycle (one per window; canonical shape)" as WL {
         [*] --> Created
-        Created --> Open: backend.insert()
-        Open --> ReadWrite: snapshot/write ok
-        ReadWrite --> ReadWrite: read/write/resize
-        ReadWrite --> Closing: close_pane()
-        Closing --> Closed: sink.close_pane() ok
+        Created --> Active: sink.new_window() (named, returns tmux_window_index)
+        Active --> Closing: window del
+        Closing --> Closed: tmux kill-window ok
+        Active --> Failed: kill-window err
+        Failed --> Closed: best-effort cleanup
+
+        state "Window.Active (M panes)" as WindowActive {
+            [*] --> NoPane
+            NoPane --> OnePane: pane add (split-window) #1
+            OnePane --> ManyPanes: pane add #N
+            ManyPanes --> OnePane: pane del
+            OnePane --> NoPane: pane del (last)
+        }
     }
 
-    Idle --> Constructing: xscore link add
+    state "Pane lifecycle (leaf)" as PL {
+        [*] --> Created
+        Created --> Open: backend.insert() / tmux split-window
+        Open --> ReadWrite: snapshot/write ok
+        ReadWrite --> ReadWrite: read/write/resize
+        ReadWrite --> Closing: pane del
+        Closing --> Closed: tmux kill-split-pane ok
+        Closed --> [*]
+    }
+
+    Idle --> Constructing: xscore link add (auto 1 default window + 1 pane per ADR 0006)
     Constructing --> Ready: success
     Closed --> [*]
 
     note right of Active
-        Link stays Alive
-        across pane lifecycle.
-        Pane close ≠ Link close.
+        Link hosts N windows;
+        each window hosts M panes.
+        3-tier model (Link / Window / Pane)
+        per ADR 0006.
+        Pane close ≠ Window close ≠ Link close.
     end note
 
     note right of Failed
         Reachable from any
-        transport / sink error.
+        transport / sink / tmux error.
         Recovery: best-effort
         cleanup, then Closed.
     end note

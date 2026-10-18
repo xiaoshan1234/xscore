@@ -243,7 +243,11 @@ impl SessionManager {
     /// Add a new window to an existing link. Returns the new WindowId.
     pub async fn add_window(&self, link_id: LinkId, name: Option<String>) -> Result<WindowId> {
         let arc_link = self.links.get(link_id).await.ok_or(Error::LinkNotFound(link_id))?;
-        let resolved_name = name.unwrap_or_else(|| format!("w-{}", arc_link.info.tmux_session_id()));
+        // Default name per task-14 §Open questions: `w-<first 8 hex chars of link_id>`.
+        // For the auto-create path inside `add_link`, `name = None` resolves here.
+        // First 8 hex chars of the link_id (UUID v7) is unique-enough (32 bits)
+        // and tmux-safe (only `[a-zA-Z0-9_-]`, which hex chars + `w-` prefix satisfy).
+        let resolved_name = name.unwrap_or_else(|| format!("w-{}", &arc_link.id.to_string()[..8]));
         // Reconfigure-style: assign WindowId, call sink.new_window, register.
         let window_id = WindowId::new();
         let window_info = WindowInfo {
@@ -399,8 +403,15 @@ git commit -m "feat(cli,core,sink): Window — third tier (ADR 0006). New verb g
 
 ## Open questions for implementation (deferred until then)
 
-1. **`window open <name>` for cross-invocation re-attach.** Per ADR 0006 Open Question 1.
-2. **Default window naming.** Per ADR 0006 Open Question 2 — implementation picks one of: `<link_uuid>`, `default`, or let the user choose via a future flag.
-3. **tmux address syntax for windows.** `<session>:<window_index>` vs `<session>:<window_name>`. Implementation picks one (ADR 0006 Open Question 3).
+1. **`window open <name>` for cross-invocation re-attach.** Per ADR 0006 Open Question 1. (When SSH-integration lands and `link open <url>` becomes a real implementation, this is a natural follow-up for "open one specific window within an already-open link.")
+
+2. **Default window naming — RESOLVED at docs time, picks `w-<first 8 hex chars of link_id>`.** Per ADR 0006 Open Question 2. Example: a link with id `01928e0a-7d10-7000-8000-000000000000` auto-creates a window named `w-01928e0a`. Rationale:
+   - Short (10 chars) — readable in `tmux list-windows` and `link list` output.
+   - Unique-enough — first 8 hex chars of a uuid v7 = 32 bits of entropy, collision probability for one user's links is vanishingly small; full UUID-as-name (option A in ADR 0006) was rejected because 36 chars is too long for tmux status lines.
+   - Deterministic — given a link_id, you can re-find the default window without manager state.
+   - Tmux-safe — only `[a-zA-Z0-9_-]`, which hex chars + the `w-` prefix satisfy.
+   - User override: `window add --name=<their-name>` for any other choice.
+
+3. **tmux address syntax for windows — RESOLVED at docs time, picks `<session>:<tmux_window_index>`.** Per ADR 0006 Open Question 3. The implementation reads `tmux list-windows -t <session>` to map each in-memory `WindowId` to its tmux-assigned index at attach time; operations like `tmux -L xscore kill-window -t <session>:<idx>` use the index. Picking by name was rejected because window names are user-controlled (default `w-<8hex>`, override-friendly) and tmux allows duplicate names within a session — names are not a stable key.
 
 These are not blockers; pick at implementation time.
