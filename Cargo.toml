@@ -22,6 +22,7 @@ russh = "0.43"
 russh-keys = "0.43"
 portable-pty = "0.8"
 async-trait = "0.1"
+serialport = { version = "4.5", default-features = false }
 dirs = "5"
 mockall = "0.13"
 tempfile = "3"

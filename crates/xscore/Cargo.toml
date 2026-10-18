@@ -21,6 +21,7 @@ dirs.workspace = true
 russh.workspace = true
 russh-keys.workspace = true
 portable-pty.workspace = true
+serialport.workspace = true
 
 [dev-dependencies]
 mockall.workspace = true
