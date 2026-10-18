@@ -107,16 +107,24 @@ impl SessionManager {
     /// register a `LinkInfo` for it without creating a new tmux session; if
     /// not found, return `Error::LinkNotFound`.
     ///
-    /// For this slice: stub. Real wiring lands when the SSH-integration
-    /// phase resolves the remote tmux case; the local-tmux case is the only
-    /// one wired up before that. (Window tier comes back online
-    /// automatically — `link open` registers the existing session's
+    /// For this slice: stub for the tmux case. Real wiring lands when the
+    /// SSH-integration phase resolves the remote tmux case; the local-tmux
+    /// case is the only one wired up before that. (Window tier comes back
+    /// online automatically — `link open` registers the existing session's
     /// windows into `WindowRegistry`.)
     pub async fn open_link(
         &self,
         _spec: ConnectSpec,
-        _address: LinkAddress,
+        address: LinkAddress,
     ) -> Result<(LinkId, WindowId, PaneId)> {
+        // ADR 0005 invariant: `link open` is tmux-only. Reject non-tmux
+        // transports with `Error::OpenOnlyForTmux` BEFORE the tmux-attach
+        // stub panics, so callers (and integration tests) get a clean
+        // error message instead of a `todo!()` panic.
+        let kind = address.kind();
+        if kind != "tmux" {
+            return Err(Error::OpenOnlyForTmux(kind));
+        }
         // The full impl enumerates the existing session's windows via
         // `tmux list-windows -t <session>` and registers them in
         // `WindowRegistry`. Until the SSH-integration phase lands, the

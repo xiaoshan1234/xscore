@@ -82,3 +82,35 @@ Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Window in
 - `close` is the in-memory detach: unregister the link + windows + panes, but the tmux session keeps running (tmux only — shell/serial/ssh return `CloseOnlyForTmux`).
 
 `link open` and `link close` are tmux-only because shell/serial/ssh processes don't have cross-invocation identity to attach to or detach from. `link add <same url>` always creates a brand-new link; to re-attach to an existing resource, the verb is `link open`. See [ADR 0005](doc/dev/adr/0005-add-open-close-del-verbs.md) for the rationale.
+
+## Status (this slice)
+
+Implemented:
+- 3-tier model: Link × Window × Pane (ADR 0006) wired end-to-end
+- Local tmux sink: `tmux new-session / new-window / split-window / kill-*` over the shared `-L xscore` server (ADR 0003)
+- URL parser: `shell://` / `ssh://` / `serial://` with `?key=value` query (e.g. `?identity=~/.ssh/id_ed25519`, `?baud=115200`)
+- Persistent ConnectSpec templates: `xscore link config {add,remove,show,list}` at `~/.config/xscore/links/`
+- Per-pane data ops: `xscore data {read, write, resize}` over tmux's `capture-pane` / `send-keys` / `resize-pane`
+- 4-verb trees for `link` / `window` / `pane` (ADR 0005)
+- ADR 0005 invariants: `link open` and `link close` reject non-tmux transports with `OpenOnlyForTmux` / `CloseOnlyForTmux`
+
+Pending (follow-up tasks):
+- `link open` real impl for the tmux case (currently `todo!()` for the local-tmux lookup; non-tmux case correctly errors)
+- Real `SerialTransport` and `SshTransport` (currently stubs that error on `open()`)
+- State persistence across CLI invocations (task-15): the in-memory registries reset between `xscore` runs, so multi-step workflows need a single shell session today
+- `xscore config {show, path, set, unset}` for AppConfig (separate from `xscore link config`)
+
+## Tests
+
+```bash
+# Unit tests (14 tests, in-process)
+cargo test -p xscore --lib
+
+# Integration smoke tests (5 state-free, 6 ignored — need state persistence)
+cargo test -p xscore --test cli_smoke
+
+# Run the ignored tests (after task-15 lands; requires live tmux)
+cargo test -p xscore --test cli_smoke -- --ignored
+```
+
+State-persistence caveat: each `xscore` invocation is a fresh process with a fresh `Arc<SessionManager>`. Tests that span multiple invocations (e.g. `link add` then `link list`) are marked `#[ignore]` until task-15 lands. See `crates/xscore/tests/cli_smoke.rs` for the breakdown.

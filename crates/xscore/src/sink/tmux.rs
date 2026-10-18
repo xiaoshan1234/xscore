@@ -48,12 +48,18 @@ impl super::Sink for TmuxSink {
     }
 
     async fn new_window(&self, name: &str) -> Result<WindowInfo> {
-        // tmux's -F "#{window_id}" yields a stable "@N" id (e.g. "@42"). The
-        // numeric N is what tmux accepts on the wire for things like
-        // `kill-window -t <session>:<idx>`.
+        // Use `#{window_index}` (not `#{window_id}`) — `window_id` is a
+        // STABLE unique ID assigned at creation (so the 2nd window ever
+        // created in a tmux server is `@2`, not `@1`); using it as an
+        // index in `tmux split-window -t <session>:<idx>` fails because
+        // the index is the window's 0-based position, not its ID. The
+        // fix is to query the index directly. Caveat: indices shift when
+        // windows are removed; for our use case (kill_window by index),
+        // we operate on the window we just created, so the index is
+        // stable enough.
         let out = self.tmux()
             .args(["new-window", "-t", &self.session_name, "-n", name,
-                   "-P", "-F", "#{window_id}"])
+                   "-P", "-F", "#{window_index}"])
             .output().await?;
         if !out.status.success() {
             return Err(Error::Sink(format!("tmux new-window: {:?}", out.status)));

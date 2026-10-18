@@ -84,7 +84,7 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
     // Resolve to (spec, address): either via URL, via saved template, or URL+template merge.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let (link_id, _wid, pane_id) = mgr.add_link(spec, address).await?;
-    eprintln!("link:  {link_id}");
+    println!("link:  {link_id}");
     println!("pane:  {pane_id}");
     Ok(())
 }
