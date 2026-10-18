@@ -69,7 +69,10 @@ macro_rules! uuid_newtype {
             pub fn new() -> Self { Self(Uuid::now_v7()) }
             pub fn as_uuid(&self) -> Uuid { self.0 }
             pub fn parse(s: &str) -> Result<Self, uuid::Error> {
-                Ok(Self(Uuid::parse(s)?))
+                // `Uuid::parse_str` (not `parse`) — uuid ≥ 1.10 split the old
+                // `parse` into type-specific variants. The function signature
+                // and error type for callers is unchanged.
+                Ok(Self(Uuid::parse_str(s)?))
             }
         }
 
