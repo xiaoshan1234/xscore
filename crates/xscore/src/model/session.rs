@@ -36,6 +36,14 @@ pub struct ConnectSpec {
     #[serde(flatten)]
     pub transport: TransportConfig,
     pub sink: SinkConfig,
+    /// Persisted address — for the "save URL as template" workflow, the
+    /// user types `xscore link config add <name> <url>`; the address is
+    /// parsed from the URL and stored here so `link add -c <name>` can
+    /// recover the routing address without re-deriving it from the
+    /// transport. (ADR 0005 retired `--link=existing`, but templates are
+    /// a different concept — they let the user save a `name` and reuse
+    /// the routing address on subsequent `link add` calls.)
+    pub address: LinkAddress,
 }
 
 fn default_name() -> String { uuid::Uuid::now_v7().to_string() }

@@ -1,0 +1,43 @@
+// cli/mod.rs
+//
+// Top-level CLI dispatch. The 5 verb groups are:
+//   - link    (4-verb + config subgroup, ADR 0005)
+//   - window  (4-verb, ADR 0006)
+//   - pane    (4-verb with --window, ADR 0006)
+//   - data    (stub for task-11)
+//   - config  (stub — `xscore config {show, path, set, unset}` deferred to
+//             a later task; for this slice the `xscore config` shell
+//             shows a TODO and exits non-zero so users get a clear
+//             message)
+
+pub mod data;
+pub mod link;
+pub mod pane;
+pub mod window;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "xscore", version, about = "Manage SSH / shell / serial sessions as Link × Window × Pane (ADR 0006)")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Inspect / create / close / open / remove links (physical connections)
+    #[command(subcommand)]
+    Link(link::LinkCmd),
+    /// Inspect / create / close / open / remove windows (tmux sessions inside links, per ADR 0006)
+    #[command(subcommand)]
+    Window(window::WindowCmd),
+    /// Inspect / create / close / open / remove panes (views into windows)
+    #[command(subcommand)]
+    Pane(pane::PaneCmd),
+    /// Read / write / resize data on a pane (task-11 — stub for now)
+    #[command(subcommand)]
+    Data(data::DataCmd),
+    /// Show / edit AppConfig values (deferred — not yet implemented)
+    Config,
+}

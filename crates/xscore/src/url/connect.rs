@@ -53,7 +53,7 @@ pub fn parse(s: &str) -> Result<(ConnectSpec, LinkAddress)> {
         session_name: (!name.is_empty()).then(|| name.clone()),
     };
 
-    Ok((ConnectSpec { name, transport, sink }, address))
+    Ok((ConnectSpec { name, transport, sink, address: address.clone() }, address))
 }
 
 #[cfg(test)]
