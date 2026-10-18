@@ -23,9 +23,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Window(c) => window::run(mgr, c).await?,
         Commands::Pane(c) => pane::run(mgr, c).await?,
         Commands::Data(c) => {
-            // task-11 territory. The stub in cli/data.rs bails with a clear
-            // message so users get actionable feedback.
-            xscore::cli::data::run(c)?;
+            // Per-pane data ops (read / write / resize) — task-11.
+            xscore::cli::data::run(mgr, c).await?;
         }
         Commands::Config => {
             // AppConfig is a separate concern; deferred to a later task.
