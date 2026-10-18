@@ -32,10 +32,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 url = "2"
-russh = "0.43"
-russh-keys = "0.43"
-portable-pty = "0.8"
-tokio-serial = "0.4"
+russh = "0.43"            # task-08 SSH transport — needs a real release probe before use
+russh-keys = "0.43"        # task-08 SSH transport
+portable-pty = "0.8"       # task-07 shell transport — needs a real release probe before use
+# tokio-serial = "?"        # task-08 serial transport — added when this task is implemented (current is 5.x)
 async-trait = "0.1"
 dirs = "5"
 mockall = "0.13"
