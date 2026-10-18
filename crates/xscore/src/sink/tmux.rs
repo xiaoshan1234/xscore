@@ -32,6 +32,16 @@ impl TmuxSink {
         c
     }
 
+    /// Construct a `TmuxSink` that wraps an EXISTING tmux session
+    /// (used during state hydration — task-15). The session is NOT
+    /// created here; the caller must have already verified it exists
+    /// via `tmux has-session -t <session>`. The returned sink's
+    /// `new_window` / `kill_window` / `new_pane` / `close` operate on
+    /// the existing session directly.
+    pub fn adopt(link_id: LinkId, mode: &str, session_name: &str) -> Self {
+        Self { link_id, mode: mode.into(), session_name: session_name.into() }
+    }
+
     fn session_window_addr(&self, idx: u32) -> String {
         format!("{}:{}", self.session_name, idx)
     }

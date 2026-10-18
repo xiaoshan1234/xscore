@@ -6,6 +6,7 @@ pub mod link_registry;
 pub mod manager;
 pub mod pane;
 pub mod pane_registry;
+pub mod state;
 pub mod window;
 pub mod window_registry;
 

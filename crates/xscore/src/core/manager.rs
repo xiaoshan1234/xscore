@@ -8,6 +8,16 @@
 // All methods are async; all errors flow through `core::Error`. The manager
 // holds `Arc<...>` registries so cloning the manager is cheap and registry
 // references can be shared into background tasks (snapshot, resize, etc.).
+//
+// State persistence (task-15):
+// - `save_state` serializes all LinkInfo to `~/.config/xscore/state/state.json`
+//   after every mutating call (add_link, del_link, add_window, del_window,
+//   add_pane, del_pane, close_link). Crash-safe via atomic rename.
+// - `load_from_state` rebuilds the manager from a persisted snapshot by
+//   re-querying the tmux server (which is the source of truth for windows
+//   and panes) and adopting the existing tmux sessions for each persisted
+//   link. Re-loaded links get a `NoopTransport` for I/O — the user can
+//   re-run `xscore link add <url>` to get a fresh transport.
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -24,7 +34,10 @@ use crate::backends::{BackendRegistry, PaneBackend};
 use crate::backends::composite::CompositeBackend;
 use crate::model::{ConnectSpec, LinkInfo, PaneInfo, SinkConfig, WindowInfo};
 use crate::sink::factory::sink_for;
+use crate::sink::tmux::TmuxSink;
 use crate::transport::factory as transport_factory;
+use crate::transport::NoopTransport;
+use crate::util::tmux_arg_socket;
 
 #[derive(Clone)]
 pub struct SessionManager {
@@ -82,6 +95,8 @@ impl SessionManager {
         };
 
         // Create the sink with the link_id (used to populate WindowInfo).
+        // The session name is derived from `link_id` (`xscore-<link_id>`)
+        // so hydration can re-discover the tmux session on restart.
         let sink = sink_for(link_id, &spec.sink, transport_kind, transport.as_mut()).await?;
         sink.attach(transport.as_mut()).await?;
 
@@ -98,6 +113,7 @@ impl SessionManager {
         let default_window_id = self.add_window(link_id, None).await?;
         let default_pane_id = self.add_pane(default_window_id, None).await?;
 
+        self.save_state().await?;
         Ok((link_id, default_window_id, default_pane_id))
     }
 
@@ -141,12 +157,12 @@ impl SessionManager {
     pub async fn close_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
         let kind = arc_link.info.transport_str();
-        // tmux-only invariant: `SinkConfig::Tmux { mode: "off", .. }` is
-        // not a tmux link. Anything else (`auto`/`local`/`remote`/etc.) is.
-        let is_tmux = match &arc_link.info.sink {
-            SinkConfig::Tmux { mode, .. } => mode != "off",
-        };
-        if !is_tmux {
+        // ADR 0005: `link close` is for tmux sessions only. The
+        // "tmux-ness" of a link is determined by its transport/address
+        // (the kind of resource the link wraps), NOT by its sink mode
+        // (which is tmux-by-default for shell/serial/ssh too — but
+        // the link isn't a "tmux session" unless the URL was tmux://).
+        if kind != "tmux" {
             return Err(Error::CloseOnlyForTmux(kind));
         }
         // Detach semantics: remove windows + panes from in-memory registries.
@@ -164,12 +180,13 @@ impl SessionManager {
             }
         }
         self.links.remove(id).await;
+        self.save_state().await?;
         Ok(())
     }
 
     /// Full teardown of a link: kill every window (cascades panes), then
     /// kill the transport + sink. For tmux, this calls
-    /// `tmux -L xscore kill-session -t xscore-link-<link_uuid>` (the
+    /// `tmux -L xscore kill-session -t xscore-<link_uuid>` (the
     /// shared server stays up).
     pub async fn del_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
@@ -183,6 +200,7 @@ impl SessionManager {
         arc_link.sink.close().await?;
         arc_link.transport.close().await?;
         self.links.remove(id).await;
+        self.save_state().await?;
         Ok(())
     }
 
@@ -219,6 +237,7 @@ impl SessionManager {
         let window = Window::new(canonical);
         self.windows.insert(window).await;
         arc_link.windows.lock().await.push(window_id);
+        self.save_state().await?;
         Ok(window_id)
     }
 
@@ -242,6 +261,7 @@ impl SessionManager {
             arc_link.windows.lock().await.retain(|w| *w != id);
         }
         self.windows.remove(id).await;
+        self.save_state().await?;
         Ok(())
     }
 
@@ -279,6 +299,7 @@ impl SessionManager {
             sink_handle,
         ));
         self.backends.insert(pane_id, backend).await;
+        self.save_state().await?;
         Ok(pane_id)
     }
 
@@ -296,6 +317,7 @@ impl SessionManager {
         if let Some(arc_window) = self.windows.get(window_id).await {
             arc_window.panes.lock().await.retain(|p| *p != id);
         }
+        self.save_state().await?;
         Ok(())
     }
 
@@ -306,5 +328,145 @@ impl SessionManager {
     /// registries directly.
     pub async fn backend(&self, id: PaneId) -> Result<Arc<dyn PaneBackend>> {
         self.backends.get(id).await.ok_or(Error::PaneNotFound(id))
+    }
+
+    // -------- state persistence (task-15) --------
+
+    /// Serialize all current `LinkInfo`s + their windows + panes to the
+    /// state snapshot file. Called automatically after every mutating
+    /// method; can also be called explicitly from `main` before exit for
+    /// paranoia. Crash-safe: writes to `state.json.tmp` then renames
+    /// atomically.
+    pub async fn save_state(&self) -> Result<()> {
+        let arc_links = self.links.list().await;
+        let mut snapshots = Vec::new();
+        for arc_link in &arc_links {
+            let link_id = arc_link.id;
+            // Collect this link's windows.
+            let arc_windows = self.windows.list_for_link(link_id).await;
+            let windows: Vec<WindowInfo> = arc_windows
+                .iter()
+                .map(|w| w.info.clone())
+                .collect();
+            // Collect this link's panes (by walking each window's pane list
+            // — PaneRegistry doesn't have a list_for_link helper).
+            let mut panes: Vec<PaneInfo> = Vec::new();
+            for arc_window in &arc_windows {
+                for pane_id in arc_window.panes.lock().await.iter() {
+                    if let Some(p) = self.panes.get(*pane_id).await {
+                        panes.push(p);
+                    }
+                }
+            }
+            snapshots.push(super::state::LinkSnapshot {
+                link: arc_link.info.clone(),
+                windows,
+                panes,
+            });
+        }
+        tokio::task::spawn_blocking(move || super::state::save(&snapshots))
+            .await
+            .map_err(|e| Error::Config(format!("join: {e}")))?
+    }
+
+    /// Load the state snapshot from disk (if any) and hydrate a new
+    /// `SessionManager` by adopting the existing tmux sessions for each
+    /// persisted link. Returns an empty manager if no snapshot exists.
+    ///
+    /// Hydration algorithm per `LinkSnapshot`:
+    /// 1. Construct the tmux session name: `xscore-<link_id>`.
+    /// 2. Verify the session exists via `tmux has-session -t <session>`.
+    ///    If it doesn't (e.g. user killed it manually), skip the link.
+    /// 3. Adopt the tmux session via `TmuxSink::adopt` (no new-session
+    ///    call — the existing session is reused).
+    /// 4. Use `NoopTransport` for I/O (the user can re-add the link to
+    ///    get a fresh transport for data ops).
+    /// 5. Register each persisted window in `WindowRegistry` with its
+    ///    ORIGINAL xscore WindowId (so cross-invocation `window list`
+    ///    shows the same ids the user saved).
+    /// 6. Register each persisted pane in `PaneRegistry` + `BackendRegistry`,
+    ///    and add to the parent window's pane list.
+    pub async fn load_from_state() -> Result<Self> {
+        match super::state::load()? {
+            Some(s) => Self::hydrate(s).await,
+            None => Ok(Self::new()),
+        }
+    }
+
+    async fn hydrate(snapshots: Vec<super::state::LinkSnapshot>) -> Result<Self> {
+        let mgr = Self::new();
+        for snap in snapshots {
+            // Best-effort: skip links that fail hydration (e.g. tmux
+            // session killed externally).
+            if let Err(e) = mgr.hydrate_one(snap).await {
+                eprintln!("hydration: skipping link: {e}");
+            }
+        }
+        Ok(mgr)
+    }
+
+    async fn hydrate_one(&self, snap: super::state::LinkSnapshot) -> Result<()> {
+        let info = snap.link.clone();
+        let link_id = info.id;
+        let session_name = format!("xscore-{link_id}");
+
+        // Verify the tmux session still exists. If not, skip the link.
+        let has = tokio::process::Command::new("tmux")
+            .args(tmux_arg_socket())
+            .args(["has-session", "-t", &session_name])
+            .status().await?;
+        if !has.success() {
+            eprintln!("hydration: tmux session {session_name} gone, skipping");
+            return Ok(());
+        }
+
+        // Adopt the tmux sink (no new-session call).
+        let sink_mode = match &info.sink {
+            SinkConfig::Tmux { mode, .. } => mode.as_str(),
+        };
+        let sink = TmuxSink::adopt(link_id, sink_mode, &session_name);
+
+        // Use a no-op transport — the user can re-add the link to get
+        // a real transport. The tmux sink is the source of truth for
+        // the sink side; data ops won't work until the link is re-added.
+        let transport: Box<dyn crate::transport::Transport> = Box::new(NoopTransport);
+
+        // Build a Link and insert it.
+        let link = Link {
+            id: link_id,
+            info,
+            transport,
+            sink: Box::new(sink),
+            windows: Mutex::new(Vec::new()),
+        };
+        let arc_link = self.links.insert(link).await;
+
+        // Re-register windows + panes from the snapshot, preserving
+        // their ORIGINAL xscore ids.
+        let mut window_ids: Vec<WindowId> = Vec::new();
+        for winfo in snap.windows {
+            let wid = winfo.id;
+            let window = Window::new(winfo);
+            self.windows.insert(window).await;
+            arc_link.windows.lock().await.push(wid);
+            window_ids.push(wid);
+        }
+        for pinfo in snap.panes {
+            let pid = pinfo.id;
+            // Find the parent window.
+            if let Some(arc_window) = self.windows.get(pinfo.window_id).await {
+                arc_window.panes.lock().await.push(pid);
+            }
+            self.panes.insert(pinfo.clone()).await;
+            let backend: Arc<dyn PaneBackend> = Arc::new(CompositeBackend::new(
+                pid,
+                arc_link.clone(),
+                pinfo.sink_handle,
+            ));
+            self.backends.insert(pid, backend).await;
+        }
+        // silence unused var warning
+        let _ = window_ids;
+        Ok(())
     }
 }

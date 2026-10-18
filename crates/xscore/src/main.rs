@@ -17,7 +17,11 @@ async fn main() -> anyhow::Result<()> {
     // No-op if the env var is unset — quiet by default, verbose with RUST_LOG=info.
     let _ = tracing_subscriber::fmt::try_init();
     let cli = Cli::parse();
-    let mgr = Arc::new(SessionManager::new());
+
+    // Hydrate the manager from disk (task-15). On first run, this returns
+    // an empty manager. After `xscore link add`, state is saved and the
+    // next invocation sees the link.
+    let mgr = Arc::new(SessionManager::load_from_state().await?);
     match cli.command {
         Commands::Link(c) => link::run(mgr, c).await?,
         Commands::Window(c) => window::run(mgr, c).await?,

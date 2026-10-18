@@ -21,7 +21,7 @@ pub async fn sink_for(
                 return Ok(Box::new(RawSink));
             }
             let name = session_name.clone()
-                .unwrap_or_else(|| format!("xscore-{}", uuid::Uuid::now_v7()));
+                .unwrap_or_else(|| format!("xscore-{link_id}"));
             let s = TmuxSink::create(link_id, resolved_mode, &name, transport).await?;
             Ok(Box::new(s))
         }

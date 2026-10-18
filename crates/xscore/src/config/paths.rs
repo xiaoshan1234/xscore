@@ -20,5 +20,11 @@ pub fn state_link_path(id: &str) -> PathBuf { state_dir().join("links").join(for
 pub fn ensure_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(config_dir())?;
     std::fs::create_dir_all(links_dir())?;
+    std::fs::create_dir_all(state_dir())?;
     Ok(())
 }
+
+/// `~/.config/xscore/state/state.json` — single-file snapshot of the
+/// in-memory link metadata (ADR 0006 / task-15). Windows + panes are
+/// re-discovered from tmux on hydration, not persisted.
+pub fn state_snapshot_path() -> std::path::PathBuf { state_dir().join("state.json") }

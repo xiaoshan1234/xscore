@@ -20,12 +20,31 @@
 
 use std::process::Command;
 
-fn xscore() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_xscore"))
+/// Build a `Command` for the `xscore` binary, scoped to a per-test
+/// `HOME` directory so the state file
+/// (`~/.config/xscore/state/state.json`) doesn't collide between
+/// parallel tests. Each test should call this once, capture the
+/// result in a closure, and use that closure for every invocation
+/// in the test — sharing a single HOME across the test's invocations
+/// is what makes the state-persistence tests work.
+///
+/// Example:
+/// ```ignore
+/// let xscore = || xscore_for("link_add_creates");
+/// let out1 = xscore().args(["link", "add", "..."]).output()?;
+/// let out2 = xscore().args(["link", "list"]).output()?;
+/// ```
+fn xscore_for(test_name: &str) -> Command {
+    let home = std::env::temp_dir().join(format!("xscore-test-{test_name}"));
+    std::fs::create_dir_all(&home).ok();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_xscore"));
+    cmd.env("HOME", &home);
+    cmd
 }
 
 #[test]
 fn xscore_help_exits_zero() {
+    let xscore = || xscore_for("help_exits_zero");
     let out = xscore().arg("--help").output().unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
@@ -40,12 +59,14 @@ fn xscore_help_exits_zero() {
 
 #[test]
 fn xscore_link_add_requires_url_or_config() {
+    let xscore = || xscore_for("link_add_requires_url_or_config");
     let out = xscore().args(["link", "add"]).output().unwrap();
     assert!(!out.status.success(), "`link add` with no inputs must fail");
 }
 
 #[test]
 fn xscore_link_open_unsupported_for_shell() {
+    let xscore = || xscore_for("link_open_unshell");
     // ADR 0005: `link open` is tmux-only; shell/serial/ssh return OpenOnlyForTmux.
     // (After the manager.rs `open_link` fix that checks `address.kind() != "tmux"`,
     // this returns a clean error instead of a `todo!()` panic.)
@@ -67,6 +88,7 @@ fn xscore_link_open_unsupported_for_shell() {
 
 #[test]
 fn xscore_link_add_default_creates_two_links_for_same_url() {
+    let xscore = || xscore_for("link_add_two_same_url");
     let out1 = xscore()
         .args(["link", "add", "shell:///bin/echo"])
         .output()
@@ -119,6 +141,7 @@ fn xscore_link_add_default_creates_two_links_for_same_url() {
 
 #[test]
 fn xscore_link_config_add_and_list_roundtrip() {
+    let xscore = || xscore_for("link_config_roundtrip");
     // Clean up any prior template from a previous test run.
     let _ = std::fs::remove_dir_all(
         dirs::config_dir().unwrap().join("xscore").join("links"),
@@ -154,8 +177,8 @@ fn xscore_link_config_add_and_list_roundtrip() {
 // ============================================================
 
 #[test]
-#[ignore = "requires state persistence (task-15 / F)"]
 fn xscore_link_add_creates_link_and_pane() {
+    let xscore = || xscore_for("link_add_creates");
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat"])
         .output()
@@ -201,8 +224,8 @@ fn xscore_link_add_creates_link_and_pane() {
 }
 
 #[test]
-#[ignore = "requires state persistence (task-15 / F)"]
 fn xscore_link_close_unsupported_for_shell() {
+    let xscore = || xscore_for("link_close_unshell");
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat"])
         .output()
@@ -232,8 +255,8 @@ fn xscore_link_close_unsupported_for_shell() {
 }
 
 #[test]
-#[ignore = "requires state persistence (task-15 / F)"]
 fn xscore_link_del_kills_link() {
+    let xscore = || xscore_for("link_del_kills");
     let add = xscore()
         .args(["link", "add", "shell:///bin/cat"])
         .output()
@@ -262,8 +285,8 @@ fn xscore_link_del_kills_link() {
 }
 
 #[test]
-#[ignore = "requires state persistence (task-15 / F)"]
 fn xscore_window_add_inside_link() {
+    let xscore = || xscore_for("window_add_inside");
     let add = xscore()
         .args(["link", "add", "shell:///bin/bash"])
         .output()
@@ -307,8 +330,8 @@ fn xscore_window_add_inside_link() {
 }
 
 #[test]
-#[ignore = "requires state persistence (task-15 / F)"]
 fn xscore_window_del_kills_window() {
+    let xscore = || xscore_for("window_del_kills");
     let add = xscore()
         .args(["link", "add", "shell:///bin/cat"])
         .output()
@@ -351,8 +374,8 @@ fn xscore_window_del_kills_window() {
 }
 
 #[test]
-#[ignore = "requires state persistence (task-15 / F)"]
 fn xscore_pane_add_uses_window_not_link() {
+    let xscore = || xscore_for("pane_add_uses_window");
     let add = xscore()
         .args(["link", "add", "shell:///bin/echo"])
         .output()
