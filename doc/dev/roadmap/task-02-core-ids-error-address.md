@@ -1,6 +1,6 @@
 # Task 2: Core IDs + error type + LinkAddress
 
-**Objective:** Define `LinkId` (uuid v7), `PaneId` (uuid v7), `LinkAddress` (hashable transport identity), `core::Error`.
+**Objective:** Define `LinkId` (uuid v7), `WindowId` (uuid v7), `PaneId` (uuid v7), `LinkAddress` (hashable transport identity), `core::Error`. (Window added in v2 by ADR 0006 — earlier drafts of this task defined only LinkId/PaneId; if you're starting from a v1 commit, add the `WindowId` declaration too.)
 
 **Files:**
 - Create: `crates/xscore/src/core/mod.rs`
@@ -29,6 +29,14 @@ mod tests {
         let id = PaneId::new();
         let s = id.to_string();
         let parsed = PaneId::parse(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn window_id_roundtrip_via_string() {
+        let id = WindowId::new();
+        let s = id.to_string();
+        let parsed = WindowId::parse(&s).unwrap();
         assert_eq!(id, parsed);
     }
 
@@ -74,6 +82,7 @@ macro_rules! uuid_newtype {
 }
 
 uuid_newtype!(LinkId);
+uuid_newtype!(WindowId);
 uuid_newtype!(PaneId);
 ```
 
@@ -145,12 +154,15 @@ mod tests {
 ```rust
 // core/error.rs
 use thiserror::Error;
-use super::id::{LinkId, PaneId};
+use super::id::{LinkId, PaneId, WindowId};
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("link not found: {0}")]
     LinkNotFound(LinkId),
+
+    #[error("window not found: {0}")]
+    WindowNotFound(WindowId),
 
     #[error("pane not found: {0}")]
     PaneNotFound(PaneId),
@@ -200,17 +212,17 @@ pub mod pane_registry;
 
 pub use address::LinkAddress;
 pub use error::{Error, Result};
-pub use id::{LinkId, PaneId};
+pub use id::{LinkId, PaneId, WindowId};
 ```
 
 **Step 7: Run tests**
 
 Run: `cargo test -p xscore core::id core::address`
-Expected: 4 passed.
+Expected: 6 passed (link_id, pane_id, window_id, address canonicity + 2 negative cases).
 
 **Step 8: Commit**
 
 ```bash
 git add crates/xscore/src/core/
-git commit -m "feat(core): LinkId/PaneId (uuid v7) + LinkAddress + Error"
+git commit -m "feat(core): LinkId/WindowId/PaneId (uuid v7) + LinkAddress + Error"
 ```

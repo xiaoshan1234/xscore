@@ -10,7 +10,7 @@ https://mermaid.live and use its export panel, or run any Mermaid CLI
 `mermaid` fenced blocks here are the source of truth — there are no
 separate source files to keep in sync.
 
-## 1. Link × Pane topology
+## 1. Link × Window × Pane topology
 
 Runtime structure: CLI surface, `SessionManager`, three registries, the
 `Link` / `Pane` structs, `Transport` × `Sink` trait impls, and external
@@ -24,6 +24,7 @@ graph TB
     subgraph CLI ["CLI (clap)"]
         Connect["xscore link add<br/>-c CONFIG"]
         LinkCmd["xscore link<br/>add/del/open/close<br/>show/list/config {add,remove,show,list}"]
+        WindowCmd["xscore window<br/>add/del/show/list (ADR 0006)"]
         PaneCmd["xscore pane<br/>add/del/show/list"]
         DataCmd["xscore data<br/>read/write/resize<br/>--pane"]
         ConfigCmd["xscore config<br/>show/path/set/unset"]
@@ -32,14 +33,16 @@ graph TB
     subgraph Core ["core::SessionManager"]
         SM["SessionManager"]
         LR["LinkRegistry<br/>{ by_id, by_address }"]
-        PR["PaneRegistry"]
+        WR["WindowRegistry<br/>{ by_id, by_link } (ADR 0006)"]
+        PR["PaneRegistry<br/>{ PaneInfo.window_id } (ADR 0006: was link_id)"]
         BR["BackendRegistry"]
     end
 
-    subgraph LinkModel ["Link × Pane model"]
-        Link["Link {<br/>  id: LinkId<br/>  info: LinkInfo<br/>  transport: Box&lt;dyn Transport&gt;<br/>  sink: Box&lt;dyn Sink&gt;<br/>  panes: Mutex&lt;Vec&lt;PaneId&gt;&gt;<br/>}"]
-        Pane["PaneInfo {<br/>  id: PaneId<br/>  link_id: LinkId<br/>  sink_handle: String<br/>  pane_index: u32<br/>}"]
-        PB["PaneBackend (composite)<br/>{ (Link, sink_handle) }"]
+    subgraph LinkModel ["Link × Window × Pane model (ADR 0006)"]
+        Link["Link {<br/>  id: LinkId<br/>  info: LinkInfo<br/>  transport: Box&lt;dyn Transport&gt;<br/>  sink: Box&lt;dyn Sink&gt;<br/>  windows: Mutex&lt;Vec&lt;WindowId&gt;&gt;<br/>} (ADR 0006: was panes)"]
+        Window["WindowInfo {<br/>  id: WindowId<br/>  link_id: LinkId<br/>  name: String<br/>  tmux_window_index: u32<br/>}"]
+        Pane["PaneInfo {<br/>  id: PaneId<br/>  window_id: WindowId<br/>  sink_handle: String<br/>  pane_index: u32<br/>} (ADR 0006: was link_id)"]
+        PB["PaneBackend (composite)<br/>{ (Link, Window, sink_handle) }"]
     end
 
     subgraph TransportLayer ["transport/"]
@@ -64,18 +67,24 @@ graph TB
 
     Connect --> SM
     LinkCmd --> SM
+    WindowCmd --> SM
     PaneCmd --> SM
     DataCmd --> PB
     SM --> LR
+    SM --> WR
     SM --> PR
     SM --> BR
     LR --> Link
+    WR --> Window
     PR --> Pane
     BR --> PB
     Link --> TransportLayer
     Link --> SinkLayer
+    Link --> Window
+    Window --> Pane
     PB --> Link
     PB --> Pane
+    PB --> Window
 
     TIF --> TS
     TIF --> TT
@@ -94,9 +103,9 @@ graph TB
     classDef layer fill:#e8f5e9,stroke:#388e3c
     classDef external fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
 
-    class Connect,LinkCmd,PaneCmd,DataCmd,ConfigCmd cli
-    class SM,LR,PR,BR core
-    class Link,Pane,PB model
+    class Connect,LinkCmd,WindowCmd,PaneCmd,DataCmd,ConfigCmd cli
+    class SM,LR,WR,PR,BR core
+    class Link,Window,Pane,PB model
     class TS,TT,TU,TIF,ST,SR,SIF layer
     class TMUX,Shell,Serial,SSH external
 ```

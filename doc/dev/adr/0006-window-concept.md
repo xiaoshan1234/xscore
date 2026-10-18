@@ -1,8 +1,8 @@
 # ADR 0006: Window — a 3rd-tier logical concept between Link and Pane
 
-- **Status:** Proposed (NOT YET ACCEPTED — see "Acceptance" section)
+- **Status:** Accepted
 - **Date:** 2026-10-16
-- **Deciders:** dev (waiting for user)
+- **Deciders:** dev
 - **Related:** [ADR 0001](./0001-link-pane-model.md), [ADR 0003](./0003-external-tmux-server.md), [ADR 0005](./0005-add-open-close-del-verbs.md)
 
 ## Context

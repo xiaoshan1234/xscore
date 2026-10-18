@@ -13,24 +13,25 @@ The plan is split across files. **Each task lives in its own file so edits stay 
 | --- | --- |
 | `overview.md` | Architecture (Link × Pane), module tree, hard module rules, core trait design preview |
 | `task-01-workspace-bootstrap.md` | Rust workspace + crate skeleton |
-| `task-02-core-ids-error-address.md` | `LinkId`, `PaneId`, `LinkAddress`, `core::Error` |
+| `task-02-core-ids-error-address.md` | `LinkId`, `WindowId` (ADR 0006), `PaneId`, `LinkAddress`, `core::Error` |
 | `task-03-url-parsing.md` | URL → `(ConnectSpec, LinkAddress)` parser |
 | `task-04-transport-trait.md` | `Transport` trait + echo stub |
-| `task-05-sink-trait-tmux-raw.md` | `Sink` trait + per-pane ops, `TmuxSink`, `RawSink`, factory |
-| `task-06-link-pane-registries-manager.md` | `Link`, `Pane`, three registries, `SessionManager` (add_link / open_link / close_link / del_link) |
+| `task-05-sink-trait-tmux-raw.md` | `Sink` trait with per-pane ops + per-window ops (ADR 0006: `new_window` / `kill_window`; panes are split-window); `TmuxSink`, `RawSink`, factory |
+| `task-06-link-pane-registries-manager.md` | `Link`, `Window`, `Pane`, four registries (incl. `WindowRegistry`), `SessionManager` (link add / open / close / del; window add / del; pane add / del) — ADR 0006 3-tier model |
 | `task-07-shell-transport.md` | `ShellTransport` real impl |
 | `task-08-transport-stubs.md` | `SerialTransport` + `SshTransport` stubs |
 | `task-09-config-loader.md` | XDG paths + `ConnectSpec` JSON save/load (under `links/`) |
-| `task-10-cli-connect-link-pane.md` | `xscore link {add,del,open,close,show,list,config ...}` (ADR 0005 verb split) + `xscore pane {add,del,show,list}` CLI |
+| `task-10-cli-connect-link-pane.md` | `xscore link {add,del,open,close,show,list,config ...}` (ADR 0005 verb split) + `xscore window {add,del,show,list}` + `xscore pane {add,del,show,list}` (ADR 0006) |
 | `task-11-cli-data.md` | `xscore data read/write/resize` (per-pane) |
 | `task-12-cli-config.md` | `xscore config show/path/set/unset` |
-| `task-13-tests-readme.md` | CLI smoke tests + README rewrite |
+| `task-13-tests-readme.md` | CLI smoke tests (link / window / pane; ADR 0006) + README rewrite |
+| `task-14-window-registry.md` | `WindowId`/`Window`/`WindowInfo`/`WindowRegistry`; CLI `xscore window {add,del,show,list}` (ADR 0006 formal spec) |
 | `acceptance.md` | Acceptance criteria, deferred items, open questions, execution handoff |
 
 ## How to read
 
 1. Start at `overview.md` for the architecture / module tree / trait previews.
-2. Walk `task-01-…md` through `task-13-…md` in order. Each file is self-contained —
+2. Walk `task-01-…md` through `task-14-…md` in order. Each file is self-contained —
    no need to re-read the whole plan to revise one task.
 3. `acceptance.md` is the final state you should be able to satisfy.
 

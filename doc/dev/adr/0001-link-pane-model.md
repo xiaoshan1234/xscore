@@ -1,9 +1,9 @@
-# ADR 0001: Model sessions as Link × Pane (not flat Session)
+# ADR 0001: Model sessions as Link × Window × Pane (not flat Session)
 
 - **Status:** Accepted
 - **Date:** 2026-10-16
 - **Deciders:** dev
-- **Related:** [overview.md](../roadmap/overview.md), [diagrams/link-pane-topology.svg](../architecture/diagrams/link-pane-topology.svg)
+- **Related:** [overview.md](../roadmap/overview.md), [diagrams/link-pane-topology.svg](../architecture/diagrams/link-pane-topology.svg), [ADR 0006](./0006-window-concept.md) (extends the model with a Window tier between Link and Pane)
 
 ## Context
 
@@ -18,10 +18,12 @@ Three product realities drove the change:
 
 ## Decision
 
-Introduce a **two-level model**:
+Introduce a **three-level model** (ADR 0006 extends this further with a Window tier):
 
 - **Link** = one physical connection. Owns a `Transport` + `Sink` + a `Vec<PaneId>`. Identified by `LinkId` (uuid v7) and a stable `LinkAddress` hashable key derived from the transport tuple.
 - **Pane** = one view into a link. Identified by `PaneId` (uuid v7). Has independent lifecycle, snapshot, write state. Addressed by `sink_handle` (e.g. tmux `%42`).
+
+(With Window added per ADR 0006: Link owns a `Vec<WindowId>` instead; each Window owns a `Vec<PaneId>`; Pane's parent is `WindowId` not `LinkId`. The 2-tier bullet above is the "Link × Pane" view that 99% of the docs work in; the 3-tier view is the full Link × Window × Pane model. Documented first as 2-tier for legibility, then extended.)
 
 Every CLI command operates on either a `link-id` or a `pane-id` — never a generic "session id".
 

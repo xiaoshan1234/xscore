@@ -14,9 +14,15 @@
 - `xscore link list/show/del` operates on in-memory links (`del` is the universal teardown verb)
 - `xscore link open <tmux url>` attaches to an existing tmux session (returns `(link_id, pane_id)`)
 - `xscore link close --id <link-id>` on a tmux link leaves the tmux session running on the server
+- `xscore window add --link <link-id> [--name=NAME]` creates a tmux window inside the link's session
+- `xscore window list [--link <link-id>]` enumerates windows in a link
+- `xscore window show --id <window-id>` prints WindowInfo JSON
+- `xscore window del --id <window-id>` kills the tmux window (panes inside die)
+- `xscore link add` auto-creates one default window + one default pane
 - `xscore pane add <link-id> [--name=...]` opens a new pane inside a live link
-- `xscore pane list/show/del` operates on in-memory panes (`del` is full teardown — kills tmux window + unregisters)
-- `xscore data read/write/resize` over pane-id (NOT link-id)
+- `xscore pane add --window <window-id> [--name=...]` opens a new pane inside a window (ADR 0006)
+- `xscore pane list/show/del` operates on in-memory panes (`del` is full teardown — kills tmux split + unregisters)
+- `xscore data read/write/resize` over pane-id (NOT link-id, NOT window-id)
 - `xscore config show/path/set/unset` operates on `~/.config/xscore/config.json`; `path` prints all 3 dirs (config, links, state)
 - Internal routing: `LinkAddress` Hash impl + `LinkRegistry::find_by_address` are internal helpers only — not a user-facing dedup key (ADR 0005)
 
@@ -56,8 +62,8 @@ This plan is split across files in `doc/dev/roadmap/`:
 
 Adjacent directories (also tracked in git):
 
-- `../adr/0001-link-pane-model.md`, `0002-transport-sink-split.md`, `0003-external-tmux-server.md`, `0005-add-open-close-del-verbs.md` — design rationale (0004-link-existing-dedup.md is archived under `archive-2026-10-16-adr-0004-reversal/`)
-- `../architecture/diagrams/README.md` — Link×Pane topology, lifecycle, module-deps rendered as inline Mermaid (parse-validated against mermaid@9)
+- `../adr/0001-link-pane-model.md`, `0002-transport-sink-split.md`, `0003-external-tmux-server.md`, `0005-add-open-close-del-verbs.md`, `0006-window-concept.md` — design rationale (0004-link-existing-dedup.md is archived under `archive-2026-10-16-adr-0004-reversal/`)
+- `../architecture/diagrams/README.md` — Link × Window × Pane topology, lifecycle, module-deps rendered as inline Mermaid (parse-validated against mermaid@9)
 
 Next step: execute via `subagent-driven-development` skill — fresh subagent per task, two-stage review (spec compliance then code quality). Each task ends with `cargo test -p xscore` + `cargo build -p xscore` before commit.
 

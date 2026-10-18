@@ -1,15 +1,14 @@
 # Task 10: CLI — `link`, `pane` subcommands
 
-**Objective:** Wire the new two-tier CLI: `link {add,del,open,close,show,list,config ...}` + `pane {add,del,show,list}`. ADR 0005 retired `--link=existing`; `link` verbs split into `add` (always new), `open` (always attach-existing, tmux only), `close` (tmux-detach only), `del` (full teardown). Pane verbs trimmed to a 4-verb tree mirroring the link shape: `add` (new), `del` (full teardown), `show`, `list`.
+**Objective:** Wire the new three-tier CLI: `link {add,del,open,close,show,list,config ...}` + `window {add,del,show,list}` (NEW per ADR 0006) + `pane {add,del,show,list}` (with `--window` instead of `--link`, per ADR 0006). ADR 0005 retired `--link=existing`; ADR 0006 adds the Window tier between Link and Pane. `link add` auto-creates one default window + one default pane so the common path stays one step.
 
-**Background:** this is the revised CLI surface from the user-feedback round (after ADR 0005's reversal of `--link=existing`). The old `xscore connect <url>` is now `xscore link add <url>` (always-new). Re-attach-to-existing moved to `xscore link open` (tmux only). The `link config {add,remove,show,list}` group keeps managing persistent ConnectSpec templates under `~/.config/xscore/links/` unchanged.
+**Background:** this is the revised CLI surface from the user-feedback round (after ADR 0005's reversal of `--link=existing`, then ADR 0006's Window tier). The old `xscore connect <url>` is now `xscore link add <url>` (always-new). Re-attach-to-existing moved to `xscore link open` (tmux only). Window is the middle tier between link and pane; `link add` auto-creates one default window + one default pane to keep the common path one step. The `link config {add,remove,show,list}` group keeps managing persistent ConnectSpec templates under `~/.config/xscore/links/` unchanged.
 
 **Files:**
-- Create: `crates/xscore/src/cli/{mod,link,pane}.rs`
+- Create: `crates/xscore/src/cli/{mod,link,window,pane}.rs`
 - Delete: `crates/xscore/src/cli/connect.rs` (replaced by `link::add`)
-- Delete: `crates/xscore/src/cli/data.rs` (handled in Task 11)
 - Modify: `crates/xscore/src/main.rs`
-- Modify: `crates/xscore/src/core/manager.rs` (per ADR 0005: drop `link_existing` from `add_link`, rename `attach_link` → `open_link`, rename old `close_link` → `del_link`, redefine `close_link` as in-memory detach)
+- Modify: `crates/xscore/src/core/manager.rs` (per ADR 0005 + ADR 0006: drop `link_existing` from `add_link`, add_window/del_window, add_pane takes window_id, close_link/del_link cascade windows)
 - Modify: `crates/xscore/src/config/{paths,loader}.rs` (new `links/` + `state/` paths)
 
 ---
@@ -29,10 +28,18 @@ xscore link config remove <name>                 # delete template
 xscore link config show <name>                   # read template
 xscore link config list                          # list templates
 
-xscore pane add --link <link-id> [--name=NAME]          # new_pane() inside the link
-xscore pane del --id <pane-id>                      # kill-pane + unregister (full teardown)
+xscore pane add --window <window-id> [--name=NAME]     # split-window inside that window
+xscore pane del --id <pane-id>                         # kill tmux split + unregister (full teardown)
 xscore pane show --id <pane-id>
-xscore pane list [--link <link-id>]
+xscore pane list [--window <window-id>]
+
+xscore window add   --link <link-id> [--name=NAME]      # tmux new-window inside the link's session
+xscore window list  [--link <link-id>]                  # enumerate windows in a link
+xscore window show  --id <window-id>
+xscore window del   --id <window-id>                     # tmux kill-window (panes inside die)
+
+# Ergonomic shortcut: `link add` auto-creates one default window + one default pane.
+# So `xscore link add ssh://u@h:22` is `link add` + auto `window add` (named after link-id) + auto `pane add` in that window.
 
 xscore data read --pane <pane-id> [--bytes N]
 xscore data write --pane <pane-id> [--from-file FILE]
@@ -67,6 +74,7 @@ pub mod config;
 pub mod data;
 pub mod link;
 pub mod pane;
+pub mod window;        // NEW (ADR 0006)
 
 use clap::{Parser, Subcommand};
 
@@ -81,7 +89,9 @@ pub struct Cli {
 pub enum Commands {
     /// Inspect / create / close / open / remove links (physical connections)
     Link(link::LinkCmd),
-    /// Inspect / create / close / open / remove panes (views into links)
+    /// Inspect / create / close / open / remove windows (tmux sessions inside links, per ADR 0006)
+    Window(window::WindowCmd),
+    /// Inspect / create / close / open / remove panes (views into windows)
     Pane(pane::PaneCmd),
     /// Read / write / resize data on a pane
     Data(data::DataCmd),
@@ -89,6 +99,77 @@ pub enum Commands {
     Config(config::ConfigCmd),
 }
 ```
+
+---
+
+## Step 2: `xscore window` subcommand (per ADR 0006)
+
+```rust
+// cli/window.rs
+use crate::core::{Error, LinkId, SessionManager, WindowId};
+use clap::{Args, Subcommand};
+use std::sync::Arc;
+
+#[derive(Subcommand)]
+pub enum WindowCmd {
+    /// Create a new tmux window inside the link's session
+    Add(WindowAddArgs),
+    /// List windows (optionally filtered by --link)
+    List { #[arg(long)] link: Option<String> },
+    /// Print WindowInfo JSON
+    Show { #[arg(long)] id: String },
+    /// tmux kill-window (panes inside die with it; no in-memory detach semantic)
+    Del { #[arg(long)] id: String },
+}
+
+#[derive(Args)]
+pub struct WindowAddArgs {
+    /// Link to add this window to
+    #[arg(long)] link: String,
+    /// Window name (becomes `tmux -L xscore new-window -t <session> -n <name>`)
+    #[arg(long)] name: Option<String>,
+}
+
+pub async fn run(mgr: Arc<SessionManager>, cmd: WindowCmd) -> anyhow::Result<()> {
+    match cmd {
+        WindowCmd::Add(args) => add(mgr, args).await,
+        WindowCmd::List { link } => list(mgr, link).await,
+        WindowCmd::Show { id } => show(mgr, &id).await,
+        WindowCmd::Del { id } => del(mgr, &id).await,
+    }
+}
+
+async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()> {
+    let lid = LinkId::parse(&args.link)?;
+    let wid = mgr.add_window(lid, args.name).await?;
+    println!("window: {wid}");
+    Ok(())
+}
+
+async fn list(mgr: Arc<SessionManager>, link: Option<String>) -> anyhow::Result<()> {
+    let lid = link.as_deref().map(LinkId::parse).transpose()?;
+    for w in mgr.windows.list_for_link_opt(lid).await {
+        println!("{}\t{}\t{}\t{}", w.info.id, w.info.link_id, w.info.name, w.info.tmux_window_index);
+    }
+    Ok(())
+}
+
+async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+    let wid = WindowId::parse(id)?;
+    let w = mgr.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+    println!("{}", serde_json::to_string_pretty(&w.info)?);
+    Ok(())
+}
+
+async fn del(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+    let wid = WindowId::parse(id)?;
+    mgr.del_window(wid).await?;
+    println!("deleted window: {wid}");
+    Ok(())
+}
+```
+
+(Note: `link add` calls `add_window` once internally with `name: None`, so the auto-created default window exists before `add_pane` runs. The user never has to explicitly `window add` for the common path.)
 
 ---
 
@@ -180,7 +261,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
     // Resolve to (spec, address): either via URL, via saved template, or URL+template merge.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
-    let (link_id, pane_id) = mgr.add_link(spec, address).await?;
+    let (link_id, _wid, pane_id) = mgr.add_link(spec, address).await?;
     eprintln!("link:  {link_id}");
     println!("pane:  {pane_id}");
     Ok(())
@@ -189,7 +270,7 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
 async fn open(mgr: Arc<SessionManager>, args: LinkOpenArgs) -> anyhow::Result<()> {
     // Same input resolution as `add`. The manager rejects non-tmux with `OpenOnlyForTmux`.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
-    let (link_id, pane_id) = mgr.open_link(spec, address).await?;
+    let (link_id, _wid, pane_id) = mgr.open_link(spec, address).await?;
     println!("link:  {link_id}");
     println!("pane:  {pane_id}");
     Ok(())
@@ -317,36 +398,36 @@ Note: `xscore::config::link_config_path`, `xscore::config::list_link_configs`, `
 
 ```rust
 // cli/pane.rs
-use crate::core::{Error, PaneId, SessionManager};
+use crate::core::{Error, PaneId, SessionManager, WindowId};
 use clap::Subcommand;
 use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum PaneCmd {
-    /// Open a new pane inside a link (sink.new_pane())
+    /// Open a new pane inside a window (tmux split-window)
     Add {
-        #[arg(long)] link: String,
+        #[arg(long)] window: String,
         /// Optional human-friendly name (not persisted)
         #[arg(long)]
         name: Option<String>,
     },
 
-    /// Kill the tmux window + remove from registry (full teardown).
+    /// Kill the tmux split + remove from registry (full teardown).
     /// Cross-invocation re-attach goes through `xscore link open`, not through panes.
     Del { #[arg(long)] id: String },
 
     /// Print PaneInfo JSON
     Show { #[arg(long)] id: String },
 
-    /// List panes (optionally filtered by --link)
-    List { #[arg(long)] link: Option<String> },
+    /// List panes (optionally filtered by --window)
+    List { #[arg(long)] window: Option<String> },
 }
 
 pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
     match cmd {
-        PaneCmd::Add { link, name } => {
-            let lid = crate::core::LinkId::parse(&link)?;
-            let pid = mgr.add_pane(lid, name).await?;
+        PaneCmd::Add { window, name } => {
+            let wid = WindowId::parse(&window)?;
+            let pid = mgr.add_pane(wid, None, name).await?;
             println!("pane:  {pid}");
         }
         PaneCmd::Del { id } => {
@@ -359,12 +440,13 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
             let info = mgr.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
-        PaneCmd::List { link } => {
+        PaneCmd::List { window } => {
+            let wid = window.as_deref().map(WindowId::parse).transpose()?;
             for p in mgr.panes.list_all().await {
-                if let Some(lid) = &link {
-                    if p.link_id.to_string() != *lid { continue; }
+                if let Some(wid_filter) = &wid {
+                    if p.window_id.to_string() != *wid_filter { continue; }
                 }
-                println!("{}\t{}\t{}", p.id, p.link_id, p.sink_handle);
+                println!("{}\t{}\t{}", p.id, p.window_id, p.sink_handle);
             }
         }
     }
@@ -384,6 +466,7 @@ async fn main() -> anyhow::Result<()> {
     let mgr = std::sync::Arc::new(xscore::core::SessionManager::new());
     match cli.command {
         xscore::cli::Commands::Link(c) => xscore::cli::link::run(mgr, c).await?,
+        xscore::cli::Commands::Window(c) => xscore::cli::window::run(mgr, c).await?,
         xscore::cli::Commands::Pane(c) => xscore::cli::pane::run(mgr, c).await?,
         xscore::cli::Commands::Data(_c) => println!("data (todo)"),
         xscore::cli::Commands::Config(_c) => println!("config (todo)"),
@@ -394,21 +477,23 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-## Step 5: Methods on `SessionManager` (per ADR 0005)
+## Step 5: Methods on `SessionManager` (per ADR 0005 + ADR 0006)
 
-Task 6 establishes `add_link` / `open_link` / `close_link` / `del_link` as the four link lifecycle verbs and `add_pane` / `del_pane` as the two-pane lifecycle verbs. Step 5 of this task mirrors them so the CLI can dispatch. Pane `attach_pane` (re-attach stub) and `unregister_pane` are gone — the `pane` subcommand was trimmed to a 4-verb tree (`add` / `del` / `show` / `list`); cross-invocation re-attach happens at the link level via `xscore link open`.
+Task 6 establishes `add_link` / `open_link` / `close_link` / `del_link` as the four link lifecycle verbs, `add_window` / `del_window` as the two window lifecycle verbs, and `add_pane` / `del_pane` as the two pane lifecycle verbs. Step 5 of this task mirrors them so the CLI can dispatch. The body of each method is shown in `task-06-link-pane-registries-manager.md`; what follows are the signatures and key behavioral notes the CLI dispatches against.
 
 ```rust
 // In core/manager.rs
 
 impl SessionManager {
-    /// Was: `connect`. Now: `add_link`. Returns `(link_id, pane_id)`.
+    /// Was: `connect`. Now: `add_link`. Returns `(link_id, window_id, pane_id)`
+    /// — auto-creates one default window + one default pane per ADR 0006
+    /// so the common path stays one step.
     /// Always creates a brand-new external resource (ADR 0005 retired `--link=existing`).
     pub async fn add_link(
         &self,
         spec: ConnectSpec,
         address: LinkAddress,
-    ) -> Result<(LinkId, PaneId)> {
+    ) -> Result<(LinkId, WindowId, PaneId)> {
         // Body as in Task 6 §Step 7 — same code path.
         let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
         let transport_kind = transport.kind();
@@ -510,7 +595,7 @@ impl SessionManager {
     }
 
     /// Add a new pane to an existing link.
-    pub async fn add_pane(&self, link_id: LinkId, name: Option<String>) -> Result<PaneId> {
+    pub async fn add_pane(&self, window_id: WindowId, _legacy_link_compat: Option<()>, name: Option<String>) -> Result<PaneId> {
         let arc_link = self.links.get(link_id).await.ok_or(Error::LinkNotFound(link_id))?;
         let sink_handle = arc_link.sink.new_pane().await?;
         let pane_index = arc_link.panes.lock().await.len() as u32;
@@ -612,14 +697,20 @@ cargo run -p xscore -- link add 'shell:///bin/cat'                       # creat
 cargo run -p xscore -- link list                                        # see new link
 cargo run -p xscore -- link show --id <link-id>
 
-cargo run -p xscore -- pane add --link <link-id> --name extra          # open pane 2
-cargo run -p xscore -- pane list --link <link-id>
-cargo run -p xscore -- pane del --id <pane-id>                         # kill tmux pane + unregister
+cargo run -p xscore -- pane add --window <window-id> --name extra      # open pane 2
+cargo run -p xscore -- pane list --window <window-id>
+cargo run -p xscore -- pane del --id <pane-id>                         # kill tmux split + unregister
 
-# Tmux-only verbs (open = attach existing, close = detach)
+# Tmux-only link verbs (open = attach existing, close = detach)
 cargo run -p xscore -- link open 'tmux://my-session'                   # attach existing
 cargo run -p xscore -- link close --id <link-id>                       # tmux-detach only
 cargo run -p xscore -- link del --id <link-id>                         # full teardown
+
+# Window operations (ADR 0006) — explicit when the user wants more than the default window
+cargo run -p xscore -- window add --link <link-id> --name build         # new tmux session window
+cargo run -p xscore -- window list --link <link-id>
+cargo run -p xscore -- window show --id <window-id>
+cargo run -p xscore -- window del --id <window-id>                      # kill-window (panes inside die)
 ```
 
 ---
@@ -628,5 +719,5 @@ cargo run -p xscore -- link del --id <link-id>                         # full te
 
 ```bash
 git add crates/xscore/src/cli/ crates/xscore/src/core/ crates/xscore/src/config/ crates/xscore/src/model/ crates/xscore/src/main.rs
-git commit -m "feat(cli): 4-verb link + 4-verb pane trees (add/del/show/list)"
+git commit -m "feat(cli): 4-verb link + 4-verb window + 4-verb pane trees (ADR 0005 + ADR 0006)"
 ```

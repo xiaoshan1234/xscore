@@ -1,31 +1,35 @@
 # xscore CLI First — Architecture Overview
 
-**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions behind a single `Link × Pane` abstraction, callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
+**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions behind a single `Link × Window × Pane` abstraction (ADR 0006 adds Window between Link and Pane), callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
 
 **Architecture Decision Records (read first, in order):**
-- [ADR 0001](../adr/0001-link-pane-model.md) — why Link × Pane (not flat Session)
+- [ADR 0001](../adr/0001-link-pane-model.md) — why Link × Window × Pane (not flat Session)
 - [ADR 0002](../adr/0002-transport-sink-split.md) — why Transport × Sink (not single backend)
 - [ADR 0003](../adr/0003-external-tmux-server.md) — why external `tmux -L xscore` (not embedded tmux)
 - [ADR 0005](../adr/0005-add-open-close-del-verbs.md) — why `link` verbs are `add` / `del` / `open` / `close` (no `--link=existing`)
+- [ADR 0006](../adr/0006-window-concept.md) — why a Window tier between Link and Pane
 
-**Architecture diagrams:** [diagrams/README.md](../architecture/diagrams/README.md) (Link × Pane topology, Link & Pane state machines, Module dependency rules — inline Mermaid)
+**Architecture diagrams:** [diagrams/README.md](../architecture/diagrams/README.md) (Link × Window × Pane topology, Link/Window/Pane state machines, Module dependency rules — inline Mermaid)
 
-**Architecture (Link × Pane):**
+**Architecture (Link × Window × Pane):**
 
 A **Link** is one physical connection. A **Pane** is one logical view into a link. One link can host N panes; panes on the same link share Transport + Sink infrastructure but hold independent buffers, IDs, and lifecycle.
 
 ```
-Link  ── owns ──> Transport + Sink (the physical connection + terminal semantics)
-       +─ hosts ─> [Pane_1, Pane_2, ..., Pane_N]   (N independent views)
+Link  ──owns ──> Transport + Sink (the physical connection + terminal semantics)
+       +─ hosts ─> [Window_1, Window_2, ..., Window_N]   (N named tmux windows inside the session)
+                └ each → [Pane_1, Pane_2, ..., Pane_M]   (M tmux split-windows inside the window)
 ```
 
-- **Link** = `(Transport + Sink)` pair (the same architecture we already settled on). One link is one tmux session (named `xscore-link-<link_uuid>`), or one SSH channel, or one serial port, or one local child process — the physical layer.
-- **Pane** = one SessionId. Each pane is what users `data read/write/resize` against. Each pane has its own tmux window inside the link's tmux session (when sink is `TmuxSink`), or its own buffered slice (when sink is `RawSink`).
+- **Link** = `(Transport + Sink)` pair (the same architecture we already settled on). One link is one tmux session (named `xscore-link-<link_uuid>`), or one SSH channel, or one serial port, or one local child process — the physical layer. Each link owns N windows, each window owns M panes (ADR 0006).
+- **Window** = one tmux window inside the link's session. Named within the link (ADR 0006).
+- **Pane** = one SessionId. Each pane is what users `data read/write/resize` against. Each pane is a tmux split-window inside its parent window.
 
 ```
 SessionManager
-├─ LinkRegistry: link_id  -> Arc<Link>      { transport + sink + pane-list }
-├─ PaneRegistry: pane_id  -> PaneInfo       { link_id, sink_handle, ... }
+├─ LinkRegistry:    link_id  -> Arc<Link>      { transport + sink + window-list }
+├─ WindowRegistry:  window_id -> Arc<Window>   { link_id, sink_handle, pane-list }        (ADR 0006)
+├─ PaneRegistry:    pane_id  -> PaneInfo       { window_id, sink_handle, ... }            (ADR 0006: was link_id)
 └─ BackendRegistry: pane_id -> Arc<dyn PaneBackend>   { wraps (Link, sink_handle) }
 ```
 
@@ -88,23 +92,26 @@ crates/xscore/
 │   ├── main.rs                       # clap entry, tracing init, dispatch
 │   ├── cli/
 │   │   ├── mod.rs                    # Cli struct, derive top-level
-│   │   ├── link.rs                   # link add/del/open/close/show/list + config sub-tree
-│   │   ├── pane.rs                   # pane add/del/show/list
+│   │   ├── link.rs                   # link add/del/open/close/show/list + config sub-tree (ADR 0005 verb split)
+│   │   ├── window.rs                 # window add/del/show/list (ADR 0006)
+│   │   ├── pane.rs                   # pane add/del/show/list (--window after ADR 0006)
 │   │   ├── data.rs                   # pane data read/write/resize
 │   │   └── config.rs                 # config show/path/set/unset
 │   ├── core/
 │   │   ├── mod.rs                    # pub SessionManager, re-exports
-│   │   ├── manager.rs                # add_link / open_link / close_link / del_link; add_pane / del_pane
-│   │   ├── link.rs                   # Link struct (transport + sink + pane list)
+│   │   ├── manager.rs                # add_link / open_link / close_link / del_link; add_window / del_window; add_pane / del_pane
+│   │   ├── link.rs                   # Link struct (transport + sink + window list)
+│   │   ├── window.rs                 # Window + WindowInfo structs (ADR 0006)
 │   │   ├── pane.rs                   # Pane struct (handle + state)
 │   │   ├── link_registry.rs          # LinkRegistry (by_id; address used internally for routing)
-│   │   ├── pane_registry.rs          # PaneRegistry (pane_id -> PaneInfo)
+│   │   ├── window_registry.rs        # WindowRegistry (by_id + by_link secondary index; ADR 0006)
+│   │   ├── pane_registry.rs          # PaneRegistry (pane_id -> PaneInfo; PaneInfo.window_id after ADR 0006)
 │   │   ├── address.rs                # LinkAddress hashable key per transport
-│   │   ├── id.rs                     # LinkId + PaneId (uuid v7)
-│   │   └── error.rs                  # thiserror enum (LinkNotFound, OpenOnlyForTmux, CloseOnlyForTmux, ...)
+│   │   ├── id.rs                     # LinkId + WindowId (ADR 0006) + PaneId (uuid v7)
+│   │   └── error.rs                  # thiserror enum (LinkNotFound, WindowNotFound, OpenOnlyForTmux, CloseOnlyForTmux, ...)
 │   ├── model/
 │   │   ├── mod.rs
-│   │   ├── session.rs                # ConnectSpec / LinkInfo / PaneInfo / TransportConfig / SinkConfig
+│   │   ├── session.rs                # ConnectSpec / LinkInfo / WindowInfo / PaneInfo / TransportConfig / SinkConfig (ADR 0006 adds WindowInfo)
 │   │   └── config.rs                 # AppConfig
 │   ├── url/
 │   │   ├── mod.rs                    # URL parser entry
@@ -119,7 +126,7 @@ crates/xscore/
 │   ├── sink/
 │   │   ├── mod.rs                    # pub trait Sink + pane ops
 │   │   ├── factory.rs                # sink_for(...)
-│   │   ├── tmux.rs                   # TmuxSink (PTY/ANSI), new_pane() per attach
+│   │   ├── tmux.rs                   # TmuxSink (PTY/ANSI); new_window + kill_window + split-window for panes (ADR 0006)
 │   │   └── raw.rs                    # RawSink (no-op stub for ?tmux=off)
 │   ├── backends/
 │   │   ├── mod.rs                    # pub trait PaneBackend + BackendRegistry
@@ -148,15 +155,16 @@ crates/xscore/
 - `config` depends on `model`. Never on anything else.
 - All cross-module state goes through `core::SessionManager` — no global statics.
 
-**Why Link × Pane (vs single-session model):**
+**Why Link × Window × Pane (vs single-session model):**
 
 | Layer | Concern | Lifetime |
 | --- | --- | --- |
 | Transport | bytes/PTY | 1 per link; killed when link closes |
 | Sink | tmux session (or passthrough) | 1 per link; the session is killed when the link closes (the shared `-L xscore` server stays up) |
-| Pane | one working view | N per link; each pane independently closeable |
+| Window | one tmux window inside the link's session | N per link (named); killed by `window del` (panes inside die) or by `link del` (cascade) |
+| Pane | one tmux split-window inside a Window | N per window; each pane independently closeable via `pane del` |
 
-Each pane has its own `id`, its own data read/write state, its own `PaneInfo`. Killing one pane does not affect its siblings. Killing a link kills the transport + sink + every pane on it.
+Each pane has its own `id`, its own data read/write state, its own `PaneInfo`. Killing one pane does not affect its siblings. Killing a window kills every pane inside it (via tmux kill-window). Killing a link kills the transport + sink + every window + every pane on it.
 
 ---
 

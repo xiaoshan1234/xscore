@@ -4,7 +4,7 @@
 - **Date:** 2026-10-16
 - **Deciders:** dev
 - **Supersedes:** [ADR 0004](./../archive-2026-10-16-adr-0004-reversal/0004-link-existing-dedup.md) — opt-in address-based dedup via `--link=existing` is retired.
-- **Related:** [ADR 0001](./0001-link-pane-model.md), [overview.md](../roadmap/overview.md), [task-10](../roadmap/task-10-cli-connect-link-pane.md)
+- **Related:** [ADR 0001](./0001-link-pane-model.md), [overview.md](../roadmap/overview.md), [ADR 0006](./0006-window-concept.md) (the Window verb group mirrors pane's shape per the same verb-split principle), [task-10](../roadmap/task-10-cli-connect-link-pane.md)
 
 ## Context
 

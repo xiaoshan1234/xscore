@@ -29,6 +29,10 @@ fn xscore_link_add_creates_link_and_pane() {
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("link:"));
     assert!(s.contains("pane:"));
+    // ADR 0006: `link add` auto-creates one default window inside the
+    // link's tmux session (returned as a 3rd line). Tests below operate
+    // on the returned link_id and pane_id; the window_id is used by
+    // xscore_window_list_smoke below.
 
     let link_line = s.lines().find(|l| l.starts_with("link:")).unwrap();
     let pane_line = s.lines().find(|l| l.starts_with("pane:")).unwrap();
@@ -146,6 +150,78 @@ fn xscore_link_config_add_and_list_roundtrip() {
     let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
         .args(["link", "config", "remove", "web"]).output();
 }
+
+// ----- ADR 0006: Window tier -----
+
+#[test]
+fn xscore_window_add_inside_link() {
+    let add = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "add", "shell:///bin/bash"]).output().unwrap();
+    let s = String::from_utf8_lossy(&add.stdout);
+    let link_id = s.lines().find(|l| l.starts_with("link:")).unwrap()
+        .trim().strip_prefix("link:").unwrap().trim().to_string();
+
+    let window = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["window", "add", "--link", &link_id, "--name", "dev"])
+        .output().unwrap();
+    assert!(window.status.success(), "window add failed: {}", String::from_utf8_lossy(&window.stderr));
+    let ws = String::from_utf8_lossy(&window.stdout);
+    assert!(ws.contains("window:"), "expected 'window:' line, got: {ws}");
+    let wid = ws.lines().find(|l| l.starts_with("window:")).unwrap()
+        .trim().strip_prefix("window:").unwrap().trim().to_string();
+
+    let list = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["window", "list", "--link", &link_id]).output().unwrap();
+    assert!(String::from_utf8_lossy(&list.stdout).contains(&wid),
+            "new window not in window list: {wid}");
+
+    let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["window", "del", "--id", &wid]).output();
+    let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "del", "--id", &link_id]).output();
+}
+
+#[test]
+fn xscore_window_del_kills_window() {
+    let add = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let s = String::from_utf8_lossy(&add.stdout);
+    let link_id = s.lines().find(|l| l.starts_with("link:")).unwrap()
+        .trim().strip_prefix("link:").unwrap().trim().to_string();
+    let initial_window = s.lines().find(|l| l.starts_with("window:")).unwrap()
+        .trim().strip_prefix("window:").unwrap().trim().to_string();
+    // The auto-created default window from `link add` is the first
+    // window in this link. `del` it; subsequent `list` should not include it.
+    let del = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["window", "del", "--id", &initial_window]).output().unwrap();
+    assert!(del.status.success(), "window del failed: {}", String::from_utf8_lossy(&del.stderr));
+
+    let list = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["window", "list", "--link", &link_id]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&list.stdout).contains(&initial_window),
+            "deleted window still in registry: {initial_window}");
+
+    // (link's default pane inside the auto-created window is gone now —
+    // cleanup the link itself.)
+    let _ = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "del", "--id", &link_id]).output();
+}
+
+#[test]
+fn xscore_pane_add_uses_window_not_link() {
+    // ADR 0006: `pane add --window <wid>` is the new shape.
+    let add = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["link", "add", "shell:///bin/echo"]).output().unwrap();
+    let s = String::from_utf8_lossy(&add.stdout);
+    let window_id = s.lines().find(|l| l.starts_with("window:")).unwrap()
+        .trim().strip_prefix("window:").unwrap().trim().to_string();
+
+    let pane = Command::new(env!("CARGO_BIN_EXE_xscore"))
+        .args(["pane", "add", "--window", &window_id, "--name", "bash"]).output().unwrap();
+    assert!(pane.status.success(), "pane add failed: {}", String::from_utf8_lossy(&pane.stderr));
+    assert!(String::from_utf8_lossy(&pane.stdout).contains("pane:"),
+            "expected 'pane:' line, got: {}", String::from_utf8_lossy(&pane.stdout));
+}
 ```
 ```
 
@@ -170,7 +246,11 @@ xscore link add serial:///dev/ttyUSB0?baud=115200
 xscore link config add web ssh://u@h:22?identity=~/.ssh/id_ed25519
 
 # Reuse template + attach multiple panes on the same link:
-xscore link add ssh://u@h:22 -c web           # 1st pane on the link
+xscore link add ssh://u@h:22 -c web           # 1st pane on the link (auto-creates default window too)
+
+# Multiple windows inside one link (ADR 0006):
+xscore window add   --link <link-id> --name dev      # new tmux window
+xscore pane   add   --window <window-id> --name bash  # split-window inside that tmux window
 
 # Open / detach / destroy — verb split (ADR 0005):
 xscore link open 'tmux://my-session'           # attach existing tmux session
@@ -181,7 +261,7 @@ xscore link del --id <link-id>                 # full teardown (kills the per-li
 ## Commands
 
 \`\`\`
-xscore link add <url?> [-c CONFIG]                     # always create new
+xscore link add <url?> [-c CONFIG]                     # always create new (auto-creates 1 default window + 1 pane)
 xscore link del --id <link-id>                            # full teardown (kills transport + sink + the per-link tmux session)
 xscore link open <url?> [-c CONFIG]                       # attach existing tmux session (tmux only)
 xscore link close --id <link-id>                          # detach (tmux only; session keeps running)
@@ -193,10 +273,15 @@ xscore link config remove <name>
 xscore link config show <name>
 xscore link config list
 
-xscore pane add --link <link-id> [--name=NAME]
+xscore window add   --link <link-id> [--name=NAME]
+xscore window list  [--link <link-id>]
+xscore window show  --id <window-id>
+xscore window del   --id <window-id>
+
+xscore pane add --window <window-id> [--name=NAME]
 xscore pane del --id <pane-id>
 xscore pane show --id <pane-id>
-xscore pane list [--link <link-id>]
+xscore pane list [--window <window-id>]
 
 xscore data read --pane <pane-id> [--bytes N]
 xscore data write --pane <pane-id> [--from-file FILE]

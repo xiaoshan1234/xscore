@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-16
 - **Deciders:** dev
-- **Related:** [overview.md](../roadmap/overview.md), [ADR 0001](./0001-link-pane-model.md)
+- **Related:** [overview.md](../roadmap/overview.md), [ADR 0001](../adr/0001-link-pane-model.md), [ADR 0006](../adr/0006-window-concept.md) (adds Window between Link and Pane; recomputes per-link tmux wiring in terms of session / window / pane inside the shared `-L xscore` server). See [ADR 0006 § tmux wire](../adr/0006-window-concept.md#tmux-wire-corrected--server-is-shared-not-per-link) for the per-tier tmux command mapping.
 
 ## Context
 
