@@ -110,11 +110,39 @@ impl SessionManager {
         let _arc_link = self.links.insert(link).await;
 
         // ADR 0006: auto-create one default window + one default pane.
-        let default_window_id = self.add_window(link_id, None).await?;
+        // `TmuxSink::create` ran `tmux new-session -d -s <name>`, which
+        // always creates exactly ONE window at index 0. So we register
+        // THAT window in the manager directly (skipping the previous
+        // double-window bug where we ALSO called `add_window`,
+        // producing 2 windows per link). The default name follows
+        // task-14's resolved convention: `w-<first 8 hex of link_id>`.
+        let default_window_id = self.register_window_at(link_id, 0).await?;
         let default_pane_id = self.add_pane(default_window_id, None).await?;
 
         self.save_state().await?;
         Ok((link_id, default_window_id, default_pane_id))
+    }
+
+    /// Register a window in the manager at a given tmux-assigned index
+    /// WITHOUT making a new-window tmux call. Used by `add_link` to
+    /// adopt the auto-created default window from `TmuxSink::create`'s
+    /// `tmux new-session`. Also used by `hydrate` to re-register
+    /// persisted windows.
+    async fn register_window_at(&self, link_id: LinkId, tmux_window_index: u32) -> Result<WindowId> {
+        let arc_link = self.links.get(link_id).await.ok_or(Error::LinkNotFound(link_id))?;
+        let resolved_name = format!("w-{}", &link_id.to_string()[..8]);
+        let window_id = WindowId::new();
+        let canonical = WindowInfo {
+            id: window_id,
+            link_id,
+            name: resolved_name,
+            created_at: chrono::Utc::now(),
+            tmux_window_index,
+        };
+        let window = Window::new(canonical);
+        self.windows.insert(window).await;
+        arc_link.windows.lock().await.push(window_id);
+        Ok(window_id)
     }
 
     /// Attach to an existing tmux session (ADR 0005). Non-tmux transports
