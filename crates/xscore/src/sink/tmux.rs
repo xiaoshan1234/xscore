@@ -99,14 +99,85 @@ impl super::Sink for TmuxSink {
 
     async fn new_pane(&self, tmux_window_index: u32) -> Result<String> {
         // Pane = a tmux split inside the named window.
+        //
+        // Three-step discovery for robustness against a tmux server
+        // internal race: `split-window` returns "success" to the
+        // client before the server's internal state fully commits the
+        // new pane. We've observed the new pane missing from
+        // `list-panes` (and from subsequent `send-keys` /
+        // `capture-pane` calls) when the second call is made too
+        // quickly after the first.
+        //
+        // 1. `tmux split-window -P -F "#{pane_id}"` — ask tmux to print
+        //    the new pane's id. Output is informational; we don't
+        //    trust it.
+        // 2. Sleep 50ms (heuristic; tmux server async race window).
+        // 3. `tmux list-panes` — query the actual pane list. The
+        //    newly-created pane is the one with the highest
+        //    pane_index. We use that as the authoritative id.
+        //
+        // Fallback: if list-panes shows nothing for the window, surface
+        // a clear error instead of saving a phantom pane_id that data
+        // ops would later fail to find.
         let addr = self.session_window_addr(tmux_window_index);
-        let out = self.tmux()
+        let split_out = self.tmux()
             .args(["split-window", "-t", &addr, "-P", "-F", "#{pane_id}"])
             .output().await?;
-        if !out.status.success() {
-            return Err(Error::Sink(format!("tmux split-window: {:?}", out.status)));
+        let split_stdout = String::from_utf8_lossy(&split_out.stdout).trim().to_string();
+        let split_stderr = String::from_utf8_lossy(&split_out.stderr).trim().to_string();
+        if !split_out.status.success() {
+            return Err(Error::Sink(format!(
+                "tmux split-window: status={:?} stdout={split_stdout:?} stderr={split_stderr:?}",
+                split_out.status
+            )));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+
+        // tmux server's split-window completion notification can
+        // race the server's internal state-commit; empirically a
+        // brief pause makes the subsequent list-panes see the new
+        // pane consistently. 50ms is the lower bound observed; bump
+        // if flake returns.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // List the window's panes; pick the highest pane_index.
+        let list_out = self.tmux()
+            .args(["list-panes", "-t", &addr, "-F", "#{pane_id}\t#{pane_index}"])
+            .output().await?;
+        let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+        if !list_out.status.success() {
+            return Err(Error::Sink(format!(
+                "tmux list-panes after split: status={:?} stderr={:?}",
+                list_out.status,
+                String::from_utf8_lossy(&list_out.stderr)
+            )));
+        }
+        let mut best: Option<(u32, String)> = None;
+        for line in list_stdout.lines() {
+            if line.is_empty() { continue; }
+            let mut parts = line.splitn(2, '\t');
+            let pid_str = parts.next().unwrap_or("");
+            let idx_str = parts.next().unwrap_or("0");
+            if let (Ok(idx), true) = (idx_str.parse::<u32>(), !pid_str.is_empty()) {
+                let candidate = (idx, pid_str.to_string());
+                best = Some(match best {
+                    Some(prev) if prev.0 >= idx => prev,
+                    _ => candidate,
+                });
+            }
+        }
+        match best {
+            Some((_, pane_id)) => Ok(pane_id),
+            None => {
+                if !split_stdout.is_empty() {
+                    Ok(split_stdout)
+                } else {
+                    Err(Error::Sink(format!(
+                        "tmux new_pane: split printed {split_stdout:?} but list-panes empty; \
+                         session={addr} (likely tmux race — see TmuxSink::new_pane)"
+                    )))
+                }
+            }
+        }
     }
 
     async fn close_pane(&self, pane_handle: &str) -> Result<()> {

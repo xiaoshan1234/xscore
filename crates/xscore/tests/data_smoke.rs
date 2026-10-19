@@ -9,6 +9,20 @@
 //
 // Each test uses a unique `XSCORE_SOCKET` (so its tmux server doesn't
 // collide with other tests) and cleans up the server on entry + exit.
+//
+// IMPORTANT: these tests use `std::env::set_var` for `XSCORE_SOCKET`
+// and `HOME` (the manager reads XSCORE_SOCKET at sink-creation time
+// and HOME for the state file path). Env vars are PROCESS-GLOBAL, so
+// tests MUST be run serially:
+//
+//   cargo test -p xscore --test data_smoke -- --test-threads=1
+//
+// Otherwise two parallel tests will race on the env var and one will
+// write state to the other's HOME (the failure manifests as
+// "rename ... No such file or directory" on `add_link`'s save_state).
+// The cli_smoke tests don't have this problem because they use
+// `Command::env(...)` per-Command; data_smoke doesn't spawn the
+// binary, it uses the in-process manager which reads env directly.
 
 use std::time::Duration;
 use xscore::core::SessionManager;
