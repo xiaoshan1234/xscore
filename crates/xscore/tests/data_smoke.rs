@@ -47,10 +47,11 @@ async fn data_read_after_link_add_writes_to_pane() {
     cleanup_socket(&sock).await;
 
     let mgr = SessionManager::new();
-    let (spec, addr) = url::parse("shell:///bin/cat").expect("parse shell:///bin/cat");
+    let (spec, addr) = url::parse("shell:///bin/cat?tmux=auto").expect("parse shell:///bin/cat");
     let (link_id, _window_id, pane_id) = mgr.add_link(spec, addr)
         .await
         .expect("add_link");
+    let pane_id = pane_id.expect("tmux link should have a pane");
 
     let backend = mgr.backend(pane_id).await.expect("backend");
 
@@ -91,7 +92,7 @@ async fn add_link_creates_exactly_one_window() {
     cleanup_socket(&sock).await;
 
     let mgr = SessionManager::new();
-    let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
+    let (spec, addr) = url::parse("shell:///bin/cat?tmux=auto").expect("parse");
     let (link_id, _wid, _pid) = mgr.add_link(spec, addr).await.expect("add_link");
 
     // List tmux windows for this link's session.
@@ -128,8 +129,9 @@ async fn round_trip_across_two_managers() {
 
     // Manager A: add link, write, persist.
     let mgr_a = SessionManager::new();
-    let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
+    let (spec, addr) = url::parse("shell:///bin/cat?tmux=auto").expect("parse");
     let (link_id_a, _wid_a, pane_id_a) = mgr_a.add_link(spec, addr).await.expect("a.add_link");
+    let pane_id_a = pane_id_a.expect("tmux link should have a pane");
     let backend_a = mgr_a.backend(pane_id_a).await.expect("a.backend");
     backend_a.write(b"persistence round-trip\n").await.expect("a.write");
     tokio::time::sleep(Duration::from_millis(200)).await;

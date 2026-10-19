@@ -3,10 +3,16 @@
 Rust session manager for SSH / shell / serial, modeled as **Link × Window × Pane** (ADR 0006).
 
 - **Link** = one physical connection (SSH channel, serial port, local child, or one tmux session inside the shared `tmux -L xscore` server).
-- **Window** = one tmux window inside the link's session. A link can have N named windows.
-- **Pane** = one working view — a tmux split-window inside a Window. A window can have M panes sharing its screen.
+- **Window** = one tmux window inside the link's session. A link can have N named windows. (Tmux-backed links only.)
+- **Pane** = one working view — a tmux split-window inside a Window. A window can have M panes sharing its screen. (Tmux-backed links only.)
 
-This is a **Rust port of the xst/script patterns** (without the xst dependency): a single CLI that orchestrates the local tmux server as the runtime + a `~/.config/xscore/` tree for persistent state.
+> **Default behavior (post v0.2.0):** A fresh `xscore link add <url>` runs the transport
+> directly — no tmux server in the loop. The `xscore window {add,del,list,show}` and
+> `xscore pane {add,del,list,show}` subcommands are only valid for tmux-backed links.
+> To get the full Link × Window × Pane tree, opt in to tmux with `?tmux=on` (or
+> `?tmux=auto|local|remote`) in the URL — see [Sink options](#sink-options-tmux-opt-in).
+
+This is a **Rust port of the xst/script patterns** (without the xst dependency): a single CLI that orchestrates a `~/.config/xscore/` tree for persistent state. Tmux is one option, not the default.
 
 ## 5-minute demo
 
@@ -15,42 +21,49 @@ This is a **Rust port of the xst/script patterns** (without the xst dependency):
 #    serialport, russh, clap, etc. — see Cargo.lock for the full list.
 cargo build --release
 
-# 2. Add a link. Each `link add` creates a fresh tmux session in the
-#    shared `tmux -L xscore` server, with one default window + one
-#    default pane. The common path stays one step.
+# 2. Add a link. By default this is a Raw link: the transport runs
+#    directly with no tmux server, so only `link:` is printed.
 ./target/release/xscore link add shell:///bin/bash
 # stdout:
 #   link:  01928e0a-7d10-7000-8000-000000000001
-#   window:01928e0a-7d10-7000-8000-000000000002
-#   pane:  01928e0a-7d10-7000-8000-000000000003
+
+# 2b. (Optional) opt in to the full Link × Window × Pane tree:
+./target/release/xscore link add 'shell:///bin/bash?tmux=on'
+# stdout:
+#   link:  01928e0a-7d10-7000-8000-000000000002
+#   window:01928e0a-7d10-7000-8000-000000000003
+#   pane:  01928e0a-7d10-7000-8000-000000000004
 
 # 3. List links (state is persisted to ~/.config/xscore/state/state.json
 #    automatically after every mutating call).
 ./target/release/xscore link list
 # stdout:
-#   01928e0a-7d10-7000-8000-000000000001   01928e0a-7d10-7000-8000-000000000001
+#   LINK ID                               NAME
+#   01928e0a-...                         01928e0a-...
+#   01928e0a-...                         01928e0a-...
 
-# 4. Add another window to the same link (e.g. dev / ops / play).
-./target/release/xscore window add --link <link-id> --name dev
+# 4. (Tmux-backed link only) add another window to the same link.
+./target/release/xscore window add --link <tmux-link-id> --name dev
 # stdout:
-#   window:01928e0a-7d10-7000-8000-000000000004
+#   window:01928e0a-7d10-7000-8000-000000000005
 
-# 5. Add a split-pane to the dev window.
+# 5. (Tmux-backed link only) add a split-pane to the dev window.
 ./target/release/xscore pane add --window <window-id-2> --name bash
 # stdout:
-#   pane:  01928e0a-7d10-7000-8000-000000000005
+#   pane:  01928e0a-7d10-7000-8000-000000000006
 
-# 6. Read the visible content of a pane (uses tmux capture-pane).
+# 6. (Tmux-backed link only) read the visible content of a pane
+#    (uses tmux capture-pane).
 ./target/release/xscore data read --pane <pane-id> --bytes 4096
 
-# 7. Write text into a pane (uses tmux send-keys).
+# 7. (Tmux-backed link only) write text into a pane (uses tmux send-keys).
 echo -n 'echo hi from xscore' | ./target/release/xscore data write --pane <pane-id>
 
 # 8. Verify state survives process exit (in another shell):
 ./target/release/xscore link list
-# stdout: same <link-id> as step 3
-./target/release/xscore window list --link <link-id>
-# stdout: both window ids from steps 2 + 4
+# stdout: same link ids as step 3
+./target/release/xscore window list --link <tmux-link-id>
+# stdout: both window ids from steps 2b + 4
 
 # 9. Clean up.
 ./target/release/xscore link del --id <link-id>
@@ -116,6 +129,23 @@ xscore config unset <key>
 | `serial://` | Serial port (needs `?baud=...`) | `serial:///dev/ttyUSB0?baud=115200&data_bits=8&parity=n&stop_bits=1` |
 | `ssh://` | SSH (key-based auth, needs `?identity=...`) | `ssh://user@host:22?identity=~/.ssh/id_ed25519` |
 
+### Sink options (tmux opt-in)
+
+A link has a `sink` that controls how its I/O is mediated. The default is **`raw`** — the transport is the I/O source directly, no tmux server involved. Opt in to tmux to get the full Link × Window × Pane tree plus `xscore data {read, write, resize}`.
+
+| `?tmux=` value | Sink | Window/Pane tree | Data ops |
+|---|---|---|---|
+| _absent_ (default) | `raw` | no | (no panes) |
+| `?tmux=off` | `raw` | no | (no panes) |
+| `?tmux=on` | `tmux` (mode=auto) | yes | yes |
+| `?tmux=auto` | `tmux` (mode=auto) | yes | yes |
+| `?tmux=local` | `tmux` (mode=local) | yes | yes |
+| `?tmux=remote` | `tmux` (mode=remote) | yes | yes |
+
+`auto` resolves at link-creation time: `ssh://` → `remote` (tmux on the remote host), `shell://` / `serial://` → `local` (the local shared `tmux -L xscore` server). `name=X` overrides the auto-generated `xscore-<link_id>` tmux session name.
+
+**Why default to raw?** xscore was originally built to manage tmux sessions, but most users just want a clean CLI for SSH / shell / serial — the tmux server is overhead they don't need. Opt-in to tmux when you want session persistence, the window/pane tree, or `xscore data` ops.
+
 ## Architecture
 
 ```
@@ -138,18 +168,19 @@ Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Window in
 
 `link open` and `link close` are tmux-only because shell/serial/ssh processes don't have cross-invocation identity to attach to or detach from. `link add <same url>` always creates a brand-new link; to re-attach to an existing resource, the verb is `link open`. See [ADR 0005](doc/dev/adr/0005-add-open-close-del-verbs.md) for the rationale.
 
-## Status (v0.1.0)
+## Status (v0.2.0-dev)
 
 **Working end-to-end:**
-- 3-tier model: Link × Window × Pane (ADR 0006) wired
+- 3-tier model: Link × Window × Pane (ADR 0006) wired (tmux-backed links only)
 - Local tmux sink: `tmux new-session / new-window / split-window / kill-*` over the shared `-L xscore` server (ADR 0003)
 - `shell://` transport (local child, real `tokio::process::Command`)
 - URL parser: `shell://` / `ssh://` / `serial://` with `?key=value` query
 - Persistent ConnectSpec templates: `xscore link config {add,remove,show,list}` at `~/.config/xscore/links/`
-- Per-pane data ops: `xscore data {read, write, resize}` over tmux's `capture-pane` / `send-keys` / `resize-pane`
+- Per-pane data ops: `xscore data {read, write, resize}` over tmux's `capture-pane` / `send-keys` / `resize-pane` (tmux-backed links only)
 - 4-verb trees for `link` / `window` / `pane` (ADR 0005)
 - ADR 0005 invariants: `link open` and `link close` reject non-tmux transports with `OpenOnlyForTmux` / `CloseOnlyForTmux`
 - State persistence across CLI invocations (`~/.config/xscore/state/state.json`)
+- **Default sink = `raw` (no tmux)**; opt in to tmux with `?tmux=on` or `?tmux=auto|local|remote` in the URL — see [Sink options](#sink-options-tmux-opt-in)
 
 **Implemented but not exercised by the test suite:**
 - `serial://` transport (real `serialport = "4.10"` impl) — needs real hardware
@@ -171,16 +202,16 @@ Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux). Each Window in
 ## Tests
 
 ```bash
-# Unit tests (14 tests, in-process, <1s)
+# Unit tests (20 tests, in-process, <1s)
 cargo test -p xscore --lib
 
-# CLI integration tests (11 tests, ~0.5s, requires live tmux)
+# CLI integration tests (14 tests, ~1s, requires live tmux for `?tmux=...` paths)
 cargo test -p xscore --test cli_smoke
 
 # Data-path integration tests (3 tests, single-process, real tmux round-trip)
 cargo test -p xscore --test data_smoke
 
-# Everything (28 tests total)
+# Everything (37 tests total)
 cargo test -p xscore
 ```
 
@@ -188,7 +219,7 @@ cargo test -p xscore
 
 | Area | Where | Count |
 |---|---|---|
-| URL parsing (5 schemes) | `url::connect::tests` | 5 |
+| URL parsing (incl. sink opt-in) | `url::connect::tests` | 11 |
 | Core id roundtrips + distinctness | `core::id::tests` | 3 |
 | `LinkAddress` equality | `core::address::tests` | 2 |
 | `Transport` trait object-safety | `transport::tests` (echo) | 1 |
@@ -205,11 +236,14 @@ cargo test -p xscore
 | `window add` inside link, visible in `window list` | `cli_smoke` | 1 |
 | `window del` removes from list | `cli_smoke` | 1 |
 | `pane add --window` (not `--link`) — ADR 0006 | `cli_smoke` | 1 |
+| **Default sink = raw (no window/pane printed)** | `cli_smoke` | 1 |
+| **`window add` errors on raw link (NotTmuxLink)** | `cli_smoke` | 1 |
+| **`?tmux=on` opt-in still creates window+pane** | `cli_smoke` | 1 |
 | In-process add → write → snapshot (real tmux) | `data_smoke` | 1 |
 | Double-default-window fix (1 link → 1 window) | `data_smoke` | 1 |
 | Cross-manager hydration (manager A add → manager B hydrates) | `data_smoke` | 1 |
 
-Total: **28 tests, 0 ignored.**
+Total: **37 tests, 0 ignored.**
 
 ## File layout
 

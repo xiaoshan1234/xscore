@@ -34,6 +34,7 @@ use crate::backends::{BackendRegistry, PaneBackend};
 use crate::backends::composite::CompositeBackend;
 use crate::model::{ConnectSpec, LinkInfo, PaneInfo, SinkConfig, WindowInfo};
 use crate::sink::factory::sink_for;
+use crate::sink::raw::RawSink;
 use crate::sink::tmux::TmuxSink;
 use crate::transport::factory as transport_factory;
 use crate::transport::NoopTransport;
@@ -63,22 +64,22 @@ impl SessionManager {
 
     // -------- add_link / open_link / close_link / del_link --------
 
-    /// Add a new link. Always creates a brand-new external resource.
-    /// Returns `(link_id, default_window_id, default_pane_id)` — auto-creates
-    /// one default window inside the link's session and one default pane
-    /// inside that window, so the common path stays one step (ADR 0006).
+    /// Add a new link. Creates a brand-new external resource.
+    /// Returns `(link_id, default_window_id, default_pane_id)` for
+    /// tmux-backed links (auto-creates one default window + one
+    /// default pane — ADR 0006); for raw links (direct transport
+    /// I/O, no tmux server), returns `(link_id, None, None)` since
+    /// there are no windows or panes to track.
     ///
-    /// The address derived from the URL (or template) is used for routing
-    /// inside `LinkRegistry` only — it is no longer a user-facing dedup key
-    /// (ADR 0005 retired `--link=existing`).
+    /// The address derived from the URL (or template) is used for
+    /// routing inside `LinkRegistry` only — it is no longer a
+    /// user-facing dedup key (ADR 0005 retired `--link=existing`).
     pub async fn add_link(
         &self,
         spec: ConnectSpec,
         address: LinkAddress,
-    ) -> Result<(LinkId, WindowId, PaneId)> {
-        // Create the transport. (task-07/task-08 haven't shipped real impls
-        // for shell/serial/ssh yet — the factory is a `todo!()` stub for
-        // those branches; local-tmux path is fully wired and used in dev.)
+    ) -> Result<(LinkId, Option<WindowId>, Option<PaneId>)> {
+        // Create the transport.
         let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
         let transport_kind = transport.kind();
         let link_id = LinkId::new();
@@ -109,15 +110,23 @@ impl SessionManager {
         };
         let _arc_link = self.links.insert(link).await;
 
-        // ADR 0006: auto-create one default window + one default pane.
-        // `TmuxSink::create` ran `tmux new-session -d -s <name>`, which
-        // always creates exactly ONE window at index 0. So we register
-        // THAT window in the manager directly (skipping the previous
-        // double-window bug where we ALSO called `add_window`,
-        // producing 2 windows per link). The default name follows
-        // task-14's resolved convention: `w-<first 8 hex of link_id>`.
-        let default_window_id = self.register_window_at(link_id, 0).await?;
-        let default_pane_id = self.add_pane(default_window_id, None).await?;
+        // For tmux-backed links: ADR 0006 auto-creates one default
+        // window + one default pane. `TmuxSink::create` already ran
+        // `tmux new-session -d -s <name>`, which always creates
+        // exactly ONE window at index 0; we register THAT window in
+        // the manager directly (skipping the previous double-window
+        // bug where we ALSO called `add_window`).
+        //
+        // For raw links (default): no tmux session, no windows,
+        // no panes — return (link_id, None, None).
+        let (default_window_id, default_pane_id) = match &spec.sink {
+            SinkConfig::Raw => (None, None),
+            SinkConfig::Tmux { .. } => {
+                let wid = self.register_window_at(link_id, 0).await?;
+                let pid = self.add_pane(wid, None).await?;
+                (Some(wid), Some(pid))
+            }
+        };
 
         self.save_state().await?;
         Ok((link_id, default_window_id, default_pane_id))
@@ -160,7 +169,7 @@ impl SessionManager {
         &self,
         _spec: ConnectSpec,
         address: LinkAddress,
-    ) -> Result<(LinkId, WindowId, PaneId)> {
+    ) -> Result<(LinkId, Option<WindowId>, Option<PaneId>)> {
         // ADR 0005 invariant: `link open` is tmux-only. Reject non-tmux
         // transports with `Error::OpenOnlyForTmux` BEFORE the tmux-attach
         // stub panics, so callers (and integration tests) get a clean
@@ -241,6 +250,12 @@ impl SessionManager {
     /// docs-time, task-14 §Open questions 2).
     pub async fn add_window(&self, link_id: LinkId, name: Option<String>) -> Result<WindowId> {
         let arc_link = self.links.get(link_id).await.ok_or(Error::LinkNotFound(link_id))?;
+        // Raw links (no tmux server) have no concept of windows.
+        // The user must opt in to tmux with `?tmux=on` in the URL
+        // to use the window/pane subcommands.
+        if matches!(arc_link.info.sink, SinkConfig::Raw) {
+            return Err(Error::NotTmuxLink(link_id));
+        }
         let resolved_name = name.unwrap_or_else(|| {
             let s = arc_link.id.to_string();
             // First 8 hex chars of the link_id (UUID v7 = 32 bits of entropy
@@ -284,6 +299,8 @@ impl SessionManager {
         }
         // Ask sink to kill the tmux window. (Session-mode tmux: this is
         // `tmux -L xscore kill-window -t <session>:<tmux_window_index>`.)
+        // RawSink's `kill_window` is `unreachable!()` — guard above
+        // prevents reaching this for raw links.
         if let Some(arc_link) = self.links.get(link_id).await {
             arc_link.sink.kill_window(tmux_window_index).await?;
             arc_link.windows.lock().await.retain(|w| *w != id);
@@ -307,6 +324,10 @@ impl SessionManager {
             .ok_or(Error::WindowNotFound(window_id))?;
         let arc_link = self.links.get(arc_window.info.link_id).await
             .ok_or(Error::LinkNotFound(arc_window.info.link_id))?;
+        // Raw links have no tmux session, so no panes either.
+        if matches!(arc_link.info.sink, SinkConfig::Raw) {
+            return Err(Error::NotTmuxLink(arc_window.info.link_id));
+        }
         // tmux split-window inside the parent window (ADR 0006).
         let sink_handle = arc_link.sink.new_pane(arc_window.info.tmux_window_index).await?;
         let pane_index = arc_window.panes.lock().await.len() as u32;
@@ -438,21 +459,31 @@ impl SessionManager {
         let link_id = info.id;
         let session_name = format!("xscore-{link_id}");
 
-        // Verify the tmux session still exists. If not, skip the link.
-        let has = tokio::process::Command::new("tmux")
-            .args(tmux_arg_socket())
-            .args(["has-session", "-t", &session_name])
-            .status().await?;
-        if !has.success() {
-            eprintln!("hydration: tmux session {session_name} gone, skipping");
-            return Ok(());
-        }
-
-        // Adopt the tmux sink (no new-session call).
-        let sink_mode = match &info.sink {
-            SinkConfig::Tmux { mode, .. } => mode.as_str(),
+        // For raw (non-tmux) links, skip the tmux session check and
+        // adopt the link with a RawSink. The original transport
+        // process is gone (re-add the link to get a fresh transport
+        // for data ops); the sink is just a marker.
+        //
+        // For tmux links, verify the tmux session still exists. If
+        // not, skip the link (it was killed externally).
+        let sink: Box<dyn crate::sink::Sink> = match &info.sink {
+            SinkConfig::Raw => Box::new(RawSink),
+            SinkConfig::Tmux { .. } => {
+                let has = tokio::process::Command::new("tmux")
+                    .args(tmux_arg_socket())
+                    .args(["has-session", "-t", &session_name])
+                    .status().await?;
+                if !has.success() {
+                    eprintln!("hydration: tmux session {session_name} gone, skipping");
+                    return Ok(());
+                }
+                let sink_mode = match &info.sink {
+                    SinkConfig::Tmux { mode, .. } => mode.as_str(),
+                    SinkConfig::Raw => unreachable!(),
+                };
+                Box::new(TmuxSink::adopt(link_id, sink_mode, &session_name))
+            }
         };
-        let sink = TmuxSink::adopt(link_id, sink_mode, &session_name);
 
         // Use a no-op transport — the user can re-add the link to get
         // a real transport. The tmux sink is the source of truth for
@@ -464,13 +495,14 @@ impl SessionManager {
             id: link_id,
             info,
             transport,
-            sink: Box::new(sink),
+            sink,
             windows: Mutex::new(Vec::new()),
         };
         let arc_link = self.links.insert(link).await;
 
         // Re-register windows + panes from the snapshot, preserving
-        // their ORIGINAL xscore ids.
+        // their ORIGINAL xscore ids. (Raw links have no windows or
+        // panes — both lists are empty.)
         let mut window_ids: Vec<WindowId> = Vec::new();
         for winfo in snap.windows {
             let wid = winfo.id;

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Design pivot: tmux is opt-in, not the default.**
+  Per the user's 2026-10-19 request — "我本来的目的是支持
+  tmux 会话的管理，不是所有 link 都要走 tmux" — `xscore link add
+  <url>` now defaults to a `RawSink` (direct transport I/O, no tmux
+  server in the loop). To get the full Link × Window × Pane tree
+  plus `xscore data` ops, opt in with `?tmux=on` (mode=auto) or
+  `?tmux=auto|local|remote` in the URL.
+
+  Before (v0.1.0): every `xscore link add <url>` created a tmux
+  session, with one default window + one default pane auto-created.
+
+  After: `xscore link add <url>` creates a Raw link (only `link:`
+  is printed). The `xscore window` / `xscore pane` subcommands
+  return `Error::NotTmuxLink(<link_id>)` for raw links — add
+  `?tmux=on` to use them.
+
+  Schema: `SinkConfig` enum gained a `Raw` variant. Old state.json
+  files with `SinkConfig::Tmux { ... }` deserialize unchanged
+  (backward-compatible). New `Raw` links serialize as
+  `"sink": "raw"`.
+
+### Added
+
+- `Error::NotTmuxLink(LinkId)` — returned by `add_window` /
+  `add_pane` / etc. when the link uses a Raw sink.
+- 6 URL parser tests for the new sink opt-in semantics.
+- 3 cli_smoke tests: default = raw, raw link rejects `window add`,
+  `?tmux=on` opt-in still creates window + pane.
+
 ### Pending (deferred to v0.2.0+)
 
 - `xscore link open` for the local-tmux case is a `todo!()` stub

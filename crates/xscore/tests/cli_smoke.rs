@@ -180,7 +180,7 @@ fn xscore_link_config_add_and_list_roundtrip() {
 fn xscore_link_add_creates_link_and_pane() {
     let xscore = || xscore_for("link_add_creates");
     let out = xscore()
-        .args(["link", "add", "shell:///bin/cat"])
+        .args(["link", "add", "shell:///bin/cat?tmux=auto"])
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -288,7 +288,7 @@ fn xscore_link_del_kills_link() {
 fn xscore_window_add_inside_link() {
     let xscore = || xscore_for("window_add_inside");
     let add = xscore()
-        .args(["link", "add", "shell:///bin/bash"])
+        .args(["link", "add", "shell:///bin/bash?tmux=auto"])
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&add.stdout);
@@ -333,7 +333,7 @@ fn xscore_window_add_inside_link() {
 fn xscore_window_del_kills_window() {
     let xscore = || xscore_for("window_del_kills");
     let add = xscore()
-        .args(["link", "add", "shell:///bin/cat"])
+        .args(["link", "add", "shell:///bin/cat?tmux=auto"])
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&add.stdout);
@@ -377,7 +377,7 @@ fn xscore_window_del_kills_window() {
 fn xscore_pane_add_uses_window_not_link() {
     let xscore = || xscore_for("pane_add_uses_window");
     let add = xscore()
-        .args(["link", "add", "shell:///bin/echo"])
+        .args(["link", "add", "shell:///bin/echo?tmux=auto"])
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&add.stdout);
@@ -397,4 +397,94 @@ fn xscore_pane_add_uses_window_not_link() {
         .unwrap();
     assert!(pane.status.success());
     assert!(String::from_utf8_lossy(&pane.stdout).contains("pane:"));
+}
+
+// ----- Default sink is raw (no tmux server) when `?tmux=` is absent -----
+// Per the 2026-10-19 design pivot: not every link goes through tmux. The
+// user requested "支持 tmux 会话的管理，不是所有 link 都要走 tmux". A fresh
+// `xscore link add <url>` should default to direct transport I/O and
+// print only `link:` (no `window:` / `pane:`).
+
+#[test]
+fn xscore_link_add_default_uses_raw_sink() {
+    let xscore = || xscore_for("link_add_default_raw");
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "add failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("link:"), "missing 'link:' line: {s}");
+    assert!(!s.contains("window:"), "raw link should not print 'window:': {s}");
+    assert!(!s.contains("pane:"), "raw link should not print 'pane:': {s}");
+
+    // The link's `link show` should report the sink as raw, not tmux.
+    let link_id = s
+        .lines()
+        .find(|l| l.starts_with("link:"))
+        .unwrap()
+        .trim()
+        .strip_prefix("link:")
+        .unwrap()
+        .trim()
+        .to_string();
+    let show = xscore()
+        .args(["link", "show", "--id", &link_id])
+        .output()
+        .unwrap();
+    let ss = String::from_utf8_lossy(&show.stdout);
+    assert!(ss.contains(r#""sink": "raw""#) || ss.contains(r#""sink":"raw""#),
+        "expected raw sink in show, got: {ss}");
+
+    // Cleanup
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+}
+
+#[test]
+fn xscore_window_add_errors_for_raw_link() {
+    let xscore = || xscore_for("window_add_raw_link");
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])  // default = raw
+        .output()
+        .unwrap();
+    let link_id = String::from_utf8_lossy(&add.stdout)
+        .lines()
+        .find(|l| l.starts_with("link:"))
+        .unwrap()
+        .trim()
+        .strip_prefix("link:")
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let window = xscore()
+        .args(["window", "add", "--link", &link_id, "--name", "dev"])
+        .output()
+        .unwrap();
+    assert!(!window.status.success(), "window add on raw link must fail");
+    let s = String::from_utf8_lossy(&window.stderr);
+    assert!(
+        s.contains("tmux") || s.contains("NotTmuxLink"),
+        "expected NotTmuxLink error, got: {s}"
+    );
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+}
+
+#[test]
+fn xscore_link_add_with_tmux_on_still_creates_window_and_pane() {
+    // Sanity: opt-in `?tmux=on` keeps the old auto-create behavior.
+    let xscore = || xscore_for("link_add_tmux_on");
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/cat?tmux=on"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("link:"));
+    assert!(s.contains("window:"));
+    assert!(s.contains("pane:"));
+    let link_id = s.lines().find(|l| l.starts_with("link:")).unwrap()
+        .trim().strip_prefix("link:").unwrap().trim().to_string();
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
 }

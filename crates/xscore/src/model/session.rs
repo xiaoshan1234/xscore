@@ -15,6 +15,19 @@ pub enum TransportConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "sink", rename_all = "snake_case")]
 pub enum SinkConfig {
+    /// Direct transport I/O. No tmux server involvement — the
+    /// shell/serial/ssh transport is the I/O source directly. Use
+    /// for simple pipe-like scenarios or when you don't want the
+    /// tmux overhead (and the `xscore window` / `xscore pane`
+    /// subcommands don't apply to a raw link).
+    Raw,
+    /// Wrap the link in a tmux session (per ADR 0003, the shared
+    /// `tmux -L xscore` server). `mode` controls auto/local/remote;
+    /// `session_name` is an optional override for the auto-generated
+    /// `xscore-<link_id>` name.
+    ///
+    /// Opt in via the URL query `?tmux=on` (defaults to mode=auto)
+    /// or `?tmux=auto|local|remote` (explicit mode).
     Tmux {
         #[serde(default = "default_tmux_mode")]
         mode: String,
@@ -62,6 +75,7 @@ impl LinkInfo {
     pub fn transport_str(&self) -> &'static str { self.address.kind() }
     pub fn sink_str(&self) -> &'static str {
         match &self.sink {
+            SinkConfig::Raw => "raw",
             SinkConfig::Tmux { .. } => "tmux",
         }
     }

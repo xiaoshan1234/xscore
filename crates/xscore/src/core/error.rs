@@ -18,6 +18,9 @@ pub enum Error {
     #[error("`xscore link close` is only valid for tmux sessions, not {0}")]
     CloseOnlyForTmux(&'static str),
 
+    #[error("link {0} does not use the tmux sink; add `?tmux=on` to the URL to enable window/pane commands")]
+    NotTmuxLink(LinkId),
+
     #[error("url parse error: {0}")]
     Url(String),
 

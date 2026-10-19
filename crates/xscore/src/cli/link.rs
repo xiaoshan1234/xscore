@@ -84,10 +84,16 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
     // Resolve to (spec, address): either via URL, via saved template, or URL+template merge.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let (link_id, window_id, pane_id) = mgr.add_link(spec, address).await?;
-    // Print all three IDs so users (and tests) can chain commands.
+    // Print all returned IDs so users (and tests) can chain commands.
+    // For raw links (the new default), no window/pane — only `link:` is printed.
+    // For tmux links, all three IDs are printed (one default window + one default pane).
     println!("link:  {link_id}");
-    println!("window:{window_id}");
-    println!("pane:  {pane_id}");
+    if let Some(wid) = window_id {
+        println!("window:{wid}");
+    }
+    if let Some(pid) = pane_id {
+        println!("pane:  {pid}");
+    }
     Ok(())
 }
 
@@ -96,7 +102,9 @@ async fn open(mgr: Arc<SessionManager>, args: LinkOpenArgs) -> anyhow::Result<()
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let (link_id, _wid, pane_id) = mgr.open_link(spec, address).await?;
     println!("link:  {link_id}");
-    println!("pane:  {pane_id}");
+    if let Some(pid) = pane_id {
+        println!("pane:  {pid}");
+    }
     Ok(())
 }
 
