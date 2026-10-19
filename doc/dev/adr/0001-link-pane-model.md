@@ -1,9 +1,9 @@
 # ADR 0001: Model sessions as Link × Window × Pane (not flat Session)
 
-- **Status:** Accepted
-- **Date:** 2026-10-16
+- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md); Link × Window × Pane applies to tmux-backed links; raw links are 1-tier Link = Transport)
+- **Date:** 2026-10-16 (revised 2026-10-19)
 - **Deciders:** dev
-- **Related:** [overview.md](../roadmap/overview.md), [diagrams/link-pane-topology.svg](../architecture/diagrams/link-pane-topology.svg), [ADR 0006](./0006-window-concept.md) (extends the model with a Window tier between Link and Pane)
+- **Related:** [overview.md](../roadmap/overview.md), [diagrams/link-pane-topology.svg](../architecture/diagrams/link-pane-topology.svg), [ADR 0006](./0006-window-concept.md) (extends the model with a Window tier between Link and Pane), [ADR 0007](./0007-raw-default-tmux-opt-in.md) (the 2026-10-19 design pivot that narrowed this ADR's scope to tmux-backed links)
 
 ## Context
 
@@ -56,3 +56,27 @@ SessionManager
 - **Flat SessionId only.** Rejected: forces N SSH channels per "session-group", makes tmux-in-ssh awkward.
 - **Three-level (Host → Connection → Session).** Overkill — we don't run multiple connections per host in this slice.
 - **Tag-based dedup.** User picks a label, dedup is label-keyed. Rejected: tag namespace not designed, adds UX surface for marginal benefit. `LinkAddress` (derived from URL) is the dedup key.
+
+## Revised 2026-10-19 (per ADR 0007): the 3-tier model is for tmux-backed links only
+
+This ADR's Link × Window × Pane model is no longer universal. The
+2026-10-19 design pivot ([ADR 0007](./0007-raw-default-tmux-opt-in.md))
+narrowed the scope:
+
+- **Tmux-backed links** (URL with `?tmux=on` or `?tmux=auto|local|remote`):
+  the full 3-tier model applies. Link = tmux session in the shared
+  `-L xscore` server, Window = tmux window inside the session,
+  Pane = tmux split-window inside the window. ADR 0006's window tier
+  is active.
+- **Raw links** (default, no `?tmux=` query): the model is 1-tier.
+  Link = Transport. There is no Window, no Pane, no `xscore data` ops.
+  The transport is the I/O source directly. The `xscore window` /
+  `xscore pane` subcommands return `Error::NotTmuxLink` for raw links.
+
+The model is now **sink-aware**: the `SinkConfig` (`Raw` vs `Tmux { ... }`)
+selects which model a given link uses. Both models coexist in the same
+manager + state file. The `xscore link list` and `xscore link show`
+outputs distinguish them via the `sink` field (`"raw"` vs `"tmux"`).
+
+Read [ADR 0007](./0007-raw-default-tmux-opt-in.md) for the full decision
+context, the `?tmux=...` query matrix, and the migration notes from v0.1.0.

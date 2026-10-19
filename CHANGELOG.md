@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-19
 
 ### Changed
 
@@ -37,8 +37,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 6 URL parser tests for the new sink opt-in semantics.
 - 3 cli_smoke tests: default = raw, raw link rejects `window add`,
   `?tmux=on` opt-in still creates window + pane.
+- Column headers on all `list` commands: `xscore link list`,
+  `xscore window list`, `xscore pane list`, `xscore link config list`.
+- `TmuxSink::new_pane` race fix: 50ms sleep + `list-panes` after
+  `split-window` to discover the authoritative pane id (workaround
+  for tmux's server-internal async race where the returned pane
+  id is sometimes stale).
 
-### Pending (deferred to v0.2.0+)
+## [Unreleased]
+
+### Pending (deferred to v0.3.0+)
 
 - `xscore link open` for the local-tmux case is a `todo!()` stub
   (manager.rs `open_link`). The ADR 0005 non-tmux invariant

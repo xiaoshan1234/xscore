@@ -1,9 +1,9 @@
 # ADR 0002: Split Transport and Sink (vs flat SessionBackend)
 
-- **Status:** Accepted
-- **Date:** 2026-10-16
+- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md); Sink is now optional; `RawSink` is the no-sink marker for raw links)
+- **Date:** 2026-10-16 (revised 2026-10-19)
 - **Deciders:** dev
-- **Related:** [ADR 0001](./0001-link-pane-model.md), [overview.md](../roadmap/overview.md)
+- **Related:** [ADR 0001](./0001-link-pane-model.md), [ADR 0007](./0007-raw-default-tmux-opt-in.md) (the 2026-10-19 design pivot that made the Sink layer optional), [overview.md](../roadmap/overview.md)
 
 ## Context
 
@@ -82,3 +82,34 @@ pub trait PaneBackend: Send + Sync {
 - **Single trait with extra methods.** Rejected: forces every backend to know about PTY/ANSI even if it doesn't care.
 - **Three traits (Transport / Sink / Link).** Rejected: `Link` is a struct, not a trait; it composes the two.
 - **Trait objects only on Transport, generics on Sink.** Rejected: complicates factory pattern; `Arc<dyn Sink>` is fine in Rust 2021.
+
+## Revised 2026-10-19 (per ADR 0007): Sink is now optional (RawSink is the no-sink marker)
+
+This ADR's split between Transport (bytes) and Sink (PTY/ANSI/tmux)
+stands, but the Sink layer is no longer universal. The 2026-10-19
+design pivot ([ADR 0007](./0007-raw-default-tmux-opt-in.md)) made
+`Sink` optional:
+
+- For a **raw link** (default, no `?tmux=` query), the link's sink is
+  a `RawSink` — a unit struct that implements the `Sink` trait with
+  every method as a no-op (or `unreachable!()` for ops that don't make
+  sense without a sink, like `new_window` / `new_pane`). The transport
+  is the I/O source directly; data ops would call the transport's
+  `write` / `read` / `resize` (this is wired through
+  `backends/composite.rs` and `RawSink` is just a marker that the link
+  has no tmux session).
+- For a **tmux-backed link** (`?tmux=...` query), the link's sink is
+  the existing `TmuxSink` (per ADR 0003 + ADR 0006). The split between
+  Transport and Sink is exactly as documented above.
+
+The factory in `sink/factory.rs` now dispatches on `SinkConfig`:
+`Raw` → `Box::new(RawSink)`; `Tmux { ... }` → `Box::new(TmuxSink::create(...))`.
+
+The two-layer trait design is now a **two-layer optional stack**:
+Transport is always present, Sink is present only when the user opts
+in to tmux via the URL. This is a cleaner separation than v0.1.0's
+"every link has a TmuxSink" because the trait shape itself now matches
+the actual usage (most raw users never touch the Sink methods).
+
+Read [ADR 0007](./0007-raw-default-tmux-opt-in.md) for the full
+decision context and the migration notes from v0.1.0.

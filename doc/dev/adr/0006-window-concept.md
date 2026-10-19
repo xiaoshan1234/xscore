@@ -1,9 +1,9 @@
 # ADR 0006: Window — a 3rd-tier logical concept between Link and Pane
 
-- **Status:** Accepted
-- **Date:** 2026-10-16
+- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md); 3-tier model applies to tmux-backed links only)
+- **Date:** 2026-10-16 (revised 2026-10-19)
 - **Deciders:** dev
-- **Related:** [ADR 0001](./0001-link-pane-model.md), [ADR 0003](./0003-external-tmux-server.md), [ADR 0005](./0005-add-open-close-del-verbs.md)
+- **Related:** [ADR 0001](./0001-link-pane-model.md), [ADR 0003](./0003-external-tmux-server.md), [ADR 0005](./0005-add-open-close-del-verbs.md), [ADR 0007](./0007-raw-default-tmux-opt-in.md) (the 2026-10-19 design pivot that narrowed this ADR's scope)
 
 ## Context
 
@@ -154,3 +154,38 @@ Estimated impact: ~12-14 files touched, comparable in size to ADR 0005's reversa
 ## Decisions to make
 
 Until the user accepts this ADR, none of the above is locked. The acceptance work above is the price of saying "yes."
+
+
+## Revised 2026-10-19 (per ADR 0007): 3-tier model is for tmux-backed links only
+
+This ADR's 3-tier model (Link → Window → Pane, mapping 1:1 to tmux's
+session → window → pane) is no longer the universal model. The
+2026-10-19 design pivot ([ADR 0007](./0007-raw-default-tmux-opt-in.md))
+split the universe into two cases:
+
+- **Tmux-backed links (`xscore link add <url>?tmux=on`):** the 3-tier
+  model applies. Link = tmux session in the shared `-L xscore` server,
+  Window = tmux window inside the session, Pane = tmux split-window
+  inside the window. The auto-create window + pane on `link add` still
+  happens. The CLI surface (window/pane subcommands, `data` subcommands)
+  works as documented above.
+- **Raw links (`xscore link add <url>`, no `?tmux=`):** the model is
+  1-tier — Link = Transport. There is no Window, no Pane, no
+  `xscore data` ops. The `xscore window` / `xscore pane` subcommands
+  return `Error::NotTmuxLink(<link_id>)` for raw links.
+
+The 3-tier model is the more powerful one (session persistence,
+multi-window, multi-pane, attach from outside xscore via
+`tmux -L xscore attach`). It's available to anyone who opts in via
+`?tmux=on`. The 1-tier model is the simpler one (no tmux server in
+the loop, no install requirement, no race bugs). It's the new default.
+
+The mapping cheat sheet above (the tmux session / window / pane wire
+table) is unchanged — it just applies to a narrower scope now
+(tmux-backed links). The acceptance work listed below was completed
+in commits `40f7a27` and `496d49f`; the `?tmux=...` opt-in semantics
+were added in `efccc6b` along with the test + README + CHANGELOG
+updates.
+
+Read [ADR 0007](./0007-raw-default-tmux-opt-in.md) for the full
+decision context and the migration notes from v0.1.0.

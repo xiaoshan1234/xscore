@@ -1,7 +1,7 @@
 # ADR 0003: Use an external tmux server, never embed tmux
 
-- **Status:** Accepted
-- **Date:** 2026-10-16
+- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md))
+- **Date:** 2026-10-16 (revised 2026-10-19)
 - **Deciders:** dev
 - **Related:** [overview.md](../roadmap/overview.md), [ADR 0001](../adr/0001-link-pane-model.md), [ADR 0006](../adr/0006-window-concept.md) (adds Window between Link and Pane; recomputes per-link tmux wiring in terms of session / window / pane inside the shared `-L xscore` server). See [ADR 0006 § tmux wire](../adr/0006-window-concept.md#tmux-wire-corrected--server-is-shared-not-per-link) for the per-tier tmux command mapping.
 
@@ -52,3 +52,32 @@ xscore link add shell:///bin/cat
 - **`tmux-rs` crate.** Doesn't exist as a usable crate. (A few abandoned attempts; not maintained.)
 - **`libtmux` (Python).** Rejected: would require an embedded Python interpreter.
 - **`Mosh` server.** Out of scope; mosh solves a different problem.
+
+## Revised 2026-10-19 (per ADR 0007): tmux is opt-in, not universal
+
+This ADR's original decision — every link is a tmux session in the shared
+`-L xscore` server — is no longer the default. The 2026-10-19 design pivot
+([ADR 0007](./0007-raw-default-tmux-opt-in.md)) made the tmux server an
+opt-in layer:
+
+- **Default (`xscore link add <url>` with no `?tmux=` query):** the link
+  uses a `RawSink` — no tmux server is involved. The transport is the
+  I/O source directly. No window, no pane, no `data {read,write,resize}`.
+- **Opt-in (`?tmux=on` or `?tmux=auto|local|remote`):** the link uses
+  `TmuxSink`, which (a) creates a tmux session in the shared `-L xscore`
+  server named `xscore-<link_id>` (or `xscore-<name>` if `?name=X` is
+  given), and (b) follows the 3-tier model from ADR 0006. The
+  `link add` auto-creates one default window + one default pane for
+  tmux-backed links only.
+
+The shared `tmux -L xscore` server is still one global socket
+(unchanged). It is **only used for tmux-backed links now**; for raw
+links, no tmux process is started at all.
+
+The "Debugging: any user can `tmux -L xscore attach` to see the live
+state" positive consequence still holds — but only for links that opted
+into the tmux sink via `?tmux=on`.
+
+Read [ADR 0007](./0007-raw-default-tmux-opt-in.md) for the full
+decision context, the `?tmux=` query matrix, and the migration notes
+from v0.1.0.
