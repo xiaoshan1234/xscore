@@ -44,11 +44,15 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
         }
         PaneCmd::List { window } => {
             let wid_filter = window.as_deref().map(WindowId::parse).transpose()?;
+            println!(
+                "{:<36}  {:<36}  {:<12}",
+                "PANE ID", "WINDOW ID", "SINK HANDLE"
+            );
             for p in mgr.panes.list_all().await {
                 if let Some(wid) = wid_filter {
                     if p.window_id != wid { continue; }
                 }
-                println!("{}\t{}\t{}", p.id, p.window_id, p.sink_handle);
+                println!("{:<36}  {:<36}  {:<12}", p.id, p.window_id, p.sink_handle);
             }
         }
     }

@@ -57,7 +57,10 @@ async fn list(mgr: Arc<SessionManager>, link: Option<String>) -> anyhow::Result<
         }
     };
     for w in wid_list {
-        println!("{}\t{}\t{}\t{}", w.info.id, w.info.link_id, w.info.name, w.info.tmux_window_index);
+        println!(
+            "{:<36}  {:<36}  {:<24}  {}",
+            w.info.id, w.info.link_id, w.info.name, w.info.tmux_window_index
+        );
     }
     Ok(())
 }

@@ -122,9 +122,10 @@ async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
 }
 
 async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
+    println!("{:<36}  {:<36}", "LINK ID", "NAME");
     for link in mgr.links.list().await {
         let info = &link.info;
-        println!("{}\t{}", info.id, info.name);
+        println!("{:<36}  {:<36}", info.id, info.name);
     }
     Ok(())
 }
@@ -149,9 +150,10 @@ async fn config_cmd(cmd: LinkConfigCmd) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&spec)?);
         }
         LinkConfigCmd::List => {
+            println!("{:<24}", "TEMPLATE");
             for p in crate::config::list_link_configs()? {
                 if let Some(s) = p.file_stem().and_then(|x| x.to_str()) {
-                    println!("{s}");
+                    println!("{:<24}", s);
                 }
             }
         }
