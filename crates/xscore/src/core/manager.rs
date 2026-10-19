@@ -74,15 +74,32 @@ impl SessionManager {
     /// The address derived from the URL (or template) is used for
     /// routing inside `LinkRegistry` only — it is no longer a
     /// user-facing dedup key (ADR 0005 retired `--link=existing`).
+    ///
+    /// The optional `id` parameter lets the caller supply a specific
+    /// `LinkId` (parsed from a uuid v7 string). If `Some(id)` and the
+    /// id is already in use, returns `Error::LinkIdExists(id)`. If
+    /// `Some(id)` and the id is free, uses that id verbatim. If
+    /// `None`, generates a fresh uuid v7 (the default behavior).
+    /// Useful for scripted workflows and for reconnect-style flows
+    /// that want a known id.
     pub async fn add_link(
         &self,
         spec: ConnectSpec,
         address: LinkAddress,
+        id: Option<LinkId>,
     ) -> Result<(LinkId, Option<WindowId>, Option<PaneId>)> {
         // Create the transport.
         let mut transport = transport_factory::transport_for(spec.transport.clone()).await?;
         let transport_kind = transport.kind();
-        let link_id = LinkId::new();
+
+        // Resolve the link id: user-supplied (if free) or auto-generated.
+        let link_id = match id {
+            Some(supplied) if self.links.get(supplied).await.is_some() => {
+                return Err(Error::LinkIdExists(supplied));
+            }
+            Some(supplied) => supplied,   // free → use as-is
+            None => LinkId::new(),        // default → auto-gen
+        };
 
         // Build the link's info (sinks need `link_id` for `WindowInfo.link_id`,
         // so we generate `link_id` first then pass it to the sink factory).

@@ -146,6 +146,26 @@ A link has a `sink` that controls how its I/O is mediated. The default is **`raw
 
 **Why default to raw?** xscore was originally built to manage tmux sessions, but most users just want a clean CLI for SSH / shell / serial — the tmux server is overhead they don't need. Opt-in to tmux when you want session persistence, the window/pane tree, or `xscore data` ops.
 
+### Link id (specify at creation)
+
+`xscore link add <url> [--id <uuid>]` lets the caller supply a specific `LinkId` (uuid v7) instead of auto-generating one. Useful for scripted workflows where the id must be known in advance (e.g., for reconnect-style flows or deterministic tests).
+
+```bash
+# Default: auto-generated uuid v7
+$ xscore link add shell:///bin/cat
+link:  01928e0a-7d10-7000-8000-000000000001
+
+# Specify a known id
+$ xscore link add shell:///bin/cat --id 11111111-2222-7333-8444-555555555555
+link:  11111111-2222-7333-8444-555555555555
+
+# Duplicate id → error
+$ xscore link add shell:///bin/echo --id 11111111-2222-7333-8444-555555555555
+Error: link id already in use: 11111111-2222-7333-8444-555555555555
+```
+
+The `--id` value must be a valid uuid (any version; v7-shaped is recommended for forward-compat with chronological ordering). The id is checked for collision against the in-memory `LinkRegistry` — if the id is already in use, `Error::LinkIdExists` is returned.
+
 ## Architecture
 
 ```

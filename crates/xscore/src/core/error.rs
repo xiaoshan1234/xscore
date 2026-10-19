@@ -21,6 +21,9 @@ pub enum Error {
     #[error("link {0} does not use the tmux sink; add `?tmux=on` to the URL to enable window/pane commands")]
     NotTmuxLink(LinkId),
 
+    #[error("link id already in use: {0}")]
+    LinkIdExists(LinkId),
+
     #[error("url parse error: {0}")]
     Url(String),
 

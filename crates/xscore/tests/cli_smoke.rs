@@ -488,3 +488,59 @@ fn xscore_link_add_with_tmux_on_still_creates_window_and_pane() {
         .trim().strip_prefix("link:").unwrap().trim().to_string();
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
 }
+
+// ----- `link add --id <uuid>` — specify a known link id -----
+// Per the 2026-10-19 user request: "创建 link 的时候能不能指定 link 的 id".
+// Useful for scripted workflows where the id must be known in
+// advance (e.g., for reconnect-style flows or deterministic tests).
+// Default behavior (no `--id`) is unchanged — auto-generated uuid v7.
+
+#[test]
+fn xscore_link_add_with_explicit_id_uses_supplied_id() {
+    let xscore = || xscore_for("link_add_explicit_id");
+    // Use a uuid v7-shaped string (version digit = 7 in the 3rd group,
+    // variant digit = 8/9/a/b in the 4th group) so LinkId::parse accepts it.
+    let custom_id = "11111111-2222-7333-8444-555555555555";
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--id", custom_id])
+        .output()
+        .unwrap();
+    assert!(out.status.success(),
+        "add with --id failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains(custom_id),
+        "stdout should contain the supplied id '{custom_id}', got: {s}");
+
+    // Verify the link list also shows the supplied id.
+    let list = xscore().args(["link", "list"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&list.stdout);
+    assert!(ls.contains(custom_id), "list should contain id: {ls}");
+
+    let _ = xscore().args(["link", "del", "--id", custom_id]).output();
+}
+
+#[test]
+fn xscore_link_add_with_duplicate_id_errors() {
+    let xscore = || xscore_for("link_add_duplicate_id");
+    let id = "22222222-3333-7444-8555-666666666666";
+    // First add succeeds.
+    let first = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--id", id])
+        .output()
+        .unwrap();
+    assert!(first.status.success(), "first add failed: {}",
+        String::from_utf8_lossy(&first.stderr));
+    // Second add with the same id fails with LinkIdExists.
+    let second = xscore()
+        .args(["link", "add", "shell:///bin/echo", "--id", id])
+        .output()
+        .unwrap();
+    assert!(!second.status.success(), "second add with same id must fail");
+    let s = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        s.contains("already in use") || s.contains("LinkIdExists"),
+        "expected LinkIdExists error, got: {s}"
+    );
+
+    let _ = xscore().args(["link", "del", "--id", id]).output();
+}

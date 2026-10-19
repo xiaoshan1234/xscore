@@ -39,6 +39,13 @@ pub struct LinkAddArgs {
     /// Use a saved config template (resolves through `link config show <name>`)
     #[arg(short = 'c', long)]
     pub config: Option<String>,
+
+    /// Use a specific link id (uuid v7) instead of auto-generating one.
+    /// Errors with `LinkIdExists` if the id is already in use. Useful for
+    /// scripted workflows and for reconnect-style flows that want a
+    /// known id.
+    #[arg(long, value_name = "UUID")]
+    pub id: Option<String>,
 }
 
 #[derive(Args)]
@@ -83,7 +90,14 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
     // Resolve to (spec, address): either via URL, via saved template, or URL+template merge.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
-    let (link_id, window_id, pane_id) = mgr.add_link(spec, address).await?;
+    // Parse the user-supplied id (if any) and pass it through. The
+    // manager checks for collisions and returns Error::LinkIdExists
+    // if the id is already in use.
+    let supplied_id = match args.id.as_deref() {
+        Some(s) => Some(crate::core::LinkId::parse(s)?),
+        None => None,
+    };
+    let (link_id, window_id, pane_id) = mgr.add_link(spec, address, supplied_id).await?;
     // Print all returned IDs so users (and tests) can chain commands.
     // For raw links (the new default), no window/pane — only `link:` is printed.
     // For tmux links, all three IDs are printed (one default window + one default pane).
