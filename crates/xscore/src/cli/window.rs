@@ -56,6 +56,10 @@ async fn list(mgr: Arc<SessionManager>, link: Option<String>) -> anyhow::Result<
             all
         }
     };
+    println!(
+        "{:<36}  {:<36}  {:<24}  {}",
+        "WINDOW ID", "LINK ID", "NAME", "TMUX INDEX"
+    );
     for w in wid_list {
         println!(
             "{:<36}  {:<36}  {:<24}  {}",
