@@ -1,7 +1,7 @@
 # ADR 0002: Split Transport and Sink (vs flat SessionBackend)
 
-- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md); Sink is now optional; `RawSink` is the no-sink marker for raw links)
-- **Date:** 2026-10-16 (revised 2026-10-19)
+- **Status:** Accepted (Revised 2026-10-20 — see [ADR 0007 v2](./0007-raw-default-tmux-opt-in.md); Sink is still optional; `RawSink` is the no-sink marker for raw links, `TmuxSink` for tmux-backed links. The `Box<dyn Sink>` on Link is unchanged.)
+- **Date:** 2026-10-16 (revised 2026-10-19, again 2026-10-20)
 - **Deciders:** dev
 - **Related:** [ADR 0001](./0001-link-pane-model.md), [ADR 0007](./0007-raw-default-tmux-opt-in.md) (the 2026-10-19 design pivot that made the Sink layer optional), [overview.md](../roadmap/overview.md)
 

@@ -1,239 +1,102 @@
-# xscore CLI First — Architecture Overview
+# Roadmap overview
 
-**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions behind a single `Link × Window × Pane` abstraction (ADR 0006 adds Window between Link and Pane), callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
+**Goal:** Build the CLI-first slice of xscore — a Rust workspace that manages SSH / shell / serial sessions as three independent entities (Link, Pane, Window) wired together by Option<> associations on Pane (ADR 0007 v2, v0.3.0), callable from `xscore` CLI today and (later) from MCP server and IPC server without code rewrite.
 
 **Architecture Decision Records (read first, in order):**
-- [ADR 0001](../adr/0001-link-pane-model.md) — why Link × Window × Pane (not flat Session)
-- [ADR 0002](../adr/0002-transport-sink-split.md) — why Transport × Sink (not single backend)
-- [ADR 0003](../adr/0003-external-tmux-server.md) — why external `tmux -L xscore` (not embedded tmux)
+- [ADR 0001](../adr/0001-link-pane-model.md) — why Link × Window × Pane; superseded by ADR 0007 v2 (independent entities)
+- [ADR 0002](../adr/0002-transport-sink-split.md) — why Transport × Sink (not single backend); Sink is optional (`RawSink` | `TmuxSink`)
+- [ADR 0003](../adr/0003-external-tmux-server.md) — why external `tmux -L xscore` (not embedded tmux); only used for tmux-backed links
 - [ADR 0005](../adr/0005-add-open-close-del-verbs.md) — why `link` verbs are `add` / `del` / `open` / `close` (no `--link=existing`)
-- [ADR 0006](../adr/0006-window-concept.md) — why a Window tier between Link and Pane
+- [ADR 0006](../adr/0006-window-concept.md) — why a Window concept exists; in v0.3.0 it's a pure UI layout container (no `link_id`)
+- [ADR 0007](../adr/0007-raw-default-tmux-opt-in.md) — the 2026-10-19/20 design pivot: 3-entity decoupled model + buffer-per-pane
 
-**Architecture diagrams:** [diagrams/README.md](../architecture/diagrams/README.md) (Link × Window × Pane topology, Link/Window/Pane state machines, Module dependency rules — inline Mermaid)
+**Architecture (3-entity decoupled model — v0.3.0):**
 
-**Architecture (Link × Window × Pane):**
-
-A **Link** is one physical connection. A **Pane** is one logical view into a link. One link can host N panes; panes on the same link share Transport + Sink infrastructure but hold independent buffers, IDs, and lifecycle.
-
+```mermaid
+graph TD
+    Link[Link<br/>transport + sink<br/>+ active_pane] -. Option&lt;LinkId&gt; .-> Pane
+    Window[Window<br/>layout + panes list<br/>+ cols/rows] -. Option&lt;WindowId&gt; .-> Pane
+    Pane[Pane<br/>buffer bridge<br/>+ cols/rows/x/y<br/>+ link_id: Option<br/>+ window_id: Option]
+    Link -. owns .-> Transport[Arc&lt;dyn Transport&gt;]
+    Link -. owns .-> Sink[Box&lt;dyn Sink&gt;]
+    Pane -. via PaneBridge trait .-> Bridge[Arc&lt;dyn PaneBridge&gt;]
+    Bridge -. direct .-> Transport
+    Bridge -. tmux .-> TmuxSink[Arc&lt;TmuxSink&gt; weak]
 ```
-Link  ──owns ──> Transport + Sink (the physical connection + terminal semantics)
-       +─ hosts ─> [Window_1, Window_2, ..., Window_N]   (N named tmux windows inside the session)
-                └ each → [Pane_1, Pane_2, ..., Pane_M]   (M tmux split-windows inside the window)
-```
-
-- **Link** = `(Transport + Sink)` pair (the same architecture we already settled on). One link is one tmux session (named `xscore-link-<link_uuid>`), or one SSH channel, or one serial port, or one local child process — the physical layer. Each link owns N windows, each window owns M panes (ADR 0006).
-- **Window** = one tmux window inside the link's session. Named within the link (ADR 0006).
-- **Pane** = one SessionId. Each pane is what users `data read/write/resize` against. Each pane is a tmux split-window inside its parent window.
 
 ```
 SessionManager
-├─ LinkRegistry:    link_id  -> Arc<Link>      { transport + sink + window-list }
-├─ WindowRegistry:  window_id -> Arc<Window>   { link_id, sink_handle, pane-list }        (ADR 0006)
-├─ PaneRegistry:    pane_id  -> PaneInfo       { window_id, sink_handle, ... }            (ADR 0006: was link_id)
-└─ BackendRegistry: pane_id -> Arc<dyn PaneBackend>   { wraps (Link, sink_handle) }
+├── LinkRegistry     (link_id → Arc<Link>)
+├── WindowRegistry   (window_id → Arc<Window>)         — independent, no link association
+├── PaneRegistry     (pane_id → PaneInfo)              — orphan-creatable
+└── pane_bridges     (pane_id → Arc<dyn PaneBridge>)   — built on attach_pane
 ```
 
-- tmux is always external, on one shared `xscore` socket (`tmux -L xscore`). One link = one tmux session inside that server (named `xscore-link-<link_uuid>`). Multiple PaneIds = multiple tmux windows inside the session.
-- Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<name>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (reserved for future link-state persistence).
+- **Link** = `(Transport + Sink)` pair. The `Sink` is `RawSink` (default, no-op) for raw links, or `TmuxSink` (the real tmux-mediated I/O) for tmux-backed links.
+- **Pane** = a buffer (the bridge) + UI info (cols/rows/x/y + which link + which window). Each pane is what users `data read/write/resize` against. Panes are orphan-creatable and can switch between links and windows freely.
+- **Window** = a pure UI layout container (layout hint + pane list + total cols/rows). Independent of links. Created empty, populated via `pane add-to-window`.
 
-**CLI entry:** `xscore link add <url?> [-c CONFIG]` and `xscore link {del,open,close,show,list}` (ADR 0005). At least one of `<url>` / `-c CONFIG` is required. URLs:
+**Q1 (v0.3.0, user-confirmed 2026-10-19):** For direct (raw) links, only one pane may be active at a time. When a new pane is attached, the previously-active pane is auto-detached (its `link_id` becomes `None`, its buffer is preserved). For tmux-backed links, multiple panes may be active simultaneously (each `attach_pane` creates a new tmux split-window).
 
-```text
+**Q2 (v0.3.0, user-confirmed 2026-10-19):** Pane's UI info is geometry — `cols`, `rows`, `x`, `y`. Each pane declares its own size and position independently of its parent window.
+
+**CLI entry:** `xscore {link,window,pane,data} <verb>...`
+
+```bash
+# 1. Create a link (raw or tmux-backed via ?tmux=...)
 xscore link add shell:///bin/bash
-xscore link add serial:///dev/ttyUSB0?baud=115200&data_bits=8
-xscore link add ssh://user@host:22?identity=~/.ssh/id_ed25519&proxy=ssh://jump@1.2.3.4
-xscore link add ssh://user@host:22?tmux=on    # default
+xscore link add 'shell:///bin/bash?tmux=on'
 
-# Multiple panes on the same link (ADR 0005 verb split):
-xscore link add ssh://u@h:22                                            # create
-xscore link add ssh://u@h:22                                            # pane 2 (different link)
-# For tmux-attach instead of pane-2-on-new-link:
-xscore link open 'tmux://my-session'                                    # attach existing
-xscore link close --id <link-id>                                        # tmux-detach only
-xscore link del --id <link-id>                                          # full teardown
+# 2. Create an orphan pane
+xscore pane add --cols 80 --rows 24
+
+# 3. Attach the pane to the link — creates the bridge (Direct or Tmux)
+xscore pane attach --pane <pid> --link <lid>
+
+# 4. Data I/O via the bridge
+xscore data write --pane <pid> <<< 'echo hi'
+xscore data read  --pane <pid>
+
+# 5. Create a window (orphan) and put the pane in it
+xscore window add --cols 120 --rows 30
+xscore pane add-to-window --pane <pid> --window <wid>
+
+# 6. Detach the pane (buffer preserved) — re-attach to a different link
+xscore pane detach --pane <pid>
+xscore pane attach --pane <pid> --link <other-lid>
+
+# 7. Cleanup
+xscore pane del --id <pid>
+xscore window del --id <wid>
+xscore link del --id <lid>
 ```
 
-Other commands are organized into two tiers (`link` for the physical connection, `pane` for the views). `--from spec.json` was removed in favor of `link config add/remove/show/list` templates under `~/.config/xscore/links/`.
-
-**Link uniqueness rule (locked from user):** A link is uniquely identified by the `(transport_kind, address-tuple)`:
-- `shell` → `(command, args-tuple)`
-- `serial` → `(path)`
-- `ssh` → `(host, port, user, identity, proxy)`
-
-Two `xscore link add ssh://u@h:22` calls always produce **different links** (each with `link_id` = a new uuid). Re-attaching to an existing resource is a separate verb: `xscore link open <url?> [-c CONFIG]` (ADR 0005). `link open` and `link close` are tmux-only — shell/serial/ssh processes have no cross-invocation identity to attach to or detach from, and return `Error::OpenOnlyForTmux` / `Error::CloseOnlyForTmux`.
-
-Each alive link identifies itself only via `link_id` (uuid v7) and the internal `LinkAddress` used for routing inside `LinkRegistry`. `LinkAddress` is not a user-facing dedup key (ADR 0005 retired `--link=existing`). For persistent templates use `xscore link config add <name> <url>`.
-
-> ⚠️ **Open question (does not block the slice):** For SSH the same-address attach path needs an SSH channel + tmux-over-the-wire before it lands. Real russh wiring lands later; for now the slice delivers shell/serial links + ssh stubs (no `link open` for ssh yet — it returns an unimplemented-stub error until the SSH-integration phase resolves the remote tmux case).
-
-**Tech Stack (locked from user):**
-- CLI: `clap` v4 derive
-- Async runtime: `tokio` (multi-thread, full features)
-- SSH: `russh` (pure-Rust async)
-- Shell: `tokio::process::Command`
-- Serial: `tokio-serial`
-- tmux: external `tmux` binary over CLI (`tmux -L xscore ...`)
-- URL parsing: `url` crate
-- Persistence: JSON files (config + per-link JSON). No SQLite this phase.
-- Logging: `tracing` + `tracing-subscriber`
-- Errors: `thiserror` (library) + `anyhow` (CLI top-level)
-- Testing: `mockall` for trait impls + integration tests against real `tmux -L xscore-test`
-
-**Reference:** `doc/dev/roadmap/` (this directory) — sibling to future RFCs. Task files: `task-NN-*.md`. Acceptance: `acceptance.md`.
-
----
-
-## Module Boundaries (Three-Cut)
+**Tmux-backed vs raw (Q1 corollary):**
 
 ```
-crates/xscore/
-├── Cargo.toml
-├── src/
-│   ├── main.rs                       # clap entry, tracing init, dispatch
-│   ├── cli/
-│   │   ├── mod.rs                    # Cli struct, derive top-level
-│   │   ├── link.rs                   # link add/del/open/close/show/list + config sub-tree (ADR 0005 verb split)
-│   │   ├── window.rs                 # window add/del/show/list (ADR 0006)
-│   │   ├── pane.rs                   # pane add/del/show/list (--window after ADR 0006)
-│   │   ├── data.rs                   # pane data read/write/resize
-│   │   └── config.rs                 # config show/path/set/unset
-│   ├── core/
-│   │   ├── mod.rs                    # pub SessionManager, re-exports
-│   │   ├── manager.rs                # add_link / open_link / close_link / del_link; add_window / del_window; add_pane / del_pane
-│   │   ├── link.rs                   # Link struct (transport + sink + window list)
-│   │   ├── window.rs                 # Window + WindowInfo structs (ADR 0006)
-│   │   ├── pane.rs                   # Pane struct (handle + state)
-│   │   ├── link_registry.rs          # LinkRegistry (by_id; address used internally for routing)
-│   │   ├── window_registry.rs        # WindowRegistry (by_id + by_link secondary index; ADR 0006)
-│   │   ├── pane_registry.rs          # PaneRegistry (pane_id -> PaneInfo; PaneInfo.window_id after ADR 0006)
-│   │   ├── address.rs                # LinkAddress hashable key per transport
-│   │   ├── id.rs                     # LinkId + WindowId (ADR 0006) + PaneId (uuid v7)
-│   │   └── error.rs                  # thiserror enum (LinkNotFound, WindowNotFound, OpenOnlyForTmux, CloseOnlyForTmux, ...)
-│   ├── model/
-│   │   ├── mod.rs
-│   │   ├── session.rs                # ConnectSpec / LinkInfo / WindowInfo / PaneInfo / TransportConfig / SinkConfig (ADR 0006 adds WindowInfo)
-│   │   └── config.rs                 # AppConfig
-│   ├── url/
-│   │   ├── mod.rs                    # URL parser entry
-│   │   ├── scheme.rs                 # placeholder
-│   │   └── connect.rs                # URL -> (ConnectSpec, LinkAddress)
-│   ├── transport/
-│   │   ├── mod.rs                    # pub trait Transport + address()
-│   │   ├── factory.rs                # transport_for(TransportConfig) -> Box<dyn Transport>
-│   │   ├── shell.rs                  # tokio::process::Command
-│   │   ├── serial.rs                 # tokio-serial stub
-│   │   └── ssh.rs                    # russh stub
-│   ├── sink/
-│   │   ├── mod.rs                    # pub trait Sink + pane ops
-│   │   ├── factory.rs                # sink_for(...)
-│   │   ├── tmux.rs                   # TmuxSink (PTY/ANSI); new_window + kill_window + split-window for panes (ADR 0006)
-│   │   └── raw.rs                    # RawSink (no-op stub for ?tmux=off)
-│   ├── backends/
-│   │   ├── mod.rs                    # pub trait PaneBackend + BackendRegistry
-│   │   └── composite.rs              # PaneBackend impl for (Link, sink_handle)
-│   ├── config/
-│   │   ├── mod.rs
-│   │   ├── loader.rs                 # load/save ConnectSpec JSON, xdg dirs
-│   │   └── paths.rs                  # xdg path resolution
-│   └── util/
-│       ├── mod.rs
-│       └── tmux_socket.rs            # socket name + helpers
-└── tests/
-    ├── cli_smoke.rs                  # spawn xscore binary, assert outputs
-    ├── manager_mock.rs               # SessionManager with mockall Transport/Sink
-    ├── url_parse.rs                  # URL -> ConnectSpec + LinkAddress
-    └── tmux_integration.rs           # real tmux -L xscore-test, gated by env
+[raw link] (default)
+Link  ──owns ──> Transport + RawSink (no-op)
+            └ no auto window/pane; user must attach a pane for data I/O
+            └ Q1: 1 active pane at a time (auto-detach on new attach)
+
+[tmux-backed link] (?tmux=on|auto|local|remote)
+Link  ──owns ──> Transport + TmuxSink (per-link tmux session in shared -L xscore)
+            └ multiple panes may attach simultaneously (Q1 corollary)
+            └ each attach = call tmux split-window inside the session
 ```
 
-**Module rules (hard):**
-- `cli` may depend on `core`, `model`, `url`, `config`. Never on `transport` / `sink` directly.
-- `core` depends on `model`, `url`, `sink::factory`, `transport::factory`, `backends`. Never on `cli` or `config`.
-- `backends` depends on `transport` (trait), `sink` (trait), `model`, `core::error`. Never on `cli`.
-- `transport` depends on `model`, `core::error`. Never on `sink` or `cli`.
-- `sink` depends on `model`, `core::error`, `transport` (to wire at attach). Never on `cli`.
-- `url` depends on `model`. Pure parsing layer, no I/O.
-- `config` depends on `model`. Never on anything else.
-- All cross-module state goes through `core::SessionManager` — no global statics.
+- tmux is always external, on one shared `xscore` socket (`tmux -L xscore`) when used. For raw links, no tmux at all.
+- Config = `~/.config/xscore/config.json` (AppConfig) + `~/.config/xscore/links/<name>.json` (persistent ConnectSpec templates) + `~/.config/xscore/state/` (state persistence — `state.json`).
 
-**Why Link × Window × Pane (vs single-session model):**
+## v0.3.0 architecture summary
 
 | Layer | Concern | Lifetime |
 | --- | --- | --- |
 | Transport | bytes/PTY | 1 per link; killed when link closes |
-| Sink | tmux session (or passthrough) | 1 per link; the session is killed when the link closes (the shared `-L xscore` server stays up) |
-| Window | one tmux window inside the link's session | N per link (named); killed by `window del` (panes inside die) or by `link del` (cascade) |
-| Pane | one tmux split-window inside a Window | N per window; each pane independently closeable via `pane del` |
+| Sink (Raw or Tmux) | tmux session (or no-op) | 1 per link; for tmux links, the session is killed when the link closes (the shared `-L xscore` server stays up); for raw links, the sink is a no-op marker |
+| Window | pure UI layout container | Independent of links. Killed by `window del` (panes inside lose their `window_id` and become orphans, but survive). |
+| Pane | buffer + UI geometry | Independent entity. Created orphan. Attaches to a link via `pane attach` (creates bridge); detaches via `pane detach` (closes bridge; buffer preserved). `pane del` fully tears down (also detaches from link + removes from window). |
 
-Each pane has its own `id`, its own data read/write state, its own `PaneInfo`. Killing one pane does not affect its siblings. Killing a window kills every pane inside it (via tmux kill-window). Killing a link kills the transport + sink + every window + every pane on it.
+**State persistence:** `state.json` contains three flat lists — `links`, `windows`, `panes`. `PaneInfo.link_id` and `PaneInfo.window_id` carry the associations. Bridges are NOT persisted — they're rebuilt on `pane attach` after restart. Breaking from v0.2.0 (no migration; delete `state.json` on upgrade).
 
 ---
-
-## Core Type Design (preview, refined in Tasks 2–6)
-
-```rust
-// core/id.rs
-pub struct LinkId(Uuid);   // identifies a link (transport + sink + tmux session inside shared -L xscore)
-pub struct PaneId(Uuid);   // identifies one pane inside a link
-
-// core/address.rs
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum LinkAddress {
-    Shell { command: String, args: Vec<String> },
-    Serial { path: String },
-    Ssh { host: String, port: u16, user: String, identity: Option<String>, proxy: Option<String> },
-}
-
-// transport/mod.rs
-#[async_trait]
-pub trait Transport: Send + Sync {
-    fn kind(&self) -> &'static str;
-    fn address(&self) -> LinkAddress;          // used for link dedup
-    async fn open(&mut self) -> Result<()>;
-    async fn write(&self, data: &[u8]) -> Result<usize>;
-    async fn read(&self, buf: &mut [u8]) -> Result<usize>;
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
-    async fn close(&self) -> Result<()>;
-}
-
-// sink/mod.rs
-#[async_trait]
-pub trait Sink: Send + Sync {
-    fn kind(&self) -> &'static str;
-    /// Wire this sink to a transport. Called once per link lifetime.
-    async fn attach(&mut self, transport: &dyn Transport) -> Result<()>;
-    /// Open a new pane within this sink. Returns a sink-side handle (e.g. tmux window id "%42").
-    async fn new_pane(&self) -> Result<String>;
-    /// Drop one pane. Transport + sink stay alive.
-    async fn close_pane(&self, pane_handle: &str) -> Result<()>;
-    /// List panes — used by LinkRegistry recovery / `pane list`.
-    async fn list_panes(&self) -> Result<Vec<String>>;
-    /// Snapshot one pane's output.
-    async fn snapshot(&self, pane_handle: &str, buf: &mut [u8]) -> Result<usize>;
-    /// Write to one pane.
-    async fn write(&self, pane_handle: &str, data: &[u8]) -> Result<usize>;
-    /// Resize one pane (and propagate to transport).
-    async fn resize(&self, pane_handle: &str, cols: u16, rows: u16) -> Result<()>;
-    async fn close(&self) -> Result<()>;
-}
-
-// backends/mod.rs
-#[async_trait]
-pub trait PaneBackend: Send + Sync {
-    async fn snapshot(&self, buf: &mut [u8]) -> Result<usize>;
-    async fn write(&self, data: &[u8]) -> Result<usize>;
-    async fn write_raw(&self, data: &[u8]) -> Result<usize>;
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
-    async fn close(&self) -> Result<()>;
-}
-
-// core/link.rs
-pub struct Link {
-    pub id: LinkId,
-    pub info: LinkInfo,
-    pub transport: Box<dyn Transport>,
-    pub sink: Box<dyn Sink>,
-    pub panes: Mutex<Vec<PaneId>>,
-}
-```
-
-`SessionManager::add_link(spec, address)` returns `(LinkId, PaneId)` — the new link's id and the first pane's id (ADR 0005: always creates a brand-new link; no `--link=existing` branch). `SessionManager::open_link(spec, address)` attaches an existing tmux session (tmux only) and returns `(LinkId, PaneId)` for the registered link and its first pane.

@@ -1,5 +1,8 @@
-// core/window.rs (FINAL — no `placeholder` stub; parent writes manager.rs
-// against this surface).
+// core/window.rs (v0.3.0 — pure UI layout container, ADR 0007 v2)
+//
+// Window is a pure UI layout container. No `link_id` field — windows
+// are independent entities that may exist with zero panes and may be
+// orphan (no link relationship).
 use tokio::sync::Mutex;
 use super::id::PaneId;
 use crate::model::WindowInfo;

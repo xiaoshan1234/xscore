@@ -1,4 +1,4 @@
-// cli/link.rs
+// cli/link.rs (v0.3.0 — `link add` creates only the link, no auto window/pane)
 use crate::core::{Error, LinkId, SessionManager};
 use crate::url;
 use clap::{Args, Subcommand};
@@ -6,16 +6,17 @@ use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum LinkCmd {
-    /// Create a new link + first pane (URL or `-c CONFIG` is required)
+    /// Create a new link. Does NOT auto-create a window or pane (v0.3.0).
     Add(LinkAddArgs),
 
     /// Attach to an existing tmux session by URL or `-c CONFIG` (tmux only)
     Open(LinkOpenArgs),
 
-    /// Detach a tmux link from in-memory registry (tmux session keeps running; non-tmux errors)
+    /// No-op for tmux sessions (the tmux session is inherently persistent);
+    /// errors for non-tmux links (ADR 0005 invariant).
     Close { #[arg(long)] id: String },
 
-    /// Full teardown: kill transport + sink + every pane
+    /// Full teardown: kill transport + sink; detach every attached pane (silently).
     Del { #[arg(long)] id: String },
 
     /// Print LinkInfo JSON
@@ -41,37 +42,23 @@ pub struct LinkAddArgs {
     pub config: Option<String>,
 
     /// Use a specific link id (uuid v7) instead of auto-generating one.
-    /// Errors with `LinkIdExists` if the id is already in use. Useful for
-    /// scripted workflows and for reconnect-style flows that want a
-    /// known id.
+    /// Errors with `LinkIdExists` if the id is already in use.
     #[arg(long, value_name = "UUID")]
     pub id: Option<String>,
 }
 
 #[derive(Args)]
 pub struct LinkOpenArgs {
-    /// URL of the existing tmux session to attach (or omit if `-c CONFIG` is provided)
     pub url: Option<String>,
-
-    /// Use a saved config template (resolves through `link config show <name>`)
     #[arg(short = 'c', long)]
     pub config: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum LinkConfigCmd {
-    /// Save a ConnectSpec template (does not start the link)
-    Add {
-        /// Name for the template (also the file basename under `links/`)
-        name: String,
-        /// URL to remember
-        url: String,
-    },
-    /// Delete a template file
+    Add { name: String, url: String },
     Remove { name: String },
-    /// Print a template
     Show { name: String },
-    /// List all templates
     List,
 }
 
@@ -88,37 +75,21 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 }
 
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
-    // Resolve to (spec, address): either via URL, via saved template, or URL+template merge.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
-    // Parse the user-supplied id (if any) and pass it through. The
-    // manager checks for collisions and returns Error::LinkIdExists
-    // if the id is already in use.
     let supplied_id = match args.id.as_deref() {
         Some(s) => Some(crate::core::LinkId::parse(s)?),
         None => None,
     };
-    let (link_id, window_id, pane_id) = mgr.add_link(spec, address, supplied_id).await?;
-    // Print all returned IDs so users (and tests) can chain commands.
-    // For raw links (the new default), no window/pane — only `link:` is printed.
-    // For tmux links, all three IDs are printed (one default window + one default pane).
+    let link_id = mgr.add_link(spec, address, supplied_id).await?;
+    // v0.3.0: ONLY `link:` is printed. No `window:` or `pane:` lines.
     println!("link:  {link_id}");
-    if let Some(wid) = window_id {
-        println!("window:{wid}");
-    }
-    if let Some(pid) = pane_id {
-        println!("pane:  {pid}");
-    }
     Ok(())
 }
 
 async fn open(mgr: Arc<SessionManager>, args: LinkOpenArgs) -> anyhow::Result<()> {
-    // Same input resolution as `add`. The manager rejects non-tmux with `OpenOnlyForTmux`.
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
-    let (link_id, _wid, pane_id) = mgr.open_link(spec, address).await?;
+    let link_id = mgr.open_link(spec, address).await?;
     println!("link:  {link_id}");
-    if let Some(pid) = pane_id {
-        println!("pane:  {pid}");
-    }
     Ok(())
 }
 
@@ -155,7 +126,7 @@ async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
 async fn config_cmd(cmd: LinkConfigCmd) -> anyhow::Result<()> {
     match cmd {
         LinkConfigCmd::Add { name, url } => {
-            let spec = url::parse(&url)?.0;
+            let spec = crate::url::parse(&url)?.0;
             crate::config::ensure_dirs()?;
             crate::config::save_connect_spec(
                 &crate::config::link_config_path(&name), &spec)?;
@@ -183,8 +154,6 @@ async fn config_cmd(cmd: LinkConfigCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve `(url?, -c CONFIG?)` to `(ConnectSpec, LinkAddress)`. Used by
-/// both `link add` and `link open`. At least one input is required.
 fn resolve_link_input(
     url: Option<&str>,
     config_name: Option<&str>,
@@ -195,8 +164,6 @@ fn resolve_link_input(
         (None, Some(c)) => {
             let template_path = crate::config::link_config_path(c);
             let spec = crate::config::load_connect_spec(&template_path)?;
-            // The saved template already encodes the transport tuple and sink
-            // — its `address` is what was registered when the template was made.
             let address = spec.address.clone();
             Ok((spec, address))
         }
@@ -209,8 +176,6 @@ fn resolve_link_input(
     }
 }
 
-/// `link add -c <name> <url>` means: take the saved template (with its
-/// transport + sink) and override the transport with the CLI URL.
 fn merge_specs(template: crate::model::ConnectSpec, cli: crate::model::ConnectSpec) -> crate::model::ConnectSpec {
     crate::model::ConnectSpec {
         name: if cli.name.is_empty() { template.name } else { cli.name },

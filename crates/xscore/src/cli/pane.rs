@@ -1,60 +1,197 @@
-// cli/pane.rs
+// cli/pane.rs (v0.3.0 — pane is orphan-creatable + freely switchable between links/windows)
 use crate::core::{Error, PaneId, SessionManager, WindowId};
-use clap::Subcommand;
+use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum PaneCmd {
-    /// Open a new pane inside a window (tmux split-window)
-    Add {
-        #[arg(long)] window: String,
-        /// Optional human-friendly name (not persisted)
-        #[arg(long)]
-        name: Option<String>,
-    },
+    /// Create a new orphan pane (no link, no window).
+    Add(PaneAddArgs),
 
-    /// Kill the tmux split + remove from registry (full teardown).
-    /// Cross-invocation re-attach goes through `xscore link open`, not through panes.
+    /// Delete the pane (full teardown — also detaches from link + removes from window).
     Del { #[arg(long)] id: String },
 
-    /// Print PaneInfo JSON
+    /// Print PaneInfo JSON.
     Show { #[arg(long)] id: String },
 
-    /// List panes (optionally filtered by --window)
-    List { #[arg(long)] window: Option<String> },
+    /// List panes (optional --window <wid> or --link <lid> filter).
+    List { #[arg(long)] window: Option<String>, #[arg(long)] link: Option<String> },
+
+    /// Bind the pane to a link. Creates the bridge (DirectBridge for raw,
+    /// TmuxBridge for tmux). For raw links, the previously-active pane (if
+    /// any) is auto-detached (Q1).
+    Attach { #[arg(long)] pane: String, #[arg(long)] link: String },
+
+    /// Unbind the pane from its link. Closes the bridge. Pane survives as
+    /// orphan (keeps its buffer content).
+    Detach { #[arg(long)] pane: String },
+
+    /// Resize the pane's terminal dimensions (forwards to bridge if attached).
+    Resize(PaneResizeArgs),
+
+    /// Update the pane's x/y position (pure UI).
+    Move(PaneMoveArgs),
+
+    /// Put the pane in a window.
+    AddToWindow(PaneWindowArgs),
+
+    /// Remove the pane from a window (pane survives as orphan).
+    RemoveFromWindow(PaneWindowArgs),
+}
+
+#[derive(Args)]
+pub struct PaneAddArgs {
+    /// Optional human-friendly name.
+    #[arg(long)]
+    pub name: Option<String>,
+    #[arg(long, default_value_t = 80)] pub cols: u16,
+    #[arg(long, default_value_t = 24)] pub rows: u16,
+    #[arg(long, default_value_t = 0)] pub x: u16,
+    #[arg(long, default_value_t = 0)] pub y: u16,
+}
+
+#[derive(Args)]
+pub struct PaneResizeArgs {
+    #[arg(long)] pub pane: String,
+    #[arg(long)] pub cols: u16,
+    #[arg(long)] pub rows: u16,
+}
+
+#[derive(Args)]
+pub struct PaneMoveArgs {
+    #[arg(long)] pub pane: String,
+    #[arg(long)] pub x: u16,
+    #[arg(long)] pub y: u16,
+}
+
+#[derive(Args)]
+pub struct PaneWindowArgs {
+    #[arg(long)] pub pane: String,
+    #[arg(long)] pub window: String,
 }
 
 pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
     match cmd {
-        PaneCmd::Add { window, name } => {
-            let wid = WindowId::parse(&window)?;
-            // 2-arg signature per task-06/14 reconciliation (ADR 0006).
-            let pid = mgr.add_pane(wid, name).await?;
-            println!("pane:  {pid}");
-        }
-        PaneCmd::Del { id } => {
-            let pid = PaneId::parse(&id)?;
-            mgr.del_pane(pid).await?;
-            println!("deleted pane: {pid}");
-        }
-        PaneCmd::Show { id } => {
-            let pid = PaneId::parse(&id)?;
-            let info = mgr.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-            println!("{}", serde_json::to_string_pretty(&info)?);
-        }
-        PaneCmd::List { window } => {
-            let wid_filter = window.as_deref().map(WindowId::parse).transpose()?;
-            println!(
-                "{:<36}  {:<36}  {:<12}",
-                "PANE ID", "WINDOW ID", "SINK HANDLE"
-            );
-            for p in mgr.panes.list_all().await {
-                if let Some(wid) = wid_filter {
-                    if p.window_id != wid { continue; }
-                }
-                println!("{:<36}  {:<36}  {:<12}", p.id, p.window_id, p.sink_handle);
-            }
-        }
+        PaneCmd::Add(args) => add(mgr, args).await,
+        PaneCmd::Del { id } => del(mgr, &id).await,
+        PaneCmd::Show { id } => show(mgr, &id).await,
+        PaneCmd::List { window, link } => list(mgr, window, link).await,
+        PaneCmd::Attach { pane, link } => attach(mgr, &pane, &link).await,
+        PaneCmd::Detach { pane } => detach(mgr, &pane).await,
+        PaneCmd::Resize(args) => resize(mgr, args).await,
+        PaneCmd::Move(args) => move_pane(mgr, args).await,
+        PaneCmd::AddToWindow(args) => add_to_window(mgr, args).await,
+        PaneCmd::RemoveFromWindow(args) => remove_from_window(mgr, args).await,
     }
+}
+
+async fn add(mgr: Arc<SessionManager>, args: PaneAddArgs) -> anyhow::Result<()> {
+    let pid = mgr.add_pane(args.name, args.cols, args.rows, args.x, args.y).await?;
+    println!("pane:  {pid}");
+    Ok(())
+}
+
+async fn del(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+    let pid = PaneId::parse(id)?;
+    mgr.del_pane(pid).await?;
+    println!("deleted pane: {pid}");
+    Ok(())
+}
+
+async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+    let pid = PaneId::parse(id)?;
+    let info = mgr.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+    println!("{}", serde_json::to_string_pretty(&info)?);
+    Ok(())
+}
+
+async fn list(
+    mgr: Arc<SessionManager>,
+    window: Option<String>,
+    link: Option<String>,
+) -> anyhow::Result<()> {
+    let wid_filter = match window.as_deref() {
+        Some(s) => Some(WindowId::parse(s)?),
+        None => None,
+    };
+    let lid_filter = match link.as_deref() {
+        Some(s) => Some(crate::core::LinkId::parse(s)?),
+        None => None,
+    };
+    println!("{:<36}  {:<36}  {:<36}  {:<4} {:>4} {:>4} {:>3} {:>3}",
+        "PANE ID", "LINK ID", "WINDOW ID", "COLS", "ROWS", "POS", "X", "Y");
+    let panes = mgr.panes.list_all().await;
+    let mut sorted = panes.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|p| p.id.to_string());
+    for p in sorted {
+        if let Some(wid) = wid_filter {
+            if p.window_id != Some(wid) { continue; }
+        }
+        if let Some(lid) = lid_filter {
+            if p.link_id != Some(lid) { continue; }
+        }
+        let link_id_str = match p.link_id {
+            Some(l) => l.to_string(),
+            None => "-".to_string(),
+        };
+        let window_id_str = match p.window_id {
+            Some(w) => w.to_string(),
+            None => "-".to_string(),
+        };
+        println!("{:<36}  {:<36}  {:<36}  {:<4} {:>4} {:>4} {:>3} {:>3}",
+            p.id,
+            link_id_str,
+            window_id_str,
+            p.cols,
+            p.rows,
+            format!("{}x{}", p.x, p.y),
+            p.x,
+            p.y);
+    }
+    Ok(())
+}
+
+async fn attach(mgr: Arc<SessionManager>, pane: &str, link: &str) -> anyhow::Result<()> {
+    let pid = PaneId::parse(pane)?;
+    let lid = crate::core::LinkId::parse(link)?;
+    mgr.attach_pane(pid, lid).await?;
+    println!("attached: {pid} → link {lid}");
+    Ok(())
+}
+
+async fn detach(mgr: Arc<SessionManager>, pane: &str) -> anyhow::Result<()> {
+    let pid = PaneId::parse(pane)?;
+    mgr.detach_pane(pid).await?;
+    println!("detached: {pid}");
+    Ok(())
+}
+
+async fn resize(mgr: Arc<SessionManager>, args: PaneResizeArgs) -> anyhow::Result<()> {
+    let pid = PaneId::parse(&args.pane)?;
+    mgr.resize_pane(pid, args.cols, args.rows).await?;
+    println!("resized {pid} to {}x{}", args.cols, args.rows);
+    Ok(())
+}
+
+async fn move_pane(mgr: Arc<SessionManager>, args: PaneMoveArgs) -> anyhow::Result<()> {
+    let pid = PaneId::parse(&args.pane)?;
+    mgr.move_pane(pid, args.x, args.y).await?;
+    println!("moved {pid} to ({}, {})", args.x, args.y);
+    Ok(())
+}
+
+async fn add_to_window(mgr: Arc<SessionManager>, args: PaneWindowArgs) -> anyhow::Result<()> {
+    let pid = PaneId::parse(&args.pane)?;
+    let wid = WindowId::parse(&args.window)?;
+    mgr.add_pane_to_window(wid, pid).await?;
+    println!("pane {pid} → window {wid}");
+    Ok(())
+}
+
+async fn remove_from_window(mgr: Arc<SessionManager>, args: PaneWindowArgs) -> anyhow::Result<()> {
+    let pid = PaneId::parse(&args.pane)?;
+    let wid = WindowId::parse(&args.window)?;
+    mgr.remove_pane_from_window(wid, pid).await?;
+    println!("pane {pid} ✗ window {wid}");
     Ok(())
 }

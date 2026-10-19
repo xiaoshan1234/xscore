@@ -1,233 +1,266 @@
-# ADR 0007: Default sink is `raw`; tmux is opt-in via `?tmux=...`
+# ADR 0007: 3-entity decoupled model — Link × Pane × Window
 
-- **Status:** Accepted
-- **Date:** 2026-10-19
+- **Status:** Accepted (rewrite — this ADR supersedes the previous
+  ADR 0007 from 2026-10-19 which only narrowed raw vs tmux)
+- **Date:** 2026-10-20 (first version: 2026-10-19)
 - **Deciders:** dev
-- **Related:** [ADR 0001](./0001-link-pane-model.md) (Link × Window × Pane now applies to tmux-backed links only), [ADR 0002](./0002-transport-sink-split.md) (Sink is now optional; RawSink is the no-sink marker), [ADR 0003](./0003-external-tmux-server.md) (revised — the shared `tmux -L xscore` server is now only used when `?tmux=...` is set), [ADR 0006](./0006-window-concept.md) (revised — the 3-tier model applies to tmux-backed links only; raw links are 1-tier Link = Transport).
+- **Related:** [ADR 0001](./0001-link-pane-model.md) (Link × Window × Pane
+  split is now even cleaner — windows have NO link association; panes
+  are orphan-creatable); [ADR 0002](./0002-transport-sink-split.md)
+  (Sink is still optional — `RawSink` for raw links, `TmuxSink` for
+  tmux-backed links); [ADR 0003](./0003-external-tmux-server.md)
+  (still external, still on shared `-L xscore` server when used);
+  [ADR 0006](./0006-window-concept.md) (Window is now a pure UI
+  layout container — no `link_id`, no `tmux_window_index`)
 
 ## Context
 
-Pre-ADR 0007, every `xscore link add <url>` created a tmux session in the
-shared `tmux -L xscore` server (per ADR 0003), and auto-created one default
-window + one default pane inside it (per ADR 0006). The Link × Window × Pane
-model mapped 1:1 onto tmux's session → window → pane.
+The 2026-10-19 user clarification (after the v0.2.0 release) reframed
+the entire model:
 
-This was the v0.1.0 default (released 2026-10-18). It came with two real
-costs that the user flagged immediately after tagging v0.1.0:
+> "搞清楚一点，window 是纯ui概念，pane核心是buffer，带点ui信息，
+> link是纯通信连接概念，建立link不要自动生成window或者pane，
+> pane可以自由的切换link"
 
-1. **Tmux is overhead for users who don't want it.** Most users just want
-   `xscore ssh h:22` or `xscore shell /bin/bash` to give them a clean CLI
-   for SSH / shell / serial I/O. Forcing them to also have a tmux server
-   in the loop — with all the implications (per-char `send-keys` perf, the
-   race between `split-window` returning and the server committing state,
-   the need to manage session lifecycle, the requirement to install tmux
-   at all) — was over-engineering for the common case.
+> "shell/ssh/serial 类型的link，只能属于一个pane，tmux 类型的link
+> 可以被多个 pane 使用"
 
-2. **The "every link goes through tmux" model hid the simpler mental
-   model.** When a user types `xscore link add shell:///bin/bash`, they
-   expect "a bash process." The actual answer (until this ADR) was "a
-   bash process running inside a tmux window inside a tmux session inside
-   the shared `tmux -L xscore` server." That's a lot of layers to explain
-   for what's conceptually "run bash, give me an I/O handle."
+Translated:
 
-The user reported this on 2026-10-19 (verbatim):
+- **Window** = pure UI concept (layout container)
+- **Pane** = core is a buffer + a little UI info (geometry: cols/rows/x/y
+  + which window it's in + which link it's attached to)
+- **Link** = pure communication connection concept (transport)
+- `xscore link add` creates ONLY the link — no auto window, no auto pane
+- A pane can freely switch between links (detach from one, attach to another)
+- **Q1 (confirmed 2026-10-19):** shell/ssh/serial link may have multiple
+  panes attached OVER TIME (history), but only ONE is active at any
+  time. When a new pane is attached, the previously-active pane is
+  auto-detached (its buffer is kept).
+- **Q2 (confirmed 2026-10-19):** pane's UI info = cols/rows/x/y geometry
 
-> "每个 link 都走 tmux server。修改这个设计 —— 直接走原生就行。
-> 我本来的目的是支持 tmux 会话的管理，不是所有 link 都要走 tmux。"
+The previous design (v0.2.0) was a 3-tier `Link → Window → Pane`
+hierarchy with link-owned windows. The user rejected that. The new
+design treats all three as INDEPENDENT entities. Associations are
+dynamic via Option IDs on `PaneInfo`:
 
-Translation: "Every link goes through tmux server. Change this design —
-just use native [transport I/O] is fine. My original purpose was to
-support tmux session management, not that all links have to go through
-tmux."
+```
+Pane.info.link_id: Option<LinkId>     // currently attached link
+Pane.info.window_id: Option<WindowId> // currently in a window
+Link.active_pane: Option<PaneId>     // Q1: tracks raw-link active pane
+```
+
+A pane can be created with neither a link nor a window (orphan); a
+link can be created with no panes; a window can be created empty. The
+user wires them together via `pane attach`, `pane detach`,
+`pane add-to-window`, etc.
 
 ## Decision
 
-**Default behavior:** `xscore link add <url>` runs the transport directly
-with no tmux server involved. The link's sink is `RawSink` (a no-op marker
-in the `Sink` trait). Only `link: <id>` is printed.
-
-**Opt-in to tmux:** Use the `?tmux=` URL query:
-
-| `?tmux=` value | Sink kind | Window/Pane tree | Data ops |
-|---|---|---|---|
-| _absent_ (default) | `raw` | no | (no panes) |
-| `?tmux=off` | `raw` | no | (no panes) |
-| `?tmux=on` | `tmux` (mode=auto) | yes | yes |
-| `?tmux=auto` | `tmux` (mode=auto) | yes | yes |
-| `?tmux=local` | `tmux` (mode=local) | yes | yes |
-| `?tmux=remote` | `tmux` (mode=remote) | yes | yes |
-
-`auto` resolves at link-creation time: `ssh://` → `remote` (tmux on the
-remote host), `shell://` / `serial://` → `local` (the local shared
-`tmux -L xscore` server). `name=X` overrides the auto-generated
-`xscore-<link_id>` tmux session name; only meaningful with `?tmux=...`.
-
-### Schema change
-
-`SinkConfig` enum gains a `Raw` variant:
+### Three independent entities
 
 ```rust
-pub enum SinkConfig {
-    /// Direct transport I/O. No tmux server involvement.
-    /// The shell/serial/ssh transport is the I/O source directly.
-    Raw,
-    /// Wrap the link in a tmux session (the shared `tmux -L xscore`
-    /// server). Opt in via `?tmux=on|auto|local|remote`.
-    Tmux {
-        mode: String,             // "auto" | "local" | "remote"
-        session_name: Option<String>,
-    },
+// Link — transport + connection state (no windows/panes owned)
+pub struct Link {
+    pub id: LinkId,
+    pub info: LinkInfo,
+    pub transport: Arc<dyn Transport>,    // Arc so DirectBridge can clone
+    pub sink: Box<dyn Sink>,              // Raw or Tmux
+    pub tmux_sink: Option<Arc<TmuxSink>>, // concrete for bridge Weak
+    pub active_pane: Mutex<Option<PaneId>>,  // Q1: direct-link tracking
+}
+
+// Pane — buffer + UI info (orphan-creatable)
+pub struct PaneInfo {
+    pub id: PaneId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub cols: u16, pub rows: u16,         // Q2: geometry
+    pub x: u16, pub y: u16,              // Q2: geometry
+    pub link_id: Option<LinkId>,         // None = orphan
+    pub window_id: Option<WindowId>,     // None = orphan
+}
+
+// Window — pure UI layout container (orphan-creatable, no link)
+pub struct WindowInfo {
+    pub id: WindowId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub layout: WindowLayout,            // single | tabs | split_h | split_v | grid
+    pub cols: u16, pub rows: u16,        // total window size
 }
 ```
 
-State files written by v0.1.0 (`SinkConfig::Tmux { ... }` only) deserialize
-unchanged — the `Tmux` variant is still in the enum, `Raw` was added
-alongside. New raw links serialize as `"sink": "raw"`.
+Each entity is created/owned independently. The CLI surfaces this:
 
-### Manager method changes
-
-| Method | Old return type | New return type |
-|---|---|---|
-| `add_link` | `(LinkId, WindowId, PaneId)` | `(LinkId, Option<WindowId>, Option<PaneId>)` |
-| `open_link` | `(LinkId, WindowId, PaneId)` | `(LinkId, Option<WindowId>, Option<PaneId>)` |
-
-For raw links, `add_link` returns `(link_id, None, None)` and skips the
-auto-create window + pane. For tmux links, behavior is unchanged.
-
-`add_window` and `add_pane` now return a new error variant when called
-on a raw link:
-
-```rust
-Error::NotTmuxLink(LinkId)
-// displays as: "link <id> does not use the tmux sink;
-//               add `?tmux=on` to the URL to enable window/pane commands"
+```bash
+xscore link add <url>           # only creates the link
+xscore window add               # only creates a window
+xscore pane add                 # only creates an orphan pane
+xscore pane attach --pane <pid> --link <lid>   # wire pane → link
+xscore pane add-to-window --pane <pid> --window <wid>  # wire pane → window
 ```
 
-This is checked BEFORE the `unreachable!()` in `RawSink::new_window` /
-`new_pane` would otherwise panic.
+### Bridge model
 
-`hydrate` (state persistence) now branches on `SinkConfig`:
-- Raw links adopt with a `RawSink`; the `tmux has-session` check is
-  skipped (no session to check).
-- Tmux links keep the existing verify-and-adopt path.
+Per-pane runtime is a `PaneBridge` trait with two concrete impls:
 
-### CLI behavior changes
+- `DirectBridge { transport: Arc<dyn Transport> }` — wraps the link's
+  Arc. `read` is one-shot `transport.read(buf)`. Future: ring buffer
+  sidecar (deferred to v0.4.0+).
+- `TmuxBridge { sink: Weak<TmuxSink>, handle: String }` — wraps a weak
+  ref to the link's concrete `TmuxSink`. `read` → `tmux capture-pane`;
+  `write` → `tmux send-keys`; `resize` → `tmux resize-pane`; `close` →
+  `tmux kill-pane`.
 
-- `xscore link add <url>` (default): prints only `link: <id>`.
-- `xscore link add <url>?tmux=on`: prints `link:`, `window:`, `pane:`
-  (the v0.1.0 behavior).
-- `xscore window add --link <raw-link-id>`: errors with `NotTmuxLink`.
-- `xscore window list`, `pane list`, `data {read,write,resize}`: all
-  return `NotTmuxLink` for raw links.
+The pane stores `SessionManager.pane_bridges: Arc<Mutex<HashMap<PaneId, Arc<dyn PaneBridge>>>>`.
+Bridges are stored SEPARATELY from `PaneInfo` so that mutating the info
+(which is JSON-serializable) doesn't destroy the bridge (which is not).
 
-## Consequences
+### Q1 (1-active-pane for raw links)
 
-**Positive:**
-- Most users get the simpler mental model: "a link is a transport." No
-  tmux server in the loop, no install requirement, no `split-window` race
-  to debug.
-- The full Link × Window × Pane model is still available for users who
-  want it (just add `?tmux=on`).
-- The `Sink` trait is now a true "optional layer" — `RawSink` is a no-op
-  marker, `TmuxSink` is the real implementation. Cleaner separation of
-  concerns.
-- Tmux race bugs (the `tmux split-window` server-internal async race
-  that caused the v0.1.0 `data read` failure) only matter for tmux
-  users now. Raw users never hit them.
+When `attach_pane(pid, lid)` runs:
 
-**Negative:**
-- **Breaking behavior change vs v0.1.0.** Any user (or test) relying on
-  the v0.1.0 default — every `link add` creates a tmux session with a
-  default window + pane — now gets a raw link instead. The fix is one
-  URL change (`?tmux=on` or `?tmux=auto`), but it's a real break.
-- `xscore window list` on a raw link is empty (no windows). `xscore
-  pane list` is empty. `xscore data {read,write,resize}` errors. Users
-  may not realize why their usual flow stopped working until they read
-  the README.
-- Version bump required: v0.1.0 → v0.2.0. The CHANGELOG [Unreleased]
-  section flags the breaking change prominently.
-- The `add_link` return type change is a real API change. CLI tests
-  that did `let (lid, wid, pid) = mgr.add_link(...)` need to handle
-  `Option<WindowId>` and `Option<PaneId>` now. (Updated in the same
-  commit.)
+1. If `link.sink == Raw`:
+   - Scan all panes for any OTHER pane with `info.link_id == Some(lid)`.
+   - For each, close its bridge (silently) and clear its `link_id`.
+   - Update `link.active_pane = Some(pid)`.
+2. For tmux-backed links: NO auto-detach. Multiple panes can attach.
 
-**Risks:**
-- Users on v0.1.0 with a populated `~/.config/xscore/state/state.json`
-  whose links are all `Tmux` will see no behavior change (Tmux variant
-  unchanged, hydration still verifies the session). But new links
-  created after the upgrade default to raw. Mixing tmux + raw links
-  in the same state is fine; the manager dispatches per-link on sink
-  type.
-- The `?tmux=on` default-mode `auto` for ssh is "remote tmux" — this
-  requires tmux to be installed on the remote host. If the remote
-  doesn't have tmux, the user has to either install it or use
-  `?tmux=off` and live with no window/pane tree for the SSH link.
-  Documented in the README.
+Pane info (persisted in state.json) is the source of truth — not the
+in-memory `link.active_pane` cache. This makes Q1 work correctly across
+process restarts.
 
-## Alternatives considered
+### Q2 (pane geometry)
 
-- **Keep tmux as the default, add a `--raw` flag to opt out.**
-  Rejected. The user explicitly asked for the inverse: "directly use
-  native is fine" — i.e. they want the simpler behavior by default and
-  tmux as the opt-in. Flipping the default is a one-line URL change
-  for users; the alternative (add a flag) is more code, more docs, and
-  the wrong default for the common case.
-- **Three modes: raw / tmux-auto / no-tmux-with-panes.** Rejected.
-  Over-engineering. "Raw" means "no panes"; "tmux" means "tmux with
-  the standard window/pane tree." That's the binary distinction that
-  matters.
-- **Make `link add` always create a tmux session but mark it as
-  "background" — no default window/pane unless requested.** Rejected.
-  Same outcome (link without windows) but goes through tmux for no
-  reason. The user wants the tmux server out of the loop.
-- **Drop tmux entirely, implement a Rust-native PTY/ANSI parser.**
-  Rejected. This is the original rejected alternative in ADR 0003 —
-  it's the work the tmux server was chosen to avoid. Reverting is a
-  massive implementation cost, and tmux is still useful for users
-  who want it (session persistence, multi-window, attach from
-  outside xscore).
-- **Per-URL opt-in to a simpler two-tier model (Link → Pane, no
-  Window).** Rejected. The 3-tier model works fine for tmux users
-  who opt in; the simpler 1-tier (Link = transport) is what raw users
-  get. No need for a 2-tier middle ground.
+`PaneInfo` carries `cols`/`rows`/`x`/`y`. These are the pane's UI info
+(Q2). The window's `cols`/`rows` are the total window size — independent
+from pane geometry. Layout (single/tabs/split_h/split_v/grid) is a
+hint stored on `WindowInfo`.
 
-## Migration from v0.1.0
+### State schema (BREAKING from v0.2.0)
 
-1. **State files:** no migration needed. `SinkConfig::Tmux` variant
-   is unchanged.
-2. **CLI scripts:** add `?tmux=auto` to URLs that need the window/pane
-   tree. Find+replace: `shell:///bin/bash` → `shell:///bin/bash?tmux=auto`
-   (or wherever the user had a tmux-backed link).
-3. **Tests:** any `xscore link add` test that expects `window:` /
-   `pane:` lines in stdout must add `?tmux=...` to the URL.
-   Updated in commit `efccc6b` (the 4 cli_smoke + 3 data_smoke URLs
-   that previously expected tmux behavior).
-4. **API users:** `add_link` / `open_link` now return
-   `Option<WindowId>` / `Option<PaneId>`. Handle the None case for
-   raw links (no auto-created window/pane).
+```json
+{
+  "links":   [LinkInfo, ...],
+  "windows": [{...WindowInfo..., "panes": ["<pid>", ...]}, ...],
+  "panes":   [PaneInfo, ...]
+}
+```
+
+Three flat lists. `PaneInfo.link_id` + `PaneInfo.window_id` carry the
+associations. The v0.2.0 nested `Vec<LinkSnapshot>` schema is GONE.
+There is NO migration — users must `rm ~/.config/xscore/state/state.json`
+on upgrade (documented in CHANGELOG).
+
+### `?tmux=...` semantics (unchanged from v0.2.0)
+
+- `?tmux=off` or absent → `RawSink` (1 active pane at a time, Q1)
+- `?tmux=on|auto|local|remote` → `TmuxSink` (multi-pane capable)
+
+`SinkConfig` enum unchanged from v0.2.0 (still `Raw` | `Tmux`).
+
+### Pane-add → Pane-bridge mapping
+
+When a pane is created via `pane add`, it's an orphan (no link, no
+window). To get data I/O:
+
+```bash
+xscore pane add --cols 80 --rows 24
+# pane:  01928e0a-...
+
+xscore link add shell:///bin/cat
+# link:  01928e0a-...
+
+xscore pane attach --pane 01928e0a-pane --link 01928e0a-link
+# attached: 01928e0a-pane → link 01928e0a-link
+
+xscore data write --pane 01928e0a-pane <<< 'echo hi'
+xscore data read --pane 01928e0a-pane
+```
+
+The pane can move freely between windows and between links:
+
+```bash
+xscore pane add-to-window --pane <pid> --window <wid>
+xscore pane detach --pane <pid>            # buffer preserved
+xscore pane attach --pane <pid> --link <other-lid>
+```
+
+### Q1 again — Q1 corollary (multi-pane for tmux)
+
+Tmux-backed links (`?tmux=on|auto|local|remote`) may host N simultaneous
+panes — each `attach_pane` creates a new `tmux split-window` in the
+link's tmux session. No auto-detach.
 
 ## Acceptance
 
-This ADR is **Accepted** on the date above. The implementing commit is
-`efccc6b` ("feat(core)!: tmux is opt-in via `?tmux=...`, default sink is
-now raw"). The 9 affected files are listed in that commit's message.
+- All commits implementing this ADR land before the `v0.3.0` tag.
+- `cargo check -p xscore --tests` is clean.
+- `cargo test -p xscore -- --test-threads=1` passes (target ~30-38 tests).
+- ADR 0001, 0002, 0003, 0006 each get a "Revised 2026-10-19/20" note
+  pointing here.
+- `doc/dev/roadmap/overview.md` reflects the 3-entity decoupled model.
+- README 5-min demo shows the new flow (`add → add → attach → data`).
+- CHANGELOG has `[0.3.0]` entry documenting the BREAKING redesign.
 
-Companion updates to keep the doc tree consistent:
-- ADR 0003 — add a "Revised 2026-10-19" subsection noting that the
-  shared `tmux -L xscore` server is now only used for tmux-backed
-  links. The original decision ("every link is a tmux session inside
-  the shared server") is now the opt-in path.
-- ADR 0006 — add a "Revised 2026-10-19" subsection noting that the
-  3-tier Link × Window × Pane model applies to tmux-backed links only.
-  Raw links are 1-tier (Link = Transport).
-- ADR 0001 — minor note that Link × Window × Pane is the model for
-  tmux-backed links; the addressable model is 1-tier for raw links.
-- ADR 0002 — note that `Sink` is now optional; `RawSink` is the
-  no-sink marker for raw links.
-- `doc/dev/roadmap/overview.md` — update the architecture diagram
-  and the URL examples to show the new default and the `?tmux=...`
-  opt-in.
-- `README.md` — already updated in commit `efccc6b` (5-min demo +
-  "Sink options (tmux opt-in)" section).
-- `CHANGELOG.md` — already updated in commit `efccc6b`
-  ([Unreleased] → "Changed" + "Added" sections).
+## Migration from v0.2.0
+
+NO automatic migration. The state.json schema is incompatible.
+
+```bash
+# v0.2.0 → v0.3.0: clear state and re-add everything
+$ rm ~/.config/xscore/state/state.json
+$ xscore link add shell:///bin/cat
+# ... re-add links, panes, windows as needed
+```
+
+Documented in CHANGELOG.md `[0.3.0] - 2026-10-20` section.
+
+## Consequences
+
+### Positive
+
+- Clean separation of concerns: transport vs UI vs buffer.
+- Panes are reusable buffers — switch links without losing data.
+- `xscore pane add` + `xscore pane attach` is composable (no
+  auto-window-pane side effects).
+- Orphan panes are testable in isolation.
+- Direct-bridge ring buffer (v0.4.0+) becomes straightforward to add.
+
+### Negative
+
+- **State schema BREAKING** — users must delete `state.json` on upgrade.
+- CLI verb count grew (new `pane attach/detach/add-to-window/...`).
+- `link del` cascades to panes (silent detach) — previously panes
+  were owned by windows (now panes are independent entities that
+  lose their link_id on link deletion; panes themselves survive).
+- Hydration no longer auto-builds I/O — users must `pane attach`
+  after restart (previously `link open` did this for tmux).
+
+### Alternatives considered
+
+**A. Keep 3-tier Link → Window → Pane hierarchy (v0.2.0).**
+Rejected: user explicitly said "建立link不要自动生成window或者pane"
+and "pane可以自由的切换link" — the 3-tier hierarchy implies fixed
+ownership.
+
+**B. Single flat entity (no Window at all).**
+Considered: every pane is its own window. Rejected: a Window gives
+users a way to group panes (tabs, splits, grid) — pure UI value.
+
+**C. `PaneInfo.link_id` as `Vec<LinkId>` (multi-link).**
+Rejected: the user's Q1 rule is "ONE active link per pane at a time".
+A pane can have history (via re-attach) but is currently attached to
+at most one link.
+
+## Notes
+
+- Bridge storage is separated from `PaneInfo` because mutating info
+  (in `PaneRegistry`) would otherwise destroy the bridge. See
+  `SessionManager::pane_bridges`.
+- `link.active_pane: Mutex<Option<PaneId>>` is a CACHE for direct
+  links; the source of truth for Q1 is pane info (persisted).
+- `Arc<dyn Transport>` (was `Box<dyn Transport>` in v0.2.0) is required
+  so `DirectBridge { transport: Arc<dyn Transport> }` can hold a
+  shared reference.

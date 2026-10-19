@@ -1,7 +1,7 @@
 # ADR 0001: Model sessions as Link × Window × Pane (not flat Session)
 
-- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md); Link × Window × Pane applies to tmux-backed links; raw links are 1-tier Link = Transport)
-- **Date:** 2026-10-16 (revised 2026-10-19)
+- **Status:** Accepted (Revised 2026-10-20 — see [ADR 0007 v2](./0007-raw-default-tmux-opt-in.md); the 3-tier Link × Window × Pane hierarchy is REPLACED by a flat 3-entity decoupled model — Link, Pane, and Window are now independent entities with Option<> associations on Pane)
+- **Date:** 2026-10-16 (revised 2026-10-19, again 2026-10-20)
 - **Deciders:** dev
 - **Related:** [overview.md](../roadmap/overview.md), [diagrams/link-pane-topology.svg](../architecture/diagrams/link-pane-topology.svg), [ADR 0006](./0006-window-concept.md) (extends the model with a Window tier between Link and Pane), [ADR 0007](./0007-raw-default-tmux-opt-in.md) (the 2026-10-19 design pivot that narrowed this ADR's scope to tmux-backed links)
 

@@ -40,6 +40,18 @@ pub struct SerialTransport {
     port: Arc<Mutex<Option<Box<dyn SerialPort>>>>,
 }
 
+impl std::fmt::Debug for SerialTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SerialTransport")
+            .field("path", &self.path)
+            .field("baud", &self.baud)
+            .field("data_bits", &self.data_bits)
+            .field("parity", &self.parity)
+            .field("stop_bits", &self.stop_bits)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SerialTransport {
     pub async fn new(
         path: String,

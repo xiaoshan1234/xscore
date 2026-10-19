@@ -6,40 +6,60 @@
 //
 // State persistence caveat: each `xscore` invocation is a fresh process
 // with a fresh `Arc<SessionManager>`. Tests that span multiple
-// invocations (e.g. `link add` followed by `link list`) are marked
-// `#[ignore]` because they require the in-memory state to survive —
-// that lands in task-15 (state persistence). To run them manually:
+// invocations (e.g. `link add` followed by `pane list`) rely on the
+// v0.3.0 state persistence in `~/.config/xscore/state/state.json`.
 //
-//   cargo test --test cli_smoke -- --ignored
-//
-// (and the implementation behind them must also be landed.)
-//
-// Currently-passing tests (5/10) cover the parts of the CLI that work
-// today: help text, input validation, error invariants, and the
-// disk-based `link config` round-trip.
+// v0.3.0 rewrote the CLI surface: `link add` only creates a link (no
+// auto window/pane), and the new verbs `pane {attach, detach, add-to-
+// window, ...}` glue together the decoupled entities. The test set
+// covers both the new verbs and the Q1 / Q2 invariants.
 
 use std::process::Command;
 
-/// Build a `Command` for the `xscore` binary, scoped to a per-test
-/// `HOME` directory so the state file
-/// (`~/.config/xscore/state/state.json`) doesn't collide between
-/// parallel tests. Each test should call this once, capture the
-/// result in a closure, and use that closure for every invocation
-/// in the test — sharing a single HOME across the test's invocations
-/// is what makes the state-persistence tests work.
-///
-/// Example:
-/// ```ignore
-/// let xscore = || xscore_for("link_add_creates");
-/// let out1 = xscore().args(["link", "add", "..."]).output()?;
-/// let out2 = xscore().args(["link", "list"]).output()?;
-/// ```
 fn xscore_for(test_name: &str) -> Command {
     let home = std::env::temp_dir().join(format!("xscore-test-{test_name}"));
     std::fs::create_dir_all(&home).ok();
+    // Wipe the entire state directory on EVERY call. Tests that need
+    // multi-invocation persistence use a single `xscore_for` closure
+    // whose `home` is the same path — but since each subprocess is a
+    // fresh manager and the state is reloaded from disk at startup,
+    // multi-invocation tests work as long as we don't wipe between
+    // their commands.
+    //
+    // Wait — actually, multi-invocation tests (full_flow, q1_*) DO
+    // need persistence across calls. So we must NOT wipe on every call.
+    //
+    // Strategy: only wipe if the file is in an incompatible schema
+    // (v0.2.0's bare `[]` array) — that's the only case where a stale
+    // file would break a v0.3.0 run. Valid v0.3.0 snapshots are left
+    // alone; tests that need a clean slate use a unique test name.
+    let state_json = home.join(".config").join("xscore").join("state").join("state.json");
+    if state_json.exists() {
+        let content = std::fs::read_to_string(&state_json).unwrap_or_default();
+        let trimmed = content.trim_start();
+        if trimmed.starts_with('[') {
+            // v0.2.0 schema: bare array of LinkSnapshot. Incompatible.
+            let _ = std::fs::remove_file(&state_json);
+        }
+    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_xscore"));
     cmd.env("HOME", &home);
     cmd
+}
+
+/// Extract the value after a leading "key:" prefix on a single line.
+fn parse_id_from_stdout(stdout: &[u8], key: &str) -> String {
+    let prefix = format!("{key}:");
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .find(|l| l.trim_start().starts_with(&prefix))
+        .unwrap_or_else(|| panic!("no `{prefix}:` line in stdout: {}",
+            String::from_utf8_lossy(stdout)))
+        .trim()
+        .strip_prefix(&prefix)
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 #[test]
@@ -67,9 +87,6 @@ fn xscore_link_add_requires_url_or_config() {
 #[test]
 fn xscore_link_open_unsupported_for_shell() {
     let xscore = || xscore_for("link_open_unshell");
-    // ADR 0005: `link open` is tmux-only; shell/serial/ssh return OpenOnlyForTmux.
-    // (After the manager.rs `open_link` fix that checks `address.kind() != "tmux"`,
-    // this returns a clean error instead of a `todo!()` panic.)
     let out = xscore()
         .args(["link", "open", "shell:///bin/cat"])
         .output()
@@ -82,67 +99,11 @@ fn xscore_link_open_unsupported_for_shell() {
     );
 }
 
-// ----- ADR 0005 invariant: two `link add <same url>` = two distinct links -----
-// No state needed: each invocation's process creates a fresh link, and
-// we only compare the IDs (which are unique per call).
-
-#[test]
-fn xscore_link_add_default_creates_two_links_for_same_url() {
-    let xscore = || xscore_for("link_add_two_same_url");
-    let out1 = xscore()
-        .args(["link", "add", "shell:///bin/echo"])
-        .output()
-        .unwrap();
-    let id1 = String::from_utf8_lossy(&out1.stdout)
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap_or_else(|| {
-            panic!(
-                "first `link add` produced no `link:` line. stdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&out1.stdout),
-                String::from_utf8_lossy(&out1.stderr),
-            )
-        })
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let out2 = xscore()
-        .args(["link", "add", "shell:///bin/echo"])
-        .output()
-        .unwrap();
-    let id2 = String::from_utf8_lossy(&out2.stdout)
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap_or_else(|| {
-            panic!(
-                "second `link add` produced no `link:` line. stdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&out2.stdout),
-                String::from_utf8_lossy(&out2.stderr),
-            )
-        })
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    assert_ne!(id1, id2, "two add() calls should produce distinct link_ids");
-
-    // Cleanup is best-effort; without state persistence these will fail
-    // (no manager remembers the links), but we don't care.
-    let _ = xscore().args(["link", "close", "--id", &id1]).output();
-    let _ = xscore().args(["link", "close", "--id", &id2]).output();
-}
-
 // ----- `link config` template (disk-based, no in-memory state needed) -----
 
 #[test]
 fn xscore_link_config_add_and_list_roundtrip() {
     let xscore = || xscore_for("link_config_roundtrip");
-    // Clean up any prior template from a previous test run.
     let _ = std::fs::remove_dir_all(
         dirs::config_dir().unwrap().join("xscore").join("links"),
     );
@@ -168,245 +129,28 @@ fn xscore_link_config_add_and_list_roundtrip() {
         .output();
 }
 
-// ============================================================
-// Tests below this line require state persistence (task-15 / F)
-// — each `xscore` invocation is a fresh process with a fresh
-// `Arc<SessionManager>`, so the manager doesn't remember the
-// links/windows/panes from a previous invocation. They are
-// marked `#[ignore]` and will be re-enabled once F lands.
-// ============================================================
+// ----- ADR 0005 invariant: two `link add <same url>` = two distinct links -----
 
 #[test]
-fn xscore_link_add_creates_link_and_pane() {
-    let xscore = || xscore_for("link_add_creates");
-    let out = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=auto"])
+fn xscore_link_add_default_creates_two_links_for_same_url() {
+    let xscore = || xscore_for("link_add_two_same_url");
+    let out1 = xscore()
+        .args(["link", "add", "shell:///bin/echo"])
         .output()
         .unwrap();
-    assert!(out.status.success());
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("link:"));
-    assert!(s.contains("pane:"));
-
-    let link_id = s
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-    let pane_id = s
-        .lines()
-        .find(|l| l.starts_with("pane:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("pane:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let list_out = xscore().args(["link", "list"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&list_out.stdout).contains(&link_id));
-
-    let del_pane = xscore()
-        .args(["pane", "del", "--id", &pane_id])
+    let id1 = parse_id_from_stdout(&out1.stdout, "link");
+    let out2 = xscore()
+        .args(["link", "add", "shell:///bin/echo"])
         .output()
         .unwrap();
-    assert!(del_pane.status.success());
-
-    let del_link = xscore()
-        .args(["link", "del", "--id", &link_id])
-        .output()
-        .unwrap();
-    assert!(del_link.status.success());
+    let id2 = parse_id_from_stdout(&out2.stdout, "link");
+    assert_ne!(id1, id2, "two add() calls should produce distinct link_ids");
 }
 
-#[test]
-fn xscore_link_close_unsupported_for_shell() {
-    let xscore = || xscore_for("link_close_unshell");
-    let out = xscore()
-        .args(["link", "add", "shell:///bin/cat"])
-        .output()
-        .unwrap();
-    let link_id = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let close = xscore()
-        .args(["link", "close", "--id", &link_id])
-        .output()
-        .unwrap();
-    assert!(!close.status.success(), "shell + `link close` must fail");
-    let s = String::from_utf8_lossy(&close.stderr);
-    assert!(
-        s.contains("tmux") || s.contains("CloseOnlyForTmux"),
-        "expected CloseOnlyForTmux error, got: {s}"
-    );
-
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-}
+// ----- v0.3.0 default: `link add <url>` prints ONLY `link:` -----
 
 #[test]
-fn xscore_link_del_kills_link() {
-    let xscore = || xscore_for("link_del_kills");
-    let add = xscore()
-        .args(["link", "add", "shell:///bin/cat"])
-        .output()
-        .unwrap();
-    let link_id = String::from_utf8_lossy(&add.stdout)
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let del = xscore()
-        .args(["link", "del", "--id", &link_id])
-        .output()
-        .unwrap();
-    assert!(del.status.success());
-
-    let list = xscore().args(["link", "list"]).output().unwrap();
-    assert!(
-        !String::from_utf8_lossy(&list.stdout).contains(&link_id),
-        "link still in registry after del: {link_id}"
-    );
-}
-
-#[test]
-fn xscore_window_add_inside_link() {
-    let xscore = || xscore_for("window_add_inside");
-    let add = xscore()
-        .args(["link", "add", "shell:///bin/bash?tmux=auto"])
-        .output()
-        .unwrap();
-    let s = String::from_utf8_lossy(&add.stdout);
-    let link_id = s
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let window = xscore()
-        .args(["window", "add", "--link", &link_id, "--name", "dev"])
-        .output()
-        .unwrap();
-    assert!(window.status.success());
-    let ws = String::from_utf8_lossy(&window.stdout);
-    assert!(ws.contains("window:"));
-    let wid = ws
-        .lines()
-        .find(|l| l.starts_with("window:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("window:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let list = xscore()
-        .args(["window", "list", "--link", &link_id])
-        .output()
-        .unwrap();
-    assert!(String::from_utf8_lossy(&list.stdout).contains(&wid));
-
-    let _ = xscore().args(["window", "del", "--id", &wid]).output();
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-}
-
-#[test]
-fn xscore_window_del_kills_window() {
-    let xscore = || xscore_for("window_del_kills");
-    let add = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=auto"])
-        .output()
-        .unwrap();
-    let s = String::from_utf8_lossy(&add.stdout);
-    let link_id = s
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-    let initial_window = s
-        .lines()
-        .find(|l| l.starts_with("window:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("window:")
-        .unwrap()
-        .trim()
-        .to_string();
-    let del = xscore()
-        .args(["window", "del", "--id", &initial_window])
-        .output()
-        .unwrap();
-    assert!(del.status.success());
-
-    let list = xscore()
-        .args(["window", "list", "--link", &link_id])
-        .output()
-        .unwrap();
-    assert!(
-        !String::from_utf8_lossy(&list.stdout).contains(&initial_window),
-        "deleted window still in registry: {initial_window}"
-    );
-
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-}
-
-#[test]
-fn xscore_pane_add_uses_window_not_link() {
-    let xscore = || xscore_for("pane_add_uses_window");
-    let add = xscore()
-        .args(["link", "add", "shell:///bin/echo?tmux=auto"])
-        .output()
-        .unwrap();
-    let s = String::from_utf8_lossy(&add.stdout);
-    let window_id = s
-        .lines()
-        .find(|l| l.starts_with("window:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("window:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let pane = xscore()
-        .args(["pane", "add", "--window", &window_id, "--name", "bash"])
-        .output()
-        .unwrap();
-    assert!(pane.status.success());
-    assert!(String::from_utf8_lossy(&pane.stdout).contains("pane:"));
-}
-
-// ----- Default sink is raw (no tmux server) when `?tmux=` is absent -----
-// Per the 2026-10-19 design pivot: not every link goes through tmux. The
-// user requested "支持 tmux 会话的管理，不是所有 link 都要走 tmux". A fresh
-// `xscore link add <url>` should default to direct transport I/O and
-// print only `link:` (no `window:` / `pane:`).
-
-#[test]
-fn xscore_link_add_default_uses_raw_sink() {
+fn xscore_link_add_default_uses_raw_sink_and_no_pane() {
     let xscore = || xscore_for("link_add_default_raw");
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat"])
@@ -415,19 +159,11 @@ fn xscore_link_add_default_uses_raw_sink() {
     assert!(out.status.success(), "add failed: {}", String::from_utf8_lossy(&out.stderr));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("link:"), "missing 'link:' line: {s}");
+    // v0.3.0: no auto window or pane for raw links.
     assert!(!s.contains("window:"), "raw link should not print 'window:': {s}");
     assert!(!s.contains("pane:"), "raw link should not print 'pane:': {s}");
 
-    // The link's `link show` should report the sink as raw, not tmux.
-    let link_id = s
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
+    let link_id = parse_id_from_stdout(&out.stdout, "link");
     let show = xscore()
         .args(["link", "show", "--id", &link_id])
         .output()
@@ -436,44 +172,13 @@ fn xscore_link_add_default_uses_raw_sink() {
     assert!(ss.contains(r#""sink": "raw""#) || ss.contains(r#""sink":"raw""#),
         "expected raw sink in show, got: {ss}");
 
-    // Cleanup
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
 }
 
-#[test]
-fn xscore_window_add_errors_for_raw_link() {
-    let xscore = || xscore_for("window_add_raw_link");
-    let add = xscore()
-        .args(["link", "add", "shell:///bin/cat"])  // default = raw
-        .output()
-        .unwrap();
-    let link_id = String::from_utf8_lossy(&add.stdout)
-        .lines()
-        .find(|l| l.starts_with("link:"))
-        .unwrap()
-        .trim()
-        .strip_prefix("link:")
-        .unwrap()
-        .trim()
-        .to_string();
-
-    let window = xscore()
-        .args(["window", "add", "--link", &link_id, "--name", "dev"])
-        .output()
-        .unwrap();
-    assert!(!window.status.success(), "window add on raw link must fail");
-    let s = String::from_utf8_lossy(&window.stderr);
-    assert!(
-        s.contains("tmux") || s.contains("NotTmuxLink"),
-        "expected NotTmuxLink error, got: {s}"
-    );
-
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-}
+// ----- v0.3.0: `?tmux=on` still creates a tmux link (no auto window/pane either) -----
 
 #[test]
-fn xscore_link_add_with_tmux_on_still_creates_window_and_pane() {
-    // Sanity: opt-in `?tmux=on` keeps the old auto-create behavior.
+fn xscore_link_add_with_tmux_on_only_creates_link() {
     let xscore = || xscore_for("link_add_tmux_on");
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat?tmux=on"])
@@ -482,24 +187,18 @@ fn xscore_link_add_with_tmux_on_still_creates_window_and_pane() {
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("link:"));
-    assert!(s.contains("window:"));
-    assert!(s.contains("pane:"));
-    let link_id = s.lines().find(|l| l.starts_with("link:")).unwrap()
-        .trim().strip_prefix("link:").unwrap().trim().to_string();
+    // v0.3.0: even with `?tmux=on`, the user must explicitly create + add panes.
+    assert!(!s.contains("window:"), "v0.3.0: even tmux links don't print window: {s}");
+    assert!(!s.contains("pane:"), "v0.3.0: even tmux links don't print pane: {s}");
+    let link_id = parse_id_from_stdout(&out.stdout, "link");
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
 }
 
-// ----- `link add --id <uuid>` — specify a known link id -----
-// Per the 2026-10-19 user request: "创建 link 的时候能不能指定 link 的 id".
-// Useful for scripted workflows where the id must be known in
-// advance (e.g., for reconnect-style flows or deterministic tests).
-// Default behavior (no `--id`) is unchanged — auto-generated uuid v7.
+// ----- `link add --id <uuid>` -----
 
 #[test]
 fn xscore_link_add_with_explicit_id_uses_supplied_id() {
     let xscore = || xscore_for("link_add_explicit_id");
-    // Use a uuid v7-shaped string (version digit = 7 in the 3rd group,
-    // variant digit = 8/9/a/b in the 4th group) so LinkId::parse accepts it.
     let custom_id = "11111111-2222-7333-8444-555555555555";
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat", "--id", custom_id])
@@ -511,7 +210,6 @@ fn xscore_link_add_with_explicit_id_uses_supplied_id() {
     assert!(s.contains(custom_id),
         "stdout should contain the supplied id '{custom_id}', got: {s}");
 
-    // Verify the link list also shows the supplied id.
     let list = xscore().args(["link", "list"]).output().unwrap();
     let ls = String::from_utf8_lossy(&list.stdout);
     assert!(ls.contains(custom_id), "list should contain id: {ls}");
@@ -522,17 +220,19 @@ fn xscore_link_add_with_explicit_id_uses_supplied_id() {
 #[test]
 fn xscore_link_add_with_duplicate_id_errors() {
     let xscore = || xscore_for("link_add_duplicate_id");
-    let id = "22222222-3333-7444-8555-666666666666";
-    // First add succeeds.
+    // Use a uuid v7-shaped id UNIQUE to this test run — but the duplicate
+    // detection happens within the same `xscore_for` closure (so both
+    // subprocesses see the same HOME). Make the id include a process-id
+    // component to avoid collisions with prior runs.
+    let id = format!("22222222-3333-7444-8555-{:012x}", std::process::id());
     let first = xscore()
-        .args(["link", "add", "shell:///bin/cat", "--id", id])
+        .args(["link", "add", "shell:///bin/cat", "--id", &id])
         .output()
         .unwrap();
     assert!(first.status.success(), "first add failed: {}",
         String::from_utf8_lossy(&first.stderr));
-    // Second add with the same id fails with LinkIdExists.
     let second = xscore()
-        .args(["link", "add", "shell:///bin/echo", "--id", id])
+        .args(["link", "add", "shell:///bin/echo", "--id", &id])
         .output()
         .unwrap();
     assert!(!second.status.success(), "second add with same id must fail");
@@ -542,5 +242,160 @@ fn xscore_link_add_with_duplicate_id_errors() {
         "expected LinkIdExists error, got: {s}"
     );
 
-    let _ = xscore().args(["link", "del", "--id", id]).output();
+    let _ = xscore().args(["link", "del", "--id", &id]).output();
+}
+
+// ----- v0.3.0: full flow create link → create pane → attach → write → read -----
+
+#[test]
+fn xscore_full_flow_create_pane_attach_data() {
+    let xscore = || xscore_for("full_flow");
+
+    // 1. Create link (raw — no ?tmux=).
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(add.status.success());
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+
+    // 2. Create pane (orphan).
+    let add_pane = xscore().args(["pane", "add"]).output().unwrap();
+    let pane_id = parse_id_from_stdout(&add_pane.stdout, "pane");
+
+    // 3. Attach the pane to the link.
+    let attach = xscore()
+        .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
+        .output().unwrap();
+    assert!(attach.status.success(),
+        "attach failed: {}", String::from_utf8_lossy(&attach.stderr));
+
+    // 4. Verify the pane's info shows the link_id.
+    let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
+    let s = String::from_utf8_lossy(&show.stdout);
+    assert!(s.contains(&link_id),
+        "pane.show should include link_id; got: {s}");
+
+    // 5. Create a window + put the pane in it.
+    let add_window = xscore()
+        .args(["window", "add", "--cols", "120", "--rows", "30"])
+        .output().unwrap();
+    assert!(add_window.status.success());
+    let window_id = parse_id_from_stdout(&add_window.stdout, "window");
+
+    let add_to_window = xscore()
+        .args(["pane", "add-to-window", "--pane", &pane_id, "--window", &window_id])
+        .output().unwrap();
+    assert!(add_to_window.status.success(),
+        "add-to-window failed: {}", String::from_utf8_lossy(&add_to_window.stderr));
+
+    // 6. Verify the window list shows the pane.
+    let window_list = xscore().args(["window", "list"]).output().unwrap();
+    let wl = String::from_utf8_lossy(&window_list.stdout);
+    assert!(wl.contains(&window_id), "window list should contain wid: {wl}");
+
+    // 7. Verify the pane list, filtered by window, shows the pane.
+    let pane_list = xscore()
+        .args(["pane", "list", "--window", &window_id])
+        .output().unwrap();
+    let pl = String::from_utf8_lossy(&pane_list.stdout);
+    assert!(pl.contains(&pane_id),
+        "pane list (--window) should contain pane id; got: {pl}");
+
+    // 8. Detach the pane (orphan again).
+    let detach = xscore()
+        .args(["pane", "detach", "--pane", &pane_id])
+        .output().unwrap();
+    assert!(detach.status.success());
+
+    // 9. data write should fail now (orphan).
+    let write_fail = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .stdin(std::process::Stdio::piped())
+        .output().unwrap();
+    assert!(!write_fail.status.success(),
+        "data_write on detached pane must fail");
+    let s = String::from_utf8_lossy(&write_fail.stderr);
+    assert!(s.contains("not attached") || s.contains("NotAttached"),
+        "expected NotAttached error, got: {s}");
+
+    // Cleanup
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["window", "del", "--id", &window_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+}
+
+// ----- Q1: direct link 1-active-pane auto-detach -----
+
+#[test]
+fn xscore_q1_direct_link_auto_detaches_old_active_pane() {
+    let xscore = || xscore_for("q1_auto_detach");
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+
+    let p1 = parse_id_from_stdout(&xscore().args(["pane", "add"]).output().unwrap().stdout, "pane");
+    let p2 = parse_id_from_stdout(&xscore().args(["pane", "add"]).output().unwrap().stdout, "pane");
+
+    let _ = xscore().args(["pane", "attach", "--pane", &p1, "--link", &link_id]).output().unwrap();
+    let _ = xscore().args(["pane", "attach", "--pane", &p2, "--link", &link_id]).output().unwrap();
+
+    // p1 should be detached (link_id: null); p2 should be attached.
+    let show_p1 = xscore().args(["pane", "show", "--id", &p1]).output().unwrap();
+    let p1_json = String::from_utf8_lossy(&show_p1.stdout);
+    assert!(
+        p1_json.contains(r#""link_id": null"#) || p1_json.contains(r#""link_id":null"#),
+        "p1 should be detached, got: {p1_json}"
+    );
+
+    let show_p2 = xscore().args(["pane", "show", "--id", &p2]).output().unwrap();
+    let p2_json = String::from_utf8_lossy(&show_p2.stdout);
+    assert!(p2_json.contains(&link_id),
+        "p2 should be attached, got: {p2_json}");
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &p1]).output();
+    let _ = xscore().args(["pane", "del", "--id", &p2]).output();
+}
+
+// ----- v0.3.0: window add/list/del (no link needed) -----
+
+#[test]
+fn xscore_window_add_list_del_orphan() {
+    let xscore = || xscore_for("window_orphan");
+    let add = xscore()
+        .args(["window", "add", "--name", "scratch", "--cols", "100", "--rows", "20"])
+        .output().unwrap();
+    assert!(add.status.success());
+    let wid = parse_id_from_stdout(&add.stdout, "window");
+
+    let list = xscore().args(["window", "list"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&list.stdout);
+    assert!(ls.contains(&wid), "window list should contain wid: {ls}");
+
+    let del = xscore().args(["window", "del", "--id", &wid]).output().unwrap();
+    assert!(del.status.success());
+}
+
+// ----- v0.3.0: link del also detaches panes (panes survive as orphan) -----
+
+#[test]
+fn xscore_link_del_detaches_pane_keeps_pane_alive() {
+    let xscore = || xscore_for("link_del_detaches");
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let add_pane = xscore().args(["pane", "add"]).output().unwrap();
+    let pane_id = parse_id_from_stdout(&add_pane.stdout, "pane");
+    let _ = xscore()
+        .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
+        .output().unwrap();
+
+    let del = xscore().args(["link", "del", "--id", &link_id]).output().unwrap();
+    assert!(del.status.success());
+
+    // The pane survives — info.link_id is now None.
+    let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
+    let s = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        s.contains(r#""link_id": null"#) || s.contains(r#""link_id":null"#),
+        "pane.link_id should be null after link del; got: {s}"
+    );
+
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
 }

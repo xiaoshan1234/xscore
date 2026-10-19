@@ -1,7 +1,7 @@
 # ADR 0003: Use an external tmux server, never embed tmux
 
-- **Status:** Accepted (Revised 2026-10-19 — see [ADR 0007](./0007-raw-default-tmux-opt-in.md))
-- **Date:** 2026-10-16 (revised 2026-10-19)
+- **Status:** Accepted (Revised 2026-10-20 — see [ADR 0007 v2](./0007-raw-default-tmux-opt-in.md); the shared `tmux -L xscore` server is still only used for tmux-backed links; for raw links there's no tmux involvement at all)
+- **Date:** 2026-10-16 (revised 2026-10-19, again 2026-10-20)
 - **Deciders:** dev
 - **Related:** [overview.md](../roadmap/overview.md), [ADR 0001](../adr/0001-link-pane-model.md), [ADR 0006](../adr/0006-window-concept.md) (adds Window between Link and Pane; recomputes per-link tmux wiring in terms of session / window / pane inside the shared `-L xscore` server). See [ADR 0006 § tmux wire](../adr/0006-window-concept.md#tmux-wire-corrected--server-is-shared-not-per-link) for the per-tier tmux command mapping.
 

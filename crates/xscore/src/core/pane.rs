@@ -1,14 +1,15 @@
-// core/pane.rs
-use super::id::{PaneId, WindowId};
-use crate::model::PaneInfo;
-
-pub struct Pane {
-    pub info: PaneInfo,
-}
-
-impl Pane {
-    pub fn id(&self) -> PaneId { self.info.id }
-    /// Renamed from `link_id()` to match `PaneInfo.window_id` rename
-    /// (reconciliation rule 3 in task-06 partition directive).
-    pub fn window_id(&self) -> WindowId { self.info.window_id }
-}
+// core/pane.rs (v0.3.0 — buffer-per-pane, ADR 0007 v2)
+//
+// v0.3.0: `Pane` as an in-memory struct has been removed. The buffer
+// (live bridge) and the UI info are now stored separately:
+//   - `PaneInfo` lives in `PaneRegistry` (JSON-serializable).
+//   - The bridge lives in `SessionManager::pane_bridges` (in-memory
+//     only; not persisted — bridges are rebuilt on `attach_pane`).
+//
+// This module now only re-exports `PaneInfo` semantics from `model::PaneInfo`.
+// The `Pane` struct that used to live here was a v0.2.0 design — see ADR 0007
+// v2 for the v0.3.0 split.
+//
+// (`Pane` is intentionally NOT re-exported here. If a downstream caller needs
+// the old aggregate, they should use `crate::core::pane_registry::PaneRegistry`
+// + `crate::core::manager::SessionManager::pane_bridges`.)

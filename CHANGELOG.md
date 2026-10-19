@@ -7,12 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-20
+
+### BREAKING — 3-entity decoupled model (ADR 0007 v2)
+
+The whole data model is redesigned. Three independent entities
+(Link, Pane, Window) replace the previous 3-tier
+`Link → Window → Pane` hierarchy. Each entity is orphan-creatable
+(no link required); associations are dynamic Option IDs on `PaneInfo`.
+
+- `xscore link add <url>` now creates ONLY the link. NO auto
+  window, NO auto pane. (v0.2.0 created one default window + one
+  default pane for tmux-backed links.)
+- New verbs (v0.3.0):
+  - `xscore pane add [--cols C --rows R --x X --y Y]`
+  - `xscore pane attach --pane <pid> --link <lid>` — bind pane to link (creates bridge)
+  - `xscore pane detach --pane <pid>` — unbind (buffer preserved)
+  - `xscore pane resize --pane <pid> --cols C --rows R`
+  - `xscore pane move --pane <pid> --x X --y Y` — update geometry only
+  - `xscore pane add-to-window --pane <pid> --window <wid>`
+  - `xscore pane remove-from-window --pane <pid> --window <wid>`
+  - `xscore window add [--layout <kind>] [--cols C --rows R]` — orphan
+  - `xscore window set-layout --id <wid> --layout <kind>`
+  - `xscore window add-pane --window <wid> --pane <pid>`
+  - `xscore window remove-pane --window <wid> --pane <pid>`
+- Removed verbs / options:
+  - `xscore pane add --window <wid>` (v0.2.0) → `xscore pane add` (v0.3.0, orphan)
+  - `xscore window add --link <lid>` (v0.2.0) → `xscore window add` (v0.3.0, orphan)
+  - `xscore window list --link <lid>` filter — windows are not link-scoped anymore
+  - `xscore pane list --window <wid>` filter kept; `--link <lid>` filter added
+
+### BREAKING — state schema flat
+
+The state file (`~/.config/xscore/state/state.json`) is rewritten
+from a nested `Vec<LinkSnapshot>` to a flat `{links, windows, panes}`
+object. **No migration path** — users upgrading from v0.2.0 must
+`rm ~/.config/xscore/state/state.json` on upgrade and re-add their
+links. Documented in the release notes.
+
 ### Added
 
-- `xscore link add --id <uuid>` — supply a specific `LinkId` (uuid v7)
-  instead of auto-generating one. Errors with `Error::LinkIdExists`
-  if the id is already in use. Useful for scripted workflows and
-  reconnect-style flows. 2 cli_smoke tests cover the new flag.
+- `PaneInfo.geometry` (cols/rows/x/y) — pane's UI info per Q2
+  (user-confirmed 2026-10-19).
+- `PaneInfo.link_id: Option<LinkId>` and `PaneInfo.window_id: Option<WindowId>`
+  — explicit association pointers (vs. v0.2.0's nested hierarchy).
+- `WindowInfo.layout: WindowLayout` — `single` | `tabs` | `split_h`
+  | `split_v` | `grid{cols,rows}`. Pure UI hint, independent of any
+  link.
+- `WindowInfo.cols`/`rows` — total window size (vs. pane's individual
+  geometry).
+- `Link.transport: Arc<dyn Transport>` (was `Box<dyn Transport>`) —
+  needed so `DirectBridge { transport: Arc<dyn Transport> }` can share.
+- `Link.tmux_sink: Option<Arc<TmuxSink>>` (NEW) — concrete Arc for
+  `TmuxBridge { sink: Weak<TmuxSink> }`.
+- `Link.active_pane: Mutex<Option<PaneId>>` (NEW) — Q1 cache for
+  direct links (NOT the source of truth — `PaneInfo.link_id` is).
+- `Error::NotAttached(PaneId)` — returned by data ops on orphan panes.
+- `Error::AlreadyInWindow { window, pane }` and
+  `Error::NotInWindow { window, pane }` — explicit add/remove errors.
+- `Error::PaneNotOnLink { link, pane }` — for symmetric detach checks.
+- New `backends::bridge` module — `PaneBridge` trait + `DirectBridge`
+  + `TmuxBridge` impls. The legacy `PaneBackend` trait,
+  `BackendRegistry`, and `CompositeBackend` are REMOVED.
+- `SessionManager.pane_bridges: Arc<Mutex<HashMap<PaneId, Arc<dyn PaneBridge>>>>`
+  — separate from `PaneRegistry` so mutating `PaneInfo` doesn't
+  destroy the bridge.
+
+### Changed
+
+- `xscore window add` no longer takes `--link`. Windows are independent.
+- `xscore pane add` no longer takes `--window`. Panes are orphan.
+- `xscore link del` cascades: every attached pane's `link_id` is
+  cleared, bridge closed silently. The panes themselves survive as
+  orphans.
+- `xscore window del` cascades: every pane in the window has its
+  `window_id` cleared. Panes survive as orphans.
+- Hydration no longer auto-builds bridges. The user must
+  `xscore pane attach` after restart to resume data I/O.
+- The Sink trait lost `new_window` and `kill_window` (windows are
+  independent now). `new_pane` no longer takes a window index — all
+  tmux panes go into the link's single tmux window (window_idx 0).
+
+### Implementation detail
+
+- v0.3.0 implements the user-confirmed Q1 rule: **direct (raw) links
+  may have only ONE active pane at a time.** When a different pane
+  is attached, the previously-active pane is auto-detached (its
+  `link_id` becomes `None`, its buffer is preserved). For tmux-backed
+  links, multiple panes may attach simultaneously (Q1 corollary).
+- v0.3.0 implements the user-confirmed Q2 rule: **pane's UI info =
+  geometry** — `cols`, `rows`, `x`, `y`. Each pane declares its own
+  size and position independently of its parent window.
 
 ## [0.2.0] - 2026-10-19
 

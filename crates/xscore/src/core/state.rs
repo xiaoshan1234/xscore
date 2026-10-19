@@ -1,50 +1,59 @@
-// core/state.rs
+// core/state.rs (v0.3.0 — flat schema, ADR 0007 v2)
 //
-// State persistence for the in-memory registries. The `LinkInfo` is the
-// only piece of manager state that's serializable — the `Transport` and
-// `Sink` runtime objects are reconstructed on hydration by re-running
-// `transport_for(spec.transport)` and `sink_for(...)` against the spec.
+// v0.3.0 schema redesign. Pre-v0.3.0 the snapshot was `Vec<LinkSnapshot>`
+// where each snapshot grouped one link's `windows: Vec<WindowInfo>` and
+// `panes: Vec<PaneInfo>` under the link. v0.3.0 is FLAT: three parallel
+// lists (links, windows, panes) — the entities are independent and the
+// associations are now stored ON the panes (pane.info.link_id + window_id),
+// not on the snapshot wrapper.
 //
-// On hydration, the manager re-adopts the tmux session (so `kill_window`
-// / `kill-session` / `new_pane` work on the right session) and re-registers
-// the persisted windows + panes with their ORIGINAL xscore IDs (so
-// `xscore window list` after restart shows the same window-id that the
-// user saved earlier).
+// Why flat?
+//   - Windows are no longer link-scoped (a window can exist without any
+//     link, or move between panes that span multiple links in the future).
+//   - Panes are orphan-creatable and switchable between links (Q1+Q2 from
+//     ADR 0007 v2); the `link_id`/`window_id` references live ON the pane.
+//   - Save/load is just `Vec<LinkInfo>` + `Vec<WindowInfo>` +
+//     `Vec<PaneInfo>` (plus the panes list on each window).
 //
-// File format: a single `state.json` at `~/.config/xscore/state/state.json`
-// containing `Vec<LinkSnapshot>`. Each snapshot holds the LinkInfo plus
-// the windows + panes that belong to that link, keyed by xscore's
-// uuid-based ids (NOT by tmux ids — those get re-derived on hydration).
+// BREAKING: the v0.2.0 schema is NOT backward-compatible. There is no
+// auto-migration. Users must `rm ~/.config/xscore/state/state.json` on
+// upgrade — documented in CHANGELOG.
 
 use std::path::Path;
 
 use crate::core::Result;
+use crate::core::PaneId;
 use crate::model::{LinkInfo, PaneInfo, WindowInfo};
 
-/// One link's worth of persisted state. The manager stores these
-/// in-memory under `SessionManager` (link, window, pane registries);
-/// on save, we walk the registries and group windows + panes by
-/// their parent link_id. On load, we re-construct each LinkSnapshot
-/// in the same way.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct LinkSnapshot {
-    pub link: LinkInfo,
-    pub windows: Vec<WindowInfo>,
+/// v0.3.0 flat snapshot: three parallel lists, no grouping.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct StateSnapshot {
+    pub links: Vec<LinkInfo>,
+    pub windows: Vec<WindowSnapshot>,
     pub panes: Vec<PaneInfo>,
 }
 
-/// Persist a snapshot of the link metadata to disk. Call after any
-/// mutating manager method (add_link, del_link, add_window, etc.) so
-/// the next CLI invocation sees the change.
-pub fn save(snapshot: &[LinkSnapshot]) -> Result<()> {
+/// One window's worth of persisted state. Flattened `WindowInfo` + the
+/// list of pane ids that currently live in this window. (Pane ids only —
+/// the pane's full `PaneInfo` lives in `StateSnapshot.panes`.)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WindowSnapshot {
+    #[serde(flatten)]
+    pub info: WindowInfo,
+    pub panes: Vec<PaneId>,
+}
+
+/// Persist a snapshot to disk. Call after any mutating manager method
+/// (add_link, add_pane, attach_pane, etc.) so the next CLI invocation
+/// sees the change. Crash-safe: writes to `state.json.tmp` then renames
+/// atomically.
+pub fn save(snapshot: &StateSnapshot) -> Result<()> {
     let path = super::super::config::paths::state_snapshot_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| crate::core::Error::Config(format!("mkdir {}: {e}", parent.display())))?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot)?;
-    // Atomic write: write to .tmp, then rename. Prevents corruption if
-    // the process is killed mid-write.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &bytes)
         .map_err(|e| crate::core::Error::Config(format!("write {}: {e}", tmp.display())))?;
@@ -54,13 +63,13 @@ pub fn save(snapshot: &[LinkSnapshot]) -> Result<()> {
 }
 
 /// Load a snapshot from disk. Returns `Ok(None)` if no snapshot file
-/// exists (first run, or after a `del_link` cleared the state).
-pub fn load() -> Result<Option<Vec<LinkSnapshot>>> {
+/// exists (first run, or after the user cleared state).
+pub fn load() -> Result<Option<StateSnapshot>> {
     let path = super::super::config::paths::state_snapshot_path();
     load_from(&path)
 }
 
-fn load_from(path: &Path) -> Result<Option<Vec<LinkSnapshot>>> {
+fn load_from(path: &Path) -> Result<Option<StateSnapshot>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -69,7 +78,7 @@ fn load_from(path: &Path) -> Result<Option<Vec<LinkSnapshot>>> {
     if bytes.is_empty() {
         return Ok(None);
     }
-    let snapshot: Vec<LinkSnapshot> = serde_json::from_slice(&bytes)
+    let snapshot: StateSnapshot = serde_json::from_slice(&bytes)
         .map_err(|e| crate::core::Error::Config(format!("parse {}: {e}", path.display())))?;
     Ok(Some(snapshot))
 }

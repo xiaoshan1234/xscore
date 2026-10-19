@@ -12,6 +12,31 @@ pub enum Error {
     #[error("pane not found: {0}")]
     PaneNotFound(PaneId),
 
+    /// v0.3.0 (ADR 0007 v2): the pane has no link attached. Data ops
+    /// (`xscore data {read,write,resize}`) fail with this error for
+    /// orphan panes. The pane keeps its buffer content — re-attach it
+    /// via `xscore pane attach --pane <pid> --link <lid>` to resume I/O.
+    #[error("pane {0} is not attached to any link (orphan — attach via `xscore pane attach --pane {0} --link <lid>`)")]
+    NotAttached(PaneId),
+
+    /// v0.3.0 (ADR 0007 v2): the window already contains this pane id.
+    /// Returned by `add_pane_to_window` when the pane is already in the
+    /// window's pane list (idempotent failure surface — explicit errors
+    /// over silent no-ops).
+    #[error("pane {pane} is already in window {window}")]
+    AlreadyInWindow { window: WindowId, pane: PaneId },
+
+    /// v0.3.0 (ADR 0007 v2): the window does NOT contain this pane id.
+    /// Returned by `remove_pane_from_window` when the pane isn't in
+    /// the window's pane list.
+    #[error("pane {pane} is not in window {window}")]
+    NotInWindow { window: WindowId, pane: PaneId },
+
+    /// v0.3.0 (ADR 0007 v2): the link does not contain this pane as
+    /// active (for `detach_pane` when pane.link_id != lid).
+    #[error("pane {pane} is not attached to link {link}")]
+    PaneNotOnLink { link: LinkId, pane: PaneId },
+
     #[error("`xscore link open` is only valid for tmux sessions, not {0}")]
     OpenOnlyForTmux(&'static str),
 

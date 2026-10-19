@@ -12,6 +12,16 @@ pub struct ShellTransport {
     child: Mutex<Option<Child>>,
 }
 
+impl std::fmt::Debug for ShellTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellTransport")
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
+}
+
 impl ShellTransport {
     pub async fn new(command: String, args: Vec<String>, cwd: Option<String>) -> Result<Self> {
         Ok(Self { command, args, cwd, child: Mutex::new(None) })

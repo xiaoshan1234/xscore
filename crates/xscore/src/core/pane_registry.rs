@@ -1,8 +1,14 @@
-// core/pane_registry.rs
+// core/pane_registry.rs (v0.3.0 — buffer-per-pane, ADR 0007 v2)
+//
+// v0.3.0: PaneRegistry tracks ONLY `PaneInfo` (the JSON-serializable
+// fields). The bridge (live I/O handle) is held in the manager's
+// `pane_bridges` map separately. This is necessary because mutating
+// `PaneInfo` would otherwise destroy the bridge (Pane has both fields
+// and `Pane::new(info)` resets the bridge).
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use super::id::{LinkId, PaneId};
+use super::id::PaneId;
 use crate::model::PaneInfo;
 
 #[derive(Default)]
@@ -13,6 +19,8 @@ pub struct PaneRegistry {
 impl PaneRegistry {
     pub fn new() -> Self { Self::default() }
 
+    /// Insert or update a pane's info (in-place — preserves any
+    /// bridge the manager has associated with this pane id).
     pub async fn insert(&self, info: PaneInfo) {
         self.inner.write().await.insert(info.id, info);
     }
@@ -25,17 +33,11 @@ impl PaneRegistry {
         self.inner.write().await.remove(&id)
     }
 
-    pub async fn list_for_link(&self, _link_id: LinkId) -> Vec<PaneInfo> {
-        // Note: after the task-14 rename `PaneInfo.link_id` → `window_id`,
-        // filtering by parent link requires a join through WindowRegistry.
-        // That wiring lands in task-14's manager.rs integration glue; for
-        // this slice we return all panes so the registry still compiles.
-        self.inner.read().await.values().cloned().collect()
-    }
-
     pub async fn list_all(&self) -> Vec<PaneInfo> {
         self.inner.read().await.values().cloned().collect()
     }
 }
 
-pub type ArcPaneRegistry = Arc<PaneRegistry>;
+// keep Arc import live for downstream consumers
+#[allow(dead_code)]
+fn _arc<T>(_x: Arc<T>) {}

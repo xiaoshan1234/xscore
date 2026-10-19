@@ -2,23 +2,27 @@ use crate::core::Result;
 use crate::transport::Transport;
 use async_trait::async_trait;
 
+/// v0.3.0 (ADR 0007 v2): the Sink trait is the tmux-orchestration
+/// layer for tmux-backed links. It is OPTIONAL — raw links use
+/// `RawSink` (a no-op marker; tmux is bypassed entirely).
+///
+/// Windows are now independent entities (no link-owned windows), so
+/// `new_window` / `kill_window` are REMOVED. `new_pane` is the only
+/// way a sink allocates runtime resources, and it always splits
+/// inside the link's session (which has a single tmux window by
+/// default; v0.3.0 doesn't track per-window pane placement in tmux).
 #[async_trait]
 pub trait Sink: Send + Sync {
     fn kind(&self) -> &'static str;
     /// Wire this sink to a transport. Called once per link lifetime.
+    /// For tmux-backed links: opens the tmux session (which opens the
+    /// transport first if needed). For raw links: no-op.
     async fn attach(&self, _transport: &dyn Transport) -> Result<()>;
 
-    /// NEW (ADR 0006): create a new tmux window inside the sink's session.
-    /// Returns the WindowInfo; the sink retains the address.
-    async fn new_window(&self, name: &str) -> Result<crate::model::WindowInfo>;
-
-    /// NEW (ADR 0006): kill a window by its tmux-assigned index. Panes
-    /// inside die with it.
-    async fn kill_window(&self, tmux_window_index: u32) -> Result<()>;
-
-    /// ADR 0006: pane is a tmux split inside a window (was: a tmux window).
-    /// Takes a window index; returns the tmux pane_id of the new split.
-    async fn new_pane(&self, tmux_window_index: u32) -> Result<String>;
+    /// Create a new tmux split inside the link's session. Returns the
+    /// tmux pane handle (e.g. "%7"). Each call allocates a NEW split;
+    /// a tmux-backed link can host N simultaneous panes (Q1 corollary).
+    async fn new_pane(&self) -> Result<String>;
 
     async fn close_pane(&self, pane_handle: &str) -> Result<()>;
     async fn list_panes(&self) -> Result<Vec<String>>;
@@ -43,13 +47,7 @@ mod tests {
     impl Sink for Noop {
         fn kind(&self) -> &'static str { "noop" }
         async fn attach(&self, _: &dyn Transport) -> Result<()> { Ok(()) }
-        async fn new_window(&self, _: &str) -> Result<crate::model::WindowInfo> {
-            // Noop doesn't allocate WindowIds. The test never calls this —
-            // keeping the signature satisfied so the trait stays object-safe.
-            unreachable!("noop_sink::new_window not used in test")
-        }
-        async fn kill_window(&self, _: u32) -> Result<()> { Ok(()) }
-        async fn new_pane(&self, _: u32) -> Result<String> { Ok("pane-stub".into()) }
+        async fn new_pane(&self) -> Result<String> { Ok("pane-stub".into()) }
         async fn close_pane(&self, _: &str) -> Result<()> { Ok(()) }
         async fn list_panes(&self) -> Result<Vec<String>> { Ok(vec![]) }
         async fn snapshot(&self, _: &str, _: &mut [u8]) -> Result<usize> { Ok(0) }
@@ -61,7 +59,7 @@ mod tests {
     #[tokio::test]
     async fn noop_sink_creates_and_closes_pane() {
         let s = Noop;
-        let p = s.new_pane(0).await.unwrap();
+        let p = s.new_pane().await.unwrap();
         assert_eq!(p, "pane-stub");
         s.close_pane(&p).await.unwrap();
     }

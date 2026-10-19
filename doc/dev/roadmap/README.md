@@ -4,6 +4,8 @@ This directory holds the implementation plan for the CLI-first slice of xscore �
 workspace that manages SSH / shell / serial sessions behind a single `Link × Pane`
 abstraction.
 
+> **Note (2026-10-20):** The 3-tier `Link × Window × Pane` model is REPLACED by a flat 3-entity decoupled model — Link, Pane, and Window are independent entities with Option<> associations on Pane (v0.3.0 / ADR 0007 v2). Each entity is orphan-creatable. Pane switches links freely. Direct links have 1-active-pane at a time (Q1); tmux-backed links have multi-pane (Q1 corollary). See [ADR 0007](../adr/0007-raw-default-tmux-opt-in.md) for the design pivot.
+
 The plan is split across files. **Each task lives in its own file so edits stay scoped**
 — when revising a task, read only that file.
 

@@ -2,7 +2,7 @@ use crate::core::{LinkAddress, Result};
 use async_trait::async_trait;
 
 #[async_trait]
-pub trait Transport: Send + Sync {
+pub trait Transport: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> &'static str;
     fn address(&self) -> LinkAddress;
     async fn open(&mut self) -> Result<()>;
@@ -45,6 +45,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
 
+    #[derive(Debug)]
     struct Echo;
     #[async_trait]
     impl Transport for Echo {

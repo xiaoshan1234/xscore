@@ -45,6 +45,18 @@ pub struct SshTransport {
     channel: Mutex<Option<Channel<client::Msg>>>,
 }
 
+impl std::fmt::Debug for SshTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshTransport")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("identity", &self.identity)
+            .field("proxy", &self.proxy)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SshTransport {
     pub async fn connect(
         host: String,

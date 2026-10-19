@@ -1,33 +1,38 @@
 use crate::core::{Error, LinkId, Result};
-use crate::model::WindowInfo;
 use crate::transport::Transport;
 use crate::util::tmux_arg_socket;
 use async_trait::async_trait;
-use tokio::process::Command;
+use tokio::process::Command as TokioCommand;
 
+#[derive(Debug)]
 pub struct TmuxSink {
-    pub link_id: LinkId,             // used to populate WindowInfo.link_id on new_window
+    pub link_id: LinkId,             // bookkeeping (used in error messages + hydrate log)
     pub mode: String,                // "local" | "remote" (post-resolution)
-    pub session_name: String,        // tmux session name == the link key (session lives in shared -L xscore server)
+    pub session_name: String,        // tmux session name == the link key
 }
 
 impl TmuxSink {
-    pub async fn create(link_id: LinkId, mode: &str, session_name: &str, transport: &mut dyn Transport) -> Result<Self> {
+    pub async fn create_link(
+        link_id: LinkId,
+        mode: &str,
+        session_name: &str,
+        transport: &mut dyn Transport,
+    ) -> Result<Self> {
         transport.open().await?;
         let mut args = tmux_arg_socket();
         args.extend([
             "new-session".into(), "-d".into(), "-s".into(), session_name.into(),
             "-x".into(), "120".into(), "-y".into(), "30".into(),
         ]);
-        let status = Command::new("tmux").args(&args).status().await?;
+        let status = TokioCommand::new("tmux").args(&args).status().await?;
         if !status.success() {
             return Err(Error::Sink(format!("tmux new-session: exit {status}")));
         }
         Ok(Self { link_id, mode: mode.into(), session_name: session_name.into() })
     }
 
-    fn tmux(&self) -> Command {
-        let mut c = Command::new("tmux");
+    fn tmux(&self) -> TokioCommand {
+        let mut c = TokioCommand::new("tmux");
         c.args(tmux_arg_socket());
         c
     }
@@ -35,15 +40,9 @@ impl TmuxSink {
     /// Construct a `TmuxSink` that wraps an EXISTING tmux session
     /// (used during state hydration — task-15). The session is NOT
     /// created here; the caller must have already verified it exists
-    /// via `tmux has-session -t <session>`. The returned sink's
-    /// `new_window` / `kill_window` / `new_pane` / `close` operate on
-    /// the existing session directly.
+    /// via `tmux has-session -t <session>`.
     pub fn adopt(link_id: LinkId, mode: &str, session_name: &str) -> Self {
         Self { link_id, mode: mode.into(), session_name: session_name.into() }
-    }
-
-    fn session_window_addr(&self, idx: u32) -> String {
-        format!("{}:{}", self.session_name, idx)
     }
 }
 
@@ -57,69 +56,17 @@ impl super::Sink for TmuxSink {
         Ok(())
     }
 
-    async fn new_window(&self, name: &str) -> Result<WindowInfo> {
-        // Use `#{window_index}` (not `#{window_id}`) — `window_id` is a
-        // STABLE unique ID assigned at creation (so the 2nd window ever
-        // created in a tmux server is `@2`, not `@1`); using it as an
-        // index in `tmux split-window -t <session>:<idx>` fails because
-        // the index is the window's 0-based position, not its ID. The
-        // fix is to query the index directly. Caveat: indices shift when
-        // windows are removed; for our use case (kill_window by index),
-        // we operate on the window we just created, so the index is
-        // stable enough.
-        let out = self.tmux()
-            .args(["new-window", "-t", &self.session_name, "-n", name,
-                   "-P", "-F", "#{window_index}"])
-            .output().await?;
-        if !out.status.success() {
-            return Err(Error::Sink(format!("tmux new-window: {:?}", out.status)));
-        }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let tmux_window_index: u32 = s.trim_start_matches('@').parse()
-            .map_err(|e| Error::Sink(format!("parse window_id {s:?}: {e}")))?;
-        Ok(WindowInfo {
-            id: crate::core::WindowId::new(),
-            link_id: self.link_id,
-            name: name.to_string(),
-            created_at: chrono::Utc::now(),
-            tmux_window_index,
-        })
-    }
-
-    async fn kill_window(&self, tmux_window_index: u32) -> Result<()> {
-        let addr = self.session_window_addr(tmux_window_index);
-        let status = self.tmux()
-            .args(["kill-window", "-t", &addr])
-            .status().await?;
-        if !status.success() {
-            return Err(Error::Sink(format!("kill-window exit {status}")));
-        }
-        Ok(())
-    }
-
-    async fn new_pane(&self, tmux_window_index: u32) -> Result<String> {
-        // Pane = a tmux split inside the named window.
+    async fn new_pane(&self) -> Result<String> {
+        // v0.3.0: panes always go into the link's single tmux window (window_idx 0).
+        // The sink owns the tmux session; the link's tmux-session-window-count is 1.
         //
-        // Three-step discovery for robustness against a tmux server
-        // internal race: `split-window` returns "success" to the
-        // client before the server's internal state fully commits the
-        // new pane. We've observed the new pane missing from
-        // `list-panes` (and from subsequent `send-keys` /
-        // `capture-pane` calls) when the second call is made too
-        // quickly after the first.
-        //
-        // 1. `tmux split-window -P -F "#{pane_id}"` — ask tmux to print
-        //    the new pane's id. Output is informational; we don't
-        //    trust it.
-        // 2. Sleep 50ms (heuristic; tmux server async race window).
-        // 3. `tmux list-panes` — query the actual pane list. The
-        //    newly-created pane is the one with the highest
-        //    pane_index. We use that as the authoritative id.
-        //
-        // Fallback: if list-panes shows nothing for the window, surface
-        // a clear error instead of saving a phantom pane_id that data
-        // ops would later fail to find.
-        let addr = self.session_window_addr(tmux_window_index);
+        // Three-step discovery for robustness against tmux's internal race:
+        //   1. `tmux split-window -P -F "#{pane_id}"` — ask tmux to print the new
+        //      pane id. Output is informational; we don't trust it.
+        //   2. Sleep 50ms (heuristic; tmux server async race window).
+        //   3. `tmux list-panes` — query the actual pane list. The newly-created
+        //      pane is the one with the highest pane_index.
+        let addr = format!("{}:0", self.session_name);
         let split_out = self.tmux()
             .args(["split-window", "-t", &addr, "-P", "-F", "#{pane_id}"])
             .output().await?;
@@ -132,14 +79,8 @@ impl super::Sink for TmuxSink {
             )));
         }
 
-        // tmux server's split-window completion notification can
-        // race the server's internal state-commit; empirically a
-        // brief pause makes the subsequent list-panes see the new
-        // pane consistently. 50ms is the lower bound observed; bump
-        // if flake returns.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // List the window's panes; pick the highest pane_index.
         let list_out = self.tmux()
             .args(["list-panes", "-t", &addr, "-F", "#{pane_id}\t#{pane_index}"])
             .output().await?;
