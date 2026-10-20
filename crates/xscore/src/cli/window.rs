@@ -1,5 +1,5 @@
-// cli/window.rs (v0.3.0 — Window is a pure UI layout container, no link required)
-use crate::core::{Error, SessionManager, WindowId};
+// cli/window.rs (v0.4.0 — windows may be virtual or mirror a tmux window)
+use crate::core::{Error, LinkId, SessionManager, WindowId};
 use crate::core::window::Window;
 use crate::model::WindowLayout;
 use clap::{Args, Subcommand};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum WindowCmd {
-    /// Create a new window (orphan — no link required in v0.3.0).
+    /// Create a window: virtual by default, or a real tmux window with --link.
     Add(WindowAddArgs),
     /// List all windows.
     List,
@@ -38,6 +38,11 @@ pub struct WindowAddArgs {
     /// Total window height in cells.
     #[arg(long, default_value_t = 30)]
     pub rows: u16,
+    /// Create a real tmux window inside this tmux link. With --link the
+    /// tmux-reported `@N` handle, layout and geometry WIN over
+    /// --layout/--cols/--rows.
+    #[arg(long, value_name = "LINK_ID")]
+    pub link: Option<String>,
 }
 
 #[derive(Args)]
@@ -93,13 +98,20 @@ fn parse_layout(s: &str) -> anyhow::Result<WindowLayout> {
 
 async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()> {
     let layout = parse_layout(&args.layout)?;
-    let wid = mgr.add_window(args.name, layout, args.cols, args.rows).await?;
+    let link = match args.link.as_deref() {
+        Some(s) => Some(LinkId::parse(s)?),
+        None => None,
+    };
+    let wid = mgr.add_window(args.name, layout, args.cols, args.rows, link).await?;
     println!("window: {wid}");
     Ok(())
 }
 
 async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
-    println!("{:<36}  {:<24}  {:<10}  {:<5}  {:<5}", "WINDOW ID", "NAME", "LAYOUT", "COLS", "ROWS");
+    println!(
+        "{:<36}  {:<24}  {:<10}  {:<5}  {:<5}  {:<8}",
+        "WINDOW ID", "NAME", "LAYOUT", "COLS", "ROWS", "TMUX"
+    );
     let mut all: Vec<Arc<Window>> = mgr.windows.list_all().await;
     // Stable order by id (uuid v7 is chronological).
     all.sort_by_key(|p| p.info.id.to_string());
@@ -111,9 +123,10 @@ async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
             WindowLayout::SplitVertical => "split_v".to_string(),
             WindowLayout::Grid { cols, rows } => format!("grid-{cols}x{rows}"),
         };
+        let tmux = w.info.tmux_window_handle.clone().unwrap_or_else(|| "-".into());
         println!(
-            "{:<36}  {:<24}  {:<10}  {:<5}  {:<5}",
-            w.info.id, w.info.name, layout, w.info.cols, w.info.rows
+            "{:<36}  {:<24}  {:<10}  {:<5}  {:<5}  {:<8}",
+            w.info.id, w.info.name, layout, w.info.cols, w.info.rows, tmux
         );
     }
     Ok(())

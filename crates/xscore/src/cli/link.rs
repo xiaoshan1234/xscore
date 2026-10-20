@@ -1,12 +1,17 @@
-// cli/link.rs (v0.3.0 — `link add` creates only the link, no auto window/pane)
-use crate::core::{Error, LinkId, SessionManager};
+// cli/link.rs (v0.4.0 — `link add` auto-creates window/pane; tmux adoption)
+use crate::core::{Error, LinkId, PaneId, SessionManager};
 use crate::url;
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum LinkCmd {
-    /// Create a new link. Does NOT auto-create a window or pane (v0.3.0).
+    /// Create a link plus its first window/pane.
+    ///
+    /// * default: a virtual window + a pane with a ring buffer
+    /// * `?tmux=on`: adopt the tmux session's window/pane (tmux is the
+    ///   source of truth for `@N`/`%N` and geometry)
+    /// * `--pane <pid>`: bind that existing pane instead (direct links only)
     Add(LinkAddArgs),
 
     /// Attach to an existing tmux session by URL or `-c CONFIG` (tmux only)
@@ -24,6 +29,13 @@ pub enum LinkCmd {
 
     /// List all in-memory links
     List,
+
+    /// Compare xscore's registry against tmux's real structure (`@N`/`%N`).
+    /// Read-only unless `--heal`; externally created panes are only reported.
+    Sync {
+        #[arg(long)] id: String,
+        #[arg(long)] heal: bool,
+    },
 
     /// Persistent ConnectSpec templates
     Config {
@@ -45,6 +57,12 @@ pub struct LinkAddArgs {
     /// Errors with `LinkIdExists` if the id is already in use.
     #[arg(long, value_name = "UUID")]
     pub id: Option<String>,
+
+    /// Bind an EXISTING pane to the new link instead of creating one.
+    /// Not allowed for tmux links (tmux owns its panes) and not allowed
+    /// for a pane that is already attached (detach it first).
+    #[arg(long, value_name = "PANE_ID")]
+    pub pane: Option<String>,
 }
 
 #[derive(Args)]
@@ -70,6 +88,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
         LinkCmd::Del { id } => del(mgr, &id).await,
         LinkCmd::Show { id } => show(mgr, &id).await,
         LinkCmd::List => list(mgr).await,
+        LinkCmd::Sync { id, heal } => sync(mgr, &id, heal).await,
         LinkCmd::Config { cmd } => config_cmd(cmd).await,
     }
 }
@@ -77,12 +96,50 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
     let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let supplied_id = match args.id.as_deref() {
-        Some(s) => Some(crate::core::LinkId::parse(s)?),
+        Some(s) => Some(LinkId::parse(s)?),
         None => None,
     };
-    let link_id = mgr.add_link(spec, address, supplied_id).await?;
-    // v0.3.0: ONLY `link:` is printed. No `window:` or `pane:` lines.
-    println!("link:  {link_id}");
+    let pane = match args.pane.as_deref() {
+        Some(p) => Some(PaneId::parse(p)?),
+        None => None,
+    };
+    let result = mgr.add_link(spec, address, supplied_id, pane).await?;
+    println!("link:  {}", result.link_id);
+    if let Some(wid) = result.window_id {
+        println!("window: {wid}");
+    }
+    println!("pane:  {}", result.pane_id);
+    Ok(())
+}
+
+async fn sync(mgr: Arc<SessionManager>, id: &str, heal: bool) -> anyhow::Result<()> {
+    let lid = LinkId::parse(id)?;
+    let report = mgr.sync_link(lid, heal).await?;
+    println!("link: {}", lid);
+    if report.is_clean() {
+        println!("in sync: registry matches tmux");
+        return Ok(());
+    }
+    for h in &report.missing_windows {
+        println!("drift: window {h} exists in tmux but not in xscore");
+    }
+    for h in &report.stale_windows {
+        println!("drift: window {h} in xscore is gone from tmux");
+    }
+    for h in &report.missing_panes {
+        println!("drift: pane {h} exists in tmux but not in xscore (not adopted)");
+    }
+    for h in &report.stale_panes {
+        println!("drift: pane {h} in xscore is gone from tmux");
+    }
+    if heal {
+        println!(
+            "healed: {} row(s) corrected, {} removed",
+            report.healed, report.removed
+        );
+    } else {
+        println!("run `xscore link sync --id {lid} --heal` to apply");
+    }
     Ok(())
 }
 

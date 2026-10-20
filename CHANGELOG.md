@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
+tmux adoption, real pane buffers, and `link add` that hands you a usable
+pane. See [ADR 0008](doc/dev/adr/0008-tmux-adoption.md).
+
+### BREAKING — `link add` now creates a window and a pane
+
+`xscore link add <url>` returns three ids: link, window, pane. The link
+is immediately usable (`data write/read` work without any further
+setup). For `?tmux=on` links, the window/pane are **adopted** from the
+tmux session rather than guessed.
+
+- `xscore link add <url>` → virtual window (120×30) + pane (80×24) with
+  a ring buffer.
+- `xscore link add '<url>?tmux=on'` → the session's window (`@N`) and
+  pane (`%N`), with tmux's geometry.
+- `xscore link add <url> --pane <pid>` → bind an existing pane; no
+  window is created. Errors with `PaneAlreadyAttached` if that pane is
+  already attached (never steals), and with `TmuxLinkCannotBindPane`
+  for tmux links (tmux creates its own panes).
+
+### BREAKING — state schema v2
+
+`state.json` now carries `"schema_version": 2`. Loading anything else is
+a hard error:
+
+```
+state.json schema_version=0, expected 2; delete ~/.config/xscore/state/state.json to reset
+```
+
+Delete `~/.config/xscore/state/state.json` when upgrading from v0.3.0.
+There is no migration: the v0.3.0 rows lack the tmux identity fields.
+
+### Added
+
+- `link sync --id <lid> [--heal]` — diff xscore's registry against
+  tmux's real windows/panes (`@N`/`%N`), and optionally heal registry
+  geometry/rows. Panes created outside xscore are reported, never
+  adopted.
+- `link add --pane <pid>` — bind an existing pane to a new direct link.
+- `window add --link <lid>` — create a real tmux window (adopting `@N`).
+- `pane add --window <wid>` — create a tmux split inside that window,
+  with tmux's geometry.
+- `PaneInfo.sink_handle: Option<String>` (`%N`) and
+  `WindowInfo.tmux_window_handle: Option<String>` (`@N`) — the identity
+  anchors that make restart-time reconciliation possible.
+- `Sink::{list_windows, list_panes, new_window, kill_window,
+  split_pane}` and `TmuxWindowSnapshot`/`TmuxPaneSnapshot` — structure
+  is read back from tmux, never predicted.
+- `backends/ring_buffer.rs` — `RingBuffer` (64 KiB) with non-destructive
+  snapshot reads.
+- `link sync` for tmux links; tmux bridges are rebuilt on hydration from
+  the stored `%N` handle.
+- New errors: `TmuxLinkCannotBindPane`, `PaneAlreadyAttached`,
+  `TmuxPaneNotDetachable`.
+- Unit tests for the ring buffer, the schema gate and tmux layout
+  parsing; CLI/data tests for all of the above (62 tests total).
+
+### Changed
+
+- `detach_pane` on a tmux pane is now an error (`TmuxPaneNotDetachable`);
+  use `pane del` (which kills the real tmux pane).
+- `link del` on a tmux link removes the adopted windows and panes from
+  the registry along with the session; on a direct link it orphans the
+  panes and keeps their buffers, closing the transport exactly once.
+- `TmuxSink::split_pane` takes an explicit window handle — there is no
+  implicit window 0.
+- `Window.layout` for tmux windows is derived from tmux's layout string;
+  `--layout/--cols/--rows` are ignored when `--link` is given (tmux
+  wins).
+- `pane add --window` requires the window to exist; tmux panes always
+  get a `link_id` from the link that owns the window.
+
+### Fixed
+
+- **P0-a:** `detach_pane` no longer closes the link's transport.
+  `DirectBridge::close()` now stops only its own reader task, so
+  detach → re-attach works and other panes keep their I/O.
+- **P0-b:** `DirectBridge` has a real buffer. A background task drains
+  the transport into a per-pane `RingBuffer`; `data read` serves a
+  snapshot of it (tmux `capture-pane` semantics) instead of a one-shot
+  pass-through. The buffer survives detach and re-attach.
+- **P0-c / P0-d:** `PaneInfo.sink_handle` / `WindowInfo.tmux_window_handle`
+  record tmux identity, so `PaneId`/`WindowId` map back to `%N`/`@N`
+  across restarts.
+- **P0-e:** `state.json` without a matching `schema_version` is an
+  explicit error instead of a silently empty registry.
+- The reader task polls `transport.read()` under a short timeout so a
+  read-blocking transport (which serializes read/write behind one lock,
+  as `ShellTransport` does) cannot starve `data write`.
+
 ## [0.3.0] - 2026-10-20
 
 ### BREAKING — 3-entity decoupled model (ADR 0007 v2)

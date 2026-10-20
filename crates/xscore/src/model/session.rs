@@ -115,6 +115,13 @@ pub struct WindowInfo {
     /// dimensions (the pane reports its own geometry separately).
     pub cols: u16,
     pub rows: u16,
+    /// v0.4.0 (ADR 0008): the tmux window handle, e.g. `"@0"`. `None`
+    /// for virtual (purely xscore-side) windows. This is the identity
+    /// anchor that lets a WindowId be mapped back to tmux after a
+    /// restart — never use the tmux window *index* for identity (it
+    /// shifts when windows are added or removed).
+    #[serde(default)]
+    pub tmux_window_handle: Option<String>,
 }
 
 /// Window layout shape (ADR 0007 v2). The pane geometry in `PaneInfo`
@@ -176,4 +183,10 @@ pub struct PaneInfo {
     /// `xscore pane add-to-window --pane <pid> --window <wid>`; cleared
     /// by `xscore pane remove-from-window`.
     pub window_id: Option<WindowId>,
+    /// v0.4.0 (ADR 0008): the tmux pane handle, e.g. `"%3"`. `None` for
+    /// direct panes (buffered by `DirectBridge`'s ring buffer). When
+    /// `Some`, this pane is OWNED by tmux: it cannot be detached, and
+    /// it dies with the tmux session.
+    #[serde(default)]
+    pub sink_handle: Option<String>,
 }

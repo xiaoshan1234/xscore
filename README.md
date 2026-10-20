@@ -1,14 +1,14 @@
 # xscore
 
-Rust session manager for SSH / shell / serial, modeled as three **independent entities** — Link, Pane, Window — wired together by Option<> associations on Pane (ADR 0007 v2, v0.3.0).
+Rust session manager for SSH / shell / serial, modeled as three **independent entities** — Link, Pane, Window — wired together by Option<> associations on Pane (ADR 0007 v2, v0.4.0).
 
 - **Link** = one physical connection (SSH channel, serial port, local child, or one tmux session inside the shared `tmux -L xscore` server).
-- **Pane** = one working buffer (`PaneBridge`) + UI info (cols/rows/x/y + which link + which window). Pane is the unit of `data read/write/resize`.
-- **Window** = one pure UI layout container (layout + pane list + total cols/rows). Independent of links.
+- **Pane** = one working buffer (`PaneBridge` + ring buffer) + UI info (cols/rows/x/y + which link + which window). Pane is the unit of `data read/write/resize`.
+- **Window** = one UI layout container (layout + pane list + total cols/rows), either virtual or a mirror of a real tmux window.
 
-> **Default behavior (post v0.2.0):** A fresh `xscore link add <url>` runs the transport directly — no tmux server in the loop. To get the full Link × Window × Pane tree plus data ops, opt in to tmux with `?tmux=on` (or `?tmux=auto|local|remote`) in the URL — see [Sink options](#sink-options-tmux-opt-in).
+> **Default behavior:** A fresh `xscore link add <url>` runs the transport directly — no tmux server in the loop. It also gives you a window and a pane with a ring buffer, so `data write/read` work immediately. Opt in to tmux with `?tmux=on` (or `?tmux=auto|local|remote`) to get real tmux windows and panes — see [Sink options](#sink-options-tmux-opt-in).
 
-> **v0.3.0 redesign:** `xscore link add` creates ONLY the link — no auto window/pane. Panes and windows are independent entities; you wire them together via `pane attach`, `pane add-to-window`, etc. See [5-minute demo](#5-minute-demo) and [ADR 0007](doc/dev/adr/0007-raw-default-tmux-opt-in.md).
+> **v0.4.0:** `xscore link add` returns **three ids** (link, window, pane). tmux links *adopt* the session's `@N` window and `%N` pane instead of guessing; `link add --pane <pid>` binds an existing pane; `link sync` diffs xscore against tmux. See [5-minute demo](#5-minute-demo) and [ADR 0008](doc/dev/adr/0008-tmux-adoption.md).
 
 This is a **Rust port of the xst/script patterns** (without the xst dependency): a single CLI that orchestrates a `~/.config/xscore/` tree for persistent state. Tmux is one option, not the default.
 
@@ -18,58 +18,66 @@ This is a **Rust port of the xst/script patterns** (without the xst dependency):
 # 1. Build (one-time). Rust 1.95+, tokio runtime.
 cargo build --release
 
-# 2. Add a link. By default this is a Raw link: the transport runs
-#    directly with no tmux server, so only `link:` is printed.
-#    v0.3.0: NO auto window/pane. The link is standalone.
+# 2. Add a link. By default this is a direct (raw) link: the transport
+#    runs with no tmux server, and you get a virtual window + a pane
+#    with a real ring buffer. Three ids are printed.
 ./target/release/xscore link add shell:///bin/bash
 # stdout:
-#   link:  01928e0a-7d10-7000-8000-000000000001
+#   link:   01928e0a-7d10-7000-8000-000000000001
+#   window: 01928e0a-7d10-7000-8000-000000000002
+#   pane:   01928e0a-7d10-7000-8000-000000000003
 
-# 2b. (Optional) opt in to the full Link × Window × Pane tree by
-#     using a tmux-backed link — still only `link:` is printed
-#     in v0.3.0 (no auto window/pane).
-./target/release/xscore link add 'shell:///bin/bash?tmux=on'
-# stdout:
-#   link:  01928e0a-7d10-7000-8000-000000000002
-
-# 3. Add an orphan pane (no link, no window).
-./target/release/xscore pane add
-# stdout:
-#   pane:  01928e0a-7d10-7000-8000-000000000003
-
-# 4. Attach the pane to the link — creates the bridge
-#    (DirectBridge for raw links, TmuxBridge for tmux links).
-#    v0.3.0 Q1: for raw links, the previously-active pane (if any)
-#    is auto-detached (its link_id becomes null; buffer preserved).
-./target/release/xscore pane attach --pane <pid> --link <lid>
-# stdout:
-#   attached: 01928e0a-...
-
-# 5. Data I/O via the bridge. Errors with NotAttached(pid) for
-#    orphan panes.
+# 3. Write and read through the pane's buffer (no extra setup).
 echo 'echo hi from xscore' | ./target/release/xscore data write --pane <pid>
 ./target/release/xscore data read --pane <pid>
+# hi from xscore
 
-# 6. Add a window (orphan — no link required).
-./target/release/xscore window add --cols 120 --rows 30
+# 4. tmux link: the window and pane are ADOPTED from tmux, so
+#    `sink_handle` is a real %N and `tmux_window_handle` a real @N.
+./target/release/xscore link add 'shell:///bin/bash?tmux=on'
 # stdout:
-#   window: 01928e0a-...
+#   link:   01928e0a-...-0004
+#   window: 01928e0a-...-0005
+#   pane:   01928e0a-...-0006
+./target/release/xscore pane show --id <tmux-pid>    # "sink_handle": "%0"
+./target/release/xscore window show --id <tmux-wid>  # "tmux_window_handle": "@0"
 
-# 7. Put the pane in the window.
-./target/release/xscore pane add-to-window --pane <pid> --window <wid>
+# 5. A second window inside that same tmux session, then a pane
+#    (a real tmux split) inside that window.
+./target/release/xscore window add --name logs --link <tmux-lid>
+./target/release/xscore pane add --window <tmux-wid>
+# stdout:
+#   pane:  01928e0a-...-0007
+
+# 6. Bind a pane you created earlier instead of auto-creating one.
+#    (Direct links only; tmux links must let tmux create their panes.)
+./target/release/xscore pane add            # hollow orphan pane
+./target/release/xscore link add shell:///bin/cat --pane <pid>
+# stdout:
+#   link:  01928e0a-...-0008
+#   pane:  01928e0a-...-0009
+
+# 7. Is tmux still what xscore thinks it is? (read-only, then heal)
+./target/release/xscore link sync --id <tmux-lid>
+# in sync: registry matches tmux
+# ...or, after someone touched tmux directly:
+# drift: pane %1 exists in tmux but not in xscore (not adopted)
+./target/release/xscore link sync --id <tmux-lid> --heal
+# healed: 0 row(s) corrected, 1 removed
 
 # 8. Verify state (persisted to ~/.config/xscore/state/state.json
-#    automatically after every mutating call).
+#    after every mutating call).
 ./target/release/xscore link list
-./target/release/xscore pane show --id <pid>    # shows link_id, window_id, geometry
-./target/release/xscore window list             # shows panes in each window
+./target/release/xscore window list             # includes the TMUX column
 ./target/release/xscore pane list --window <wid>
+./target/release/xscore pane show --id <pid>    # link_id, window_id, sink_handle, geometry
 
-# 9. Detach the pane (buffer preserved; re-attach later to the
-#    same or different link).
-./target/release/xscore pane detach --pane <pid>
+# 9. Detach a direct pane (its buffer survives; re-attach resumes it).
+./target/release/xscore pane detach --pane <direct-pid>
+# detaching a tmux pane is refused: it is tmux's — use `pane del`.
 
-# 10. Clean up.
+# 10. Clean up. `link del` orphans direct panes but takes tmux panes
+#     down with the session.
 ./target/release/xscore pane del --id <pid>
 ./target/release/xscore window del --id <wid>
 ./target/release/xscore link del --id <lid>
@@ -87,13 +95,16 @@ Link ────owns───> Transport (Arc<dyn>) + Sink (Box<dyn>)
        ──active_pane──> Mutex<Option<PaneId>>       (Q1 cache)
 
 Pane ────bridge───> Arc<dyn PaneBridge>             (runtime, NOT persisted)
-        info: { cols, rows, x, y,                    (Q2 geometry)
+      ──buffer───> Arc<Mutex<RingBuffer>>           (direct panes; survives detach)
+        info: { cols, rows, x, y,                    (Q2 geometry; tmux's values)
                 link_id: Option<LinkId>,             (None = orphan)
-                window_id: Option<WindowId> }         (None = orphan)
+                window_id: Option<WindowId>,         (None = orphan)
+                sink_handle: Option<String> }        ("%N" — None for direct panes)
 
 Window ──panes───> Mutex<Vec<PaneId>>                (UI parent)
         info: { layout: WindowLayout,
-                cols, rows }                          (total window size)
+                cols, rows,                          (total window size)
+                tmux_window_handle: Option<String> } ("@N" — None for virtual windows)
 ```
 
 Panes can move freely:
@@ -112,8 +123,28 @@ previously-active pane is auto-detached (its `info.link_id` becomes
 (2026-10-19).
 
 For **tmux-backed links** (`?tmux=on|auto|local|remote`), multiple
-panes may attach simultaneously — each `attach_pane` creates a new
-tmux split-window in the link's session.
+panes may attach simultaneously — each `pane add --window <wid>` (or
+`pane attach`) creates a new tmux split inside that window, and the new
+pane takes tmux's `%N` handle and geometry.
+
+## tmux adoption (`@N` / `%N`)
+
+tmux is the source of truth for anything it created (ADR 0008):
+
+- A tmux link's window/pane come from `tmux list-windows` / `list-panes`
+  at adoption time. xscore stores the **handles** (`@0`, `%3`) as the
+  identity anchors; the numeric index is display data only.
+- `PaneInfo.cols/rows/x/y` and `WindowInfo.cols/rows` are copies of what
+  tmux reported. `WindowInfo.layout` is parsed from tmux's layout string
+  (`even-horizontal` → `split_h`, `even-vertical` → `split_v`, `tiled` →
+  `grid`, otherwise `single`).
+- `link sync --id <lid>` compares the registry against tmux and reports
+  drift; `--heal` corrects registry rows (geometry, dropped rows) from
+  tmux. Panes that tmux has but xscore never adopted are reported, never
+  adopted behind your back.
+- A tmux pane cannot be detached (`TmuxPaneNotDetachable`) — it belongs
+  to tmux. `pane del` kills the real tmux pane; `link del` kills the
+  session and every pane/window adopted from it.
 
 ## Q2: Pane geometry
 
@@ -142,32 +173,33 @@ cargo build --release
 ## Commands
 
 ```
-xscore link add <url?> [-c CONFIG] [--id <uuid>]      # create new (url OR -c CONFIG required)
-xscore link del --id <link-id>                       # full teardown + cascades pane detach
+xscore link add <url?> [-c CONFIG] [--id <uuid>] [--pane <pid>]   # link + window + pane
+xscore link del --id <link-id>                       # full teardown (tmux: kills session)
 xscore link open <url?> [-c CONFIG]                  # attach existing tmux session (tmux only)
 xscore link close --id <link-id>                     # tmux-detach only (session keeps running)
 xscore link show --id <link-id>
 xscore link list
+xscore link sync --id <link-id> [--heal]             # diff registry vs tmux (@N / %N)
 
 xscore link config add <name> <url>                   # save a ConnectSpec template
 xscore link config remove <name>
 xscore link config show <name>
 xscore link config list
 
-xscore window add [--name N] [--layout <kind>] [--cols C --rows R]
+xscore window add [--name N] [--layout <kind>] [--cols C --rows R] [--link <lid>]
 xscore window del --id <wid>
-xscore window list
-xscore window show --id <wid>
+xscore window list                                   # TMUX column shows @N or "-"
+xscore window show --id <wid>                        # includes tmux_window_handle
 xscore window set-layout --id <wid> --layout <kind>
 xscore window add-pane --window <wid> --pane <pid>
 xscore window remove-pane --window <wid> --pane <pid>
 
-xscore pane add [--name N] [--cols C --rows R] [--x X --y Y]
-xscore pane del --id <pid>
-xscore pane show --id <pid>
+xscore pane add [--name N] [--cols C --rows R] [--x X --y Y] [--window <wid>]
+xscore pane del --id <pid>                           # also kills the tmux pane, if any
+xscore pane show --id <pid>                          # includes sink_handle
 xscore pane list [--window <wid>] [--link <lid>]
-xscore pane attach --pane <pid> --link <lid>          # Q1: auto-detach for raw links
-xscore pane detach --pane <pid>
+xscore pane attach --pane <pid> --link <lid>         # Q1: auto-detach for raw links
+xscore pane detach --pane <pid>                      # direct panes only; buffer kept
 xscore pane resize --pane <pid> --cols C --rows R
 xscore pane move --pane <pid> --x X --y Y             # geometry only (no bridge)
 xscore pane add-to-window --pane <pid> --window <wid>
@@ -177,7 +209,7 @@ xscore data read --pane <pid> [--bytes N]            # errors with NotAttached f
 xscore data write --pane <pid> [< file | --from-file F]
 xscore data resize --pane <pid> --cols C --rows R
 
-xscore config show                                   # stub for v0.3.0
+xscore config show                                   # stub for v0.4.0
 xscore config path
 xscore config set <key> <value>
 xscore config unset <key>
@@ -213,13 +245,17 @@ A link has a `sink` that controls how its I/O is mediated. The default is **`raw
 `xscore link add <url> [--id <uuid>]` lets the caller supply a specific `LinkId` (uuid v7) instead of auto-generating one. Useful for scripted workflows where the id must be known in advance (e.g., for reconnect-style flows or deterministic tests).
 
 ```bash
-# Default: auto-generated uuid v7
+# Default: auto-generated uuid v7 (plus the window and pane it creates)
 $ xscore link add shell:///bin/cat
-link:  01928e0a-7d10-7000-8000-000000000001
+link:   01928e0a-7d10-7000-8000-000000000001
+window: 01928e0a-7d10-7000-8000-000000000002
+pane:   01928e0a-7d10-7000-8000-000000000003
 
 # Specify a known id
 $ xscore link add shell:///bin/cat --id 11111111-2222-7333-8444-555555555555
-link:  11111111-2222-7333-8444-555555555555
+link:   11111111-2222-7333-8444-555555555555
+window: 01928e0a-7d10-7000-8000-000000000004
+pane:   01928e0a-7d10-7000-8000-000000000005
 
 # Duplicate id → error
 $ xscore link add shell:///bin/echo --id 11111111-2222-7333-8444-555555555555
@@ -231,76 +267,84 @@ Error: link id already in use: 11111111-2222-7333-8444-555555555555
 ```
 CLI -> SessionManager
        +-- LinkRegistry     (link_id → Arc<Link>)
-       +-- WindowRegistry   (window_id → Arc<Window>)         — independent
-       +-- PaneRegistry     (pane_id → PaneInfo)              — orphan-creatable
-       +-- pane_bridges     (pane_id → Arc<dyn PaneBridge>)   — built on attach_pane
+       +-- WindowRegistry   (window_id → Arc<Window>)         — virtual or tmux @N
+       +-- PaneRegistry     (pane_id → PaneInfo)              — virtual or tmux %N
+       +-- pane_bridges     (pane_id → Arc<dyn PaneBridge>)   — built on attach/adopt
                                   ▲ wraps:
-                                   ├─ DirectBridge { Arc<dyn Transport> }    (raw)
-                                   └─ TmuxBridge { Weak<TmuxSink>, handle } (tmux)
+                                   ├─ DirectBridge { Arc<dyn Transport>, RingBuffer }  (raw)
+                                   └─ TmuxBridge { Weak<TmuxSink>, "%N" }              (tmux)
+       +-- pane_buffers     (pane_id → Arc<Mutex<RingBuffer>>) — survives detach
 ```
 
-Each Link owns one Transport (raw IO) + one Sink (PTY/ANSI/tmux or no-op). Each Pane has its own bridge (the runtime I/O channel) and its own geometry (cols/rows/x/y). Each Window owns its pane list (UI container).
+Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). Each Pane has its own bridge (the runtime I/O channel) and its own geometry (cols/rows/x/y). Each Window owns its pane list (UI container).
 
 **Lifecycle:**
-- `link del` cascades: every attached pane's `link_id` is cleared, bridge closed silently. Panes survive as orphans.
+- `link add` creates the link AND its first window/pane (ADR 0008): a virtual window + buffered pane for raw links, or tmux's own `@N`/`%N` for tmux links.
+- `link del` on a **direct** link: every attached pane's `link_id` is cleared and its bridge released, but the transport and the pane buffers stay alive until the link itself is removed. Panes survive as orphans.
+- `link del` on a **tmux** link: `kill-session` takes every adopted window/pane with it; they are removed from the registry too.
 - `window del` cascades: every pane in the window has its `window_id` cleared. Panes survive as orphans.
-- `pane del` fully tears down: also detaches from link + removes from window.
+- `pane del` fully tears down: also detaches from link + removes from window, and kills the tmux pane if it has a `%N`.
 
 **`add` vs `del` vs `open` vs `close`** (ADR 0005, four-verb `link` tree):
-- `add` creates a brand-new external resource: transport + sink. (v0.3.0: NO auto window/pane.)
-- `del` is the universal full teardown: cascades pane detach + kills sink + transport. For tmux: kills the per-link session; the shared `-L xscore` server stays up.
+- `add` creates a brand-new external resource: transport + sink, plus its first window/pane.
+- `del` is the universal full teardown: cascades pane handling + kills sink + transport. For tmux: kills the per-link session; the shared `-L xscore` server stays up.
 - `open` attaches to an existing tmux session (tmux only — shell/serial/ssh return `OpenOnlyForTmux`).
-- `close` is a no-op for v0.3.0 (tmux sessions are inherently persistent across xscore invocations).
+- `close` is a no-op for v0.4.0 (tmux sessions are inherently persistent across xscore invocations).
 
-## Status (v0.3.0)
+## Status (v0.4.0)
 
 **Working end-to-end:**
 - 3-entity decoupled model with dynamic associations (ADR 0007 v2)
+- `link add` auto-creates a usable window + pane (ADR 0008), three ids out
+- tmux adoption: `@N` windows / `%N` panes, geometry read from tmux, never guessed
+- `link sync [--heal]`: registry ↔ tmux drift report and repair
+- `link add --pane`, `window add --link`, `pane add --window`
+- Pane buffer: `DirectBridge` + 64 KiB `RingBuffer`, snapshot reads, survives detach
 - Q1: direct-link 1-active-pane auto-detach (user-confirmed 2026-10-19)
-- Q1 corollary: tmux-backed multi-pane (each attach = tmux split-window)
+- Q1 corollary: tmux-backed multi-pane (each `pane add --window` = tmux split)
 - Q2: pane geometry (cols/rows/x/y) (user-confirmed 2026-10-19)
 - Bridge model: `DirectBridge` (raw) + `TmuxBridge` (tmux) via `PaneBridge` trait
-- Local tmux sink: `tmux new-session / split-window / kill-pane / capture-pane / send-keys / resize-pane` over the shared `-L xscore` server (ADR 0003)
+- Local tmux sink: `new-session / new-window / split-window / kill-pane / kill-window / capture-pane / send-keys / resize-pane` over the shared `-L xscore` server (ADR 0003)
 - `shell://` transport (local child, real `tokio::process::Command`)
 - URL parser: `shell://` / `ssh://` / `serial://` with `?key=value` query
 - Persistent ConnectSpec templates: `xscore link config {add,remove,show,list}` at `~/.config/xscore/links/`
 - Per-pane data ops: `xscore data {read, write, resize}` via bridge
 - 4-verb trees for `link` / `window` / `pane` (ADR 0005)
-- State persistence across CLI invocations (`~/.config/xscore/state/state.json`, **flat v0.3.0 schema**)
+- State persistence across CLI invocations (`~/.config/xscore/state/state.json`, **schema_version 2** — older files are rejected with an actionable error)
 - **Default sink = `raw` (no tmux)**; opt in to tmux with `?tmux=on` or `?tmux=auto|local|remote` in the URL
 
 **Implemented but not exercised by the test suite:**
 - `serial://` transport (real `serialport = "4.10"` impl) — needs real hardware
 - `ssh://` transport (real `russh = "0.43"` impl) — needs a real SSH server; key auth only (no `known_hosts`, no password)
 
-**Stubbed / pending (deferred to v0.4.0+):**
+**Stubbed / pending (deferred to v0.5.0+):**
 - `link open` for the local-tmux case is a `todo!()` stub
 - `xscore config {show, path, set, unset}` for AppConfig
 - `link config edit` for in-place template editing
 - Pre-built binaries (currently install via `cargo install --path .`)
 
 **Known limitations (deferred):**
-- Hydration no longer auto-builds bridges — data ops on a link that survives a process restart fail with `NotAttached(pid)` until the user runs `xscore pane attach` again. To resume I/O after restart: `xscore pane attach --pane <pid> --link <lid>`.
-- `xscore link open` for tmux is `todo!()` — will land in v0.4.0.
+- Direct panes cannot keep live I/O across a process restart (the transport died with the process). Their `PaneInfo` survives; use `pane attach` to resume. tmux panes DO rebuild their bridge on hydration from `%N`.
+- `link sync` never adopts panes it did not create — that is deliberate (ADR 0008). Create them through `pane add --window`.
+- `xscore link open` for tmux is `todo!()` — will land in v0.5.0.
 - SSH `check_server_key` accepts any host key. Real users want `StrictHostKeyChecking=yes` with `~/.ssh/known_hosts`.
 - SSH auth is key-only (no password field in `ConnectSpec::Ssh` yet).
 - Serial `default-features = false` (no `libudev`); open by explicit path.
-- Local ring buffer for direct bridges (deferred to v0.4.0+).
 
 ## Tests
 
 ```bash
-# Unit tests (20 tests, in-process, <1s)
+# Unit tests (29 tests, in-process, <1s)
 cargo test -p xscore --lib
 
-# CLI integration tests (13 tests, ~1s)
+# CLI integration tests (23 tests, ~2s)
 cargo test -p xscore --test cli_smoke
 
-# Data-path integration tests (5 tests, single-process, real tmux round-trip)
+# Data-path integration tests (10 tests, single-process, real tmux round-trip)
 cargo test -p xscore --test data_smoke
 
-# Everything (38 tests total)
-cargo test -p xscore
+# Everything (62 tests total; --test-threads=1 required — data_smoke sets env vars)
+cargo test -p xscore -- --test-threads=1
 ```
 
 ## File layout
@@ -317,10 +361,11 @@ crates/xscore/src/
     error.rs
     link.rs, pane.rs, window.rs
     link_registry.rs, pane_registry.rs, window_registry.rs
-    manager.rs                   # SessionManager
-    state.rs                     # save / load (flat StateSnapshot)
+    manager.rs                   # SessionManager (add_link branches, sync_link)
+    state.rs                     # save / load (schema_version 2 gate)
   backends/                     # PaneBridge trait + DirectBridge + TmuxBridge
     bridge.rs
+    ring_buffer.rs               # per-pane buffer (64 KiB, snapshot reads)
   model/                        # ConnectSpec, TransportConfig, SinkConfig,
                                 #   LinkInfo, WindowInfo, WindowLayout, PaneInfo
     session.rs
@@ -328,8 +373,8 @@ crates/xscore/src/
     mod.rs
     factory.rs
     shell.rs, serial.rs, ssh.rs
-  sink/                         # Sink trait + 2 impls + factory
-    mod.rs
+  sink/                         # Sink trait (tmux adoption) + 2 impls + factory
+    mod.rs                       # TmuxWindowSnapshot / TmuxPaneSnapshot / layout parsing
     factory.rs
     raw.rs, tmux.rs
   url/                          # URL parser
@@ -343,8 +388,8 @@ crates/xscore/src/
     mod.rs, paths.rs, loader.rs
 
 crates/xscore/tests/
-  cli_smoke.rs                  # 13 CLI integration tests
-  data_smoke.rs                  # 5 in-process data-path tests
+  cli_smoke.rs                  # 23 CLI integration tests
+  data_smoke.rs                 # 10 in-process data-path tests
 ```
 
 ## Release process

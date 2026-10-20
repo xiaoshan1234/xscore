@@ -48,6 +48,10 @@ pub struct PaneAddArgs {
     #[arg(long, default_value_t = 24)] pub rows: u16,
     #[arg(long, default_value_t = 0)] pub x: u16,
     #[arg(long, default_value_t = 0)] pub y: u16,
+    /// Put the pane in this window. If the window mirrors a tmux window,
+    /// the pane is a real tmux split and tmux's geometry is used.
+    #[arg(long, value_name = "WINDOW_ID")]
+    pub window: Option<String>,
 }
 
 #[derive(Args)]
@@ -86,7 +90,13 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
 }
 
 async fn add(mgr: Arc<SessionManager>, args: PaneAddArgs) -> anyhow::Result<()> {
-    let pid = mgr.add_pane(args.name, args.cols, args.rows, args.x, args.y).await?;
+    let window = match args.window.as_deref() {
+        Some(s) => Some(WindowId::parse(s)?),
+        None => None,
+    };
+    let pid = mgr
+        .add_pane(args.name, args.cols, args.rows, args.x, args.y, window)
+        .await?;
     println!("pane:  {pid}");
     Ok(())
 }

@@ -1,50 +1,59 @@
-// crates/xscore/tests/cli_smoke.rs
+// crates/xscore/tests/cli_smoke.rs (v0.4.0)
 //
 // CLI smoke tests — run the actual `xscore` binary and verify its
-// stdout / stderr / exit code. These tests use `env!("CARGO_BIN_EXE_xscore")`
-// which Cargo provides for integration tests.
+// stdout / stderr / exit code. `env!("CARGO_BIN_EXE_xscore")` is
+// provided by Cargo for integration tests.
 //
-// State persistence caveat: each `xscore` invocation is a fresh process
-// with a fresh `Arc<SessionManager>`. Tests that span multiple
-// invocations (e.g. `link add` followed by `pane list`) rely on the
-// v0.3.0 state persistence in `~/.config/xscore/state/state.json`.
+// Isolation: every test gets its own HOME (state.json) AND its own
+// `XSCORE_SOCKET` (so tmux sessions never touch the user's `xscore`
+// server or another test's sessions). The HOME is wiped once per test
+// name per process, then left alone — multi-invocation tests rely on
+// state.json persisting between calls.
 //
-// v0.3.0 rewrote the CLI surface: `link add` only creates a link (no
-// auto window/pane), and the new verbs `pane {attach, detach, add-to-
-// window, ...}` glue together the decoupled entities. The test set
-// covers both the new verbs and the Q1 / Q2 invariants.
+// v0.4.0 semantics under test (ADR 0008):
+//   - `link add` always yields link + (usually) window + pane
+//   - tmux links ADOPT the session's window/pane (`@N` / `%N` handles)
+//   - `link add --pane` binds a hollow pane, refuses tmux links, and
+//     refuses panes already attached elsewhere
+//   - tmux panes cannot be detached; they die with their session
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+
+fn home_for(test_name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("xscore-test-{test_name}"))
+}
+
+/// Per-process record of HOMEs already wiped, so repeated calls within
+/// one multi-invocation test keep their state.
+fn wiped() -> &'static Mutex<HashSet<PathBuf>> {
+    static WIPED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    WIPED.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 fn xscore_for(test_name: &str) -> Command {
-    let home = std::env::temp_dir().join(format!("xscore-test-{test_name}"));
+    let home = home_for(test_name);
     std::fs::create_dir_all(&home).ok();
-    // Wipe the entire state directory on EVERY call. Tests that need
-    // multi-invocation persistence use a single `xscore_for` closure
-    // whose `home` is the same path — but since each subprocess is a
-    // fresh manager and the state is reloaded from disk at startup,
-    // multi-invocation tests work as long as we don't wipe between
-    // their commands.
-    //
-    // Wait — actually, multi-invocation tests (full_flow, q1_*) DO
-    // need persistence across calls. So we must NOT wipe on every call.
-    //
-    // Strategy: only wipe if the file is in an incompatible schema
-    // (v0.2.0's bare `[]` array) — that's the only case where a stale
-    // file would break a v0.3.0 run. Valid v0.3.0 snapshots are left
-    // alone; tests that need a clean slate use a unique test name.
-    let state_json = home.join(".config").join("xscore").join("state").join("state.json");
-    if state_json.exists() {
-        let content = std::fs::read_to_string(&state_json).unwrap_or_default();
-        let trimmed = content.trim_start();
-        if trimmed.starts_with('[') {
-            // v0.2.0 schema: bare array of LinkSnapshot. Incompatible.
-            let _ = std::fs::remove_file(&state_json);
-        }
+    let first_touch = {
+        let mut g = wiped().lock().unwrap();
+        g.insert(home.clone())
+    };
+    if first_touch {
+        let _ = std::fs::remove_dir_all(home.join(".config").join("xscore"));
     }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_xscore"));
     cmd.env("HOME", &home);
+    cmd.env("XSCORE_SOCKET", format!("xscore-test-{test_name}"));
     cmd
+}
+
+/// Kill this test's tmux server (best effort).
+fn cleanup_tmux(test_name: &str) {
+    let _ = Command::new("tmux")
+        .args(["-L", &format!("xscore-test-{test_name}"), "kill-server"])
+        .output();
 }
 
 /// Extract the value after a leading "key:" prefix on a single line.
@@ -60,6 +69,20 @@ fn parse_id_from_stdout(stdout: &[u8], key: &str) -> String {
         .unwrap_or("")
         .trim()
         .to_string()
+}
+
+fn json(stdout: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(stdout).unwrap_or_else(|e| {
+        panic!("expected JSON on stdout, got {:?} ({e})",
+            String::from_utf8_lossy(stdout))
+    })
+}
+
+fn ok(out: &std::process::Output) -> bool {
+    if !out.status.success() {
+        eprintln!("stderr: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    out.status.success()
 }
 
 #[test]
@@ -104,15 +127,13 @@ fn xscore_link_open_unsupported_for_shell() {
 #[test]
 fn xscore_link_config_add_and_list_roundtrip() {
     let xscore = || xscore_for("link_config_roundtrip");
-    let _ = std::fs::remove_dir_all(
-        dirs::config_dir().unwrap().join("xscore").join("links"),
-    );
+    let _ = std::fs::remove_dir_all(home_for("link_config_roundtrip").join(".config").join("xscore").join("links"));
     let add = xscore()
         .args(["link", "config", "add", "web", "ssh://root@host:22"])
         .output()
         .unwrap();
     assert!(
-        add.status.success(),
+        ok(&add),
         "link config add failed: {}",
         String::from_utf8_lossy(&add.stderr)
     );
@@ -147,151 +168,502 @@ fn xscore_link_add_default_creates_two_links_for_same_url() {
     assert_ne!(id1, id2, "two add() calls should produce distinct link_ids");
 }
 
-// ----- v0.3.0 default: `link add <url>` prints ONLY `link:` -----
+// ----- v0.4.0 #1: direct link auto-creates window + pane -----
 
 #[test]
-fn xscore_link_add_default_uses_raw_sink_and_no_pane() {
-    let xscore = || xscore_for("link_add_default_raw");
+fn xscore_link_add_direct_creates_window_and_pane() {
+    let xscore = || xscore_for("link_add_direct_auto");
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "add failed: {}", String::from_utf8_lossy(&out.stderr));
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("link:"), "missing 'link:' line: {s}");
-    // v0.3.0: no auto window or pane for raw links.
-    assert!(!s.contains("window:"), "raw link should not print 'window:': {s}");
-    assert!(!s.contains("pane:"), "raw link should not print 'pane:': {s}");
+    assert!(ok(&out), "add failed: {}", String::from_utf8_lossy(&out.stderr));
 
     let link_id = parse_id_from_stdout(&out.stdout, "link");
-    let show = xscore()
+    let window_id = parse_id_from_stdout(&out.stdout, "window");
+    let pane_id = parse_id_from_stdout(&out.stdout, "pane");
+
+    // Pane is attached to the link and lives in the auto-created window.
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert_eq!(pane["link_id"], serde_json::json!(link_id));
+    assert_eq!(pane["window_id"], serde_json::json!(window_id));
+    assert!(pane["sink_handle"].is_null(), "direct pane must have no tmux handle: {pane}");
+
+    // Window is virtual: no tmux handle.
+    let window = json(&xscore()
+        .args(["window", "show", "--id", &window_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert!(window["tmux_window_handle"].is_null(), "virtual window: {window}");
+
+    // The link really is the raw sink.
+    let link = json(&xscore()
         .args(["link", "show", "--id", &link_id])
         .output()
-        .unwrap();
-    let ss = String::from_utf8_lossy(&show.stdout);
-    assert!(ss.contains(r#""sink": "raw""#) || ss.contains(r#""sink":"raw""#),
-        "expected raw sink in show, got: {ss}");
+        .unwrap()
+        .stdout);
+    assert_eq!(link["sink"]["sink"], serde_json::json!("raw"));
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
 }
 
-// ----- v0.3.0: `?tmux=on` still creates a tmux link (no auto window/pane either) -----
+// ----- v0.4.0 #2: `link add --pane` binds an existing orphan pane -----
 
 #[test]
-fn xscore_link_add_with_tmux_on_only_creates_link() {
-    let xscore = || xscore_for("link_add_tmux_on");
+fn xscore_link_add_direct_with_pane() {
+    let xscore = || xscore_for("link_add_direct_with_pane");
+    let pane_id = parse_id_from_stdout(
+        &xscore().args(["pane", "add"]).output().unwrap().stdout,
+        "pane",
+    );
+
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "add --pane failed: {}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("link:"), "missing link: {s}");
+    assert!(s.contains("pane:"), "missing pane: {s}");
+    assert!(!s.contains("window:"), "binding an existing pane must not create a window: {s}");
+    assert_eq!(parse_id_from_stdout(&out.stdout, "pane"), pane_id);
+
+    let link_id = parse_id_from_stdout(&out.stdout, "link");
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert_eq!(pane["link_id"], serde_json::json!(link_id));
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+}
+
+// ----- v0.4.0 #3: a pane already attached elsewhere is never stolen -----
+
+#[test]
+fn xscore_link_add_direct_with_attached_pane_errors() {
+    let xscore = || xscore_for("link_add_attached_pane");
+    let pane_id = parse_id_from_stdout(
+        &xscore().args(["pane", "add"]).output().unwrap().stdout,
+        "pane",
+    );
+    let first = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(ok(&first));
+    let link_a = parse_id_from_stdout(&first.stdout, "link");
+
+    let second = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(!second.status.success(), "re-binding an attached pane must fail");
+    let err = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        err.contains("already attached") && err.contains(&link_a),
+        "expected PaneAlreadyAttached({pane_id}, {link_a}), got: {err}"
+    );
+
+    // Still attached to A (no silent steal).
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert_eq!(pane["link_id"], serde_json::json!(link_a));
+
+    let _ = xscore().args(["link", "del", "--id", &link_a]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+}
+
+// ----- v0.4.0 #4: tmux link adopts the session's window and pane -----
+
+#[test]
+fn xscore_link_add_tmux_adopts_window_and_pane() {
+    let xscore = || xscore_for("link_add_tmux_adopt");
     let out = xscore()
         .args(["link", "add", "shell:///bin/cat?tmux=on"])
         .output()
         .unwrap();
-    assert!(out.status.success());
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("link:"));
-    // v0.3.0: even with `?tmux=on`, the user must explicitly create + add panes.
-    assert!(!s.contains("window:"), "v0.3.0: even tmux links don't print window: {s}");
-    assert!(!s.contains("pane:"), "v0.3.0: even tmux links don't print pane: {s}");
+    assert!(ok(&out), "tmux add failed: {}", String::from_utf8_lossy(&out.stderr));
+
     let link_id = parse_id_from_stdout(&out.stdout, "link");
+    let window_id = parse_id_from_stdout(&out.stdout, "window");
+    let pane_id = parse_id_from_stdout(&out.stdout, "pane");
+
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    let handle = pane["sink_handle"].as_str().expect("sink_handle present");
+    assert!(handle.starts_with('%'), "pane handle should be %N, got {handle}");
+    assert_eq!(pane["link_id"], serde_json::json!(link_id));
+    assert_eq!(pane["window_id"], serde_json::json!(window_id));
+
+    let window = json(&xscore()
+        .args(["window", "show", "--id", &window_id])
+        .output()
+        .unwrap()
+        .stdout);
+    let wh = window["tmux_window_handle"].as_str().expect("tmux_window_handle present");
+    assert!(wh.starts_with('@'), "window handle should be @N, got {wh}");
+    assert!(window["cols"].as_u64().unwrap() > 0, "geometry adopted from tmux: {window}");
+
+    // `link sync` on a freshly-adopted link is clean.
+    let sync = xscore()
+        .args(["link", "sync", "--id", &link_id])
+        .output()
+        .unwrap();
+    assert!(ok(&sync));
+    assert!(
+        String::from_utf8_lossy(&sync.stdout).contains("in sync"),
+        "expected clean sync: {}",
+        String::from_utf8_lossy(&sync.stdout)
+    );
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_tmux("link_add_tmux_adopt");
+}
+
+// ----- v0.4.0 #5: `--pane` is rejected for tmux links -----
+
+#[test]
+fn xscore_link_add_tmux_with_pane_errors() {
+    let xscore = || xscore_for("link_add_tmux_with_pane");
+    let pane_id = parse_id_from_stdout(
+        &xscore().args(["pane", "add"]).output().unwrap().stdout,
+        "pane",
+    );
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/cat?tmux=on", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "tmux link + --pane must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("create panes via tmux") || err.contains("TmuxLinkCannotBindPane"),
+        "expected TmuxLinkCannotBindPane, got: {err}"
+    );
+    // The rejected call must not leave a pane bound or a session behind.
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert!(pane["link_id"].is_null(), "pane must stay orphan: {pane}");
+
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_tmux("link_add_tmux_with_pane");
+}
+
+// ----- v0.4.0 #6: virtual window (no --link) -----
+
+#[test]
+fn xscore_window_add_virtual() {
+    let xscore = || xscore_for("window_add_virtual");
+    let out = xscore()
+        .args(["window", "add", "--name", "scratch", "--cols", "100", "--rows", "20"])
+        .output()
+        .unwrap();
+    assert!(ok(&out));
+    let wid = parse_id_from_stdout(&out.stdout, "window");
+    let w = json(&xscore()
+        .args(["window", "show", "--id", &wid])
+        .output()
+        .unwrap()
+        .stdout);
+    assert!(w["tmux_window_handle"].is_null(), "virtual window: {w}");
+    assert_eq!(w["cols"], serde_json::json!(100));
+    assert_eq!(w["layout"]["kind"], serde_json::json!("single"));
+    let _ = xscore().args(["window", "del", "--id", &wid]).output();
+}
+
+// ----- v0.4.0 #7: tmux-bound window gets a real @N handle -----
+
+#[test]
+fn xscore_window_add_tmux_bound() {
+    let xscore = || xscore_for("window_add_tmux_bound");
+    let link_id = parse_id_from_stdout(
+        &xscore()
+            .args(["link", "add", "shell:///bin/cat?tmux=on"])
+            .output()
+            .unwrap()
+            .stdout,
+        "link",
+    );
+    let out = xscore()
+        .args(["window", "add", "--name", "logs", "--link", &link_id])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "window add --link failed: {}", String::from_utf8_lossy(&out.stderr));
+    let wid = parse_id_from_stdout(&out.stdout, "window");
+
+    let w = json(&xscore()
+        .args(["window", "show", "--id", &wid])
+        .output()
+        .unwrap()
+        .stdout);
+    let handle = w["tmux_window_handle"].as_str().expect("tmux handle");
+    assert!(handle.starts_with('@'), "expected @N, got {handle}");
+    assert_eq!(w["name"], serde_json::json!("logs"));
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_tmux("window_add_tmux_bound");
+}
+
+// ----- v0.4.0 #8: --link on a direct link is an error -----
+
+#[test]
+fn xscore_window_add_direct_link_errors() {
+    let xscore = || xscore_for("window_add_direct_errors");
+    let link_id = parse_id_from_stdout(
+        &xscore()
+            .args(["link", "add", "shell:///bin/cat"])
+            .output()
+            .unwrap()
+            .stdout,
+        "link",
+    );
+    let out = xscore()
+        .args(["window", "add", "--link", &link_id])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "window add --link <direct> must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("does not use the tmux sink") || err.contains("NotTmuxLink"),
+        "expected NotTmuxLink, got: {err}"
+    );
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
 }
 
-// ----- `link add --id <uuid>` -----
+// ----- v0.4.0 #9: `pane add --window` splits a real tmux window -----
 
 #[test]
-fn xscore_link_add_with_explicit_id_uses_supplied_id() {
-    let xscore = || xscore_for("link_add_explicit_id");
-    let custom_id = "11111111-2222-7333-8444-555555555555";
-    let out = xscore()
-        .args(["link", "add", "shell:///bin/cat", "--id", custom_id])
+fn xscore_pane_add_to_tmux_window() {
+    let xscore = || xscore_for("pane_add_tmux_window");
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat?tmux=on"])
         .output()
         .unwrap();
-    assert!(out.status.success(),
-        "add with --id failed: {}", String::from_utf8_lossy(&out.stderr));
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains(custom_id),
-        "stdout should contain the supplied id '{custom_id}', got: {s}");
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let window_id = parse_id_from_stdout(&add.stdout, "window");
+    let adopted = parse_id_from_stdout(&add.stdout, "pane");
 
-    let list = xscore().args(["link", "list"]).output().unwrap();
-    let ls = String::from_utf8_lossy(&list.stdout);
-    assert!(ls.contains(custom_id), "list should contain id: {ls}");
+    let out = xscore()
+        .args(["pane", "add", "--window", &window_id])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "pane add --window failed: {}", String::from_utf8_lossy(&out.stderr));
+    let pid = parse_id_from_stdout(&out.stdout, "pane");
+    assert_ne!(pid, adopted);
 
-    let _ = xscore().args(["link", "del", "--id", custom_id]).output();
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pid])
+        .output()
+        .unwrap()
+        .stdout);
+    let handle = pane["sink_handle"].as_str().expect("sink_handle");
+    assert!(handle.starts_with('%'), "expected %N, got {handle}");
+    assert_eq!(pane["link_id"], serde_json::json!(link_id));
+    assert_eq!(pane["window_id"], serde_json::json!(window_id));
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_tmux("pane_add_tmux_window");
 }
 
+// ----- v0.4.0 #10: `pane add` with no window stays orphan -----
+
 #[test]
-fn xscore_link_add_with_duplicate_id_errors() {
-    let xscore = || xscore_for("link_add_duplicate_id");
-    // Use a uuid v7-shaped id UNIQUE to this test run — but the duplicate
-    // detection happens within the same `xscore_for` closure (so both
-    // subprocesses see the same HOME). Make the id include a process-id
-    // component to avoid collisions with prior runs.
-    let id = format!("22222222-3333-7444-8555-{:012x}", std::process::id());
-    let first = xscore()
-        .args(["link", "add", "shell:///bin/cat", "--id", &id])
+fn xscore_pane_add_orphan() {
+    let xscore = || xscore_for("pane_add_orphan");
+    let out = xscore().args(["pane", "add", "--cols", "90", "--rows", "25"]).output().unwrap();
+    assert!(ok(&out));
+    let pid = parse_id_from_stdout(&out.stdout, "pane");
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pid])
+        .output()
+        .unwrap()
+        .stdout);
+    assert!(pane["link_id"].is_null(), "{pane}");
+    assert!(pane["window_id"].is_null(), "{pane}");
+    assert!(pane["sink_handle"].is_null(), "{pane}");
+    assert_eq!(pane["cols"], serde_json::json!(90));
+    assert_eq!(pane["rows"], serde_json::json!(25));
+    let _ = xscore().args(["pane", "del", "--id", &pid]).output();
+}
+
+// ----- v0.4.0 #11: link del orphans direct panes -----
+
+#[test]
+fn xscore_link_del_direct_orphans_panes() {
+    let xscore = || xscore_for("link_del_direct_orphans");
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    assert!(ok(&xscore().args(["link", "del", "--id", &link_id]).output().unwrap()));
+
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert!(pane["link_id"].is_null(), "pane should be orphaned: {pane}");
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+}
+
+// ----- v0.4.0 #12: link del removes tmux panes with the session -----
+
+#[test]
+fn xscore_link_del_tmux_removes_panes() {
+    let xscore = || xscore_for("link_del_tmux_removes");
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat?tmux=on"])
         .output()
         .unwrap();
-    assert!(first.status.success(), "first add failed: {}",
-        String::from_utf8_lossy(&first.stderr));
-    let second = xscore()
-        .args(["link", "add", "shell:///bin/echo", "--id", &id])
-        .output()
-        .unwrap();
-    assert!(!second.status.success(), "second add with same id must fail");
-    let s = String::from_utf8_lossy(&second.stderr);
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    assert!(ok(&xscore().args(["link", "del", "--id", &link_id]).output().unwrap()));
+
+    let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
+    assert!(!show.status.success(), "tmux pane must be gone after link del");
     assert!(
-        s.contains("already in use") || s.contains("LinkIdExists"),
-        "expected LinkIdExists error, got: {s}"
+        String::from_utf8_lossy(&show.stderr).contains("pane not found"),
+        "expected PaneNotFound, got: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    cleanup_tmux("link_del_tmux_removes");
+}
+
+// ----- v0.4.0 #13: tmux panes cannot be detached -----
+
+#[test]
+fn xscore_tmux_pane_cannot_detach() {
+    let xscore = || xscore_for("tmux_pane_cannot_detach");
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat?tmux=on"])
+        .output()
+        .unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    let out = xscore()
+        .args(["pane", "detach", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "detaching a tmux pane must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("owned by tmux") && err.contains("pane del"),
+        "expected TmuxPaneNotDetachable, got: {err}"
     );
 
-    let _ = xscore().args(["link", "del", "--id", &id]).output();
+    // Still attached after the rejected detach.
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap()
+        .stdout);
+    assert_eq!(pane["link_id"], serde_json::json!(link_id));
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_tmux("tmux_pane_cannot_detach");
 }
 
-// ----- v0.3.0: full flow create link → create pane → attach → write → read -----
+// ----- v0.4.0: legacy state.json is rejected, not silently emptied -----
+
+#[test]
+fn xscore_rejects_legacy_state_schema() {
+    let xscore = || xscore_for("legacy_state_schema");
+    // First touch wipes this test's HOME, so write the legacy file after.
+    assert!(xscore().args(["link", "list"]).output().unwrap().status.success());
+    let state = home_for("legacy_state_schema")
+        .join(".config")
+        .join("xscore")
+        .join("state")
+        .join("state.json");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    // v0.3.0 shape: three lists, no schema_version.
+    std::fs::write(&state, r#"{"links":[],"windows":[],"panes":[]}"#).unwrap();
+
+    let out = xscore().args(["link", "list"]).output().unwrap();
+    assert!(!out.status.success(), "legacy state.json must be a hard error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("schema_version=0"), "got: {err}");
+    assert!(err.contains("expected 2"), "got: {err}");
+    assert!(err.contains("delete"), "error should tell the user what to do: {err}");
+
+    // Deleting it restores normal operation.
+    std::fs::remove_file(&state).unwrap();
+    assert!(xscore().args(["link", "list"]).output().unwrap().status.success());
+}
+
+// ----- v0.4.0: full flow still works on the decoupled verbs -----
 
 #[test]
 fn xscore_full_flow_create_pane_attach_data() {
     let xscore = || xscore_for("full_flow");
 
-    // 1. Create link (raw — no ?tmux=).
+    // 1. Create link (raw). It now comes with a pane of its own.
     let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
-    assert!(add.status.success());
+    assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let auto_pane = parse_id_from_stdout(&add.stdout, "pane");
 
-    // 2. Create pane (orphan).
+    // 2. Create another pane (orphan) and attach it.
     let add_pane = xscore().args(["pane", "add"]).output().unwrap();
     let pane_id = parse_id_from_stdout(&add_pane.stdout, "pane");
 
-    // 3. Attach the pane to the link.
     let attach = xscore()
         .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
         .output().unwrap();
-    assert!(attach.status.success(),
-        "attach failed: {}", String::from_utf8_lossy(&attach.stderr));
+    assert!(ok(&attach), "attach failed: {}", String::from_utf8_lossy(&attach.stderr));
 
-    // 4. Verify the pane's info shows the link_id.
+    // Q1: the auto-created pane was auto-detached.
+    let auto = json(&xscore()
+        .args(["pane", "show", "--id", &auto_pane])
+        .output()
+        .unwrap()
+        .stdout);
+    assert!(auto["link_id"].is_null(), "Q1 should detach the old pane: {auto}");
+
+    // 3. Verify the pane's info shows the link_id.
     let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
     let s = String::from_utf8_lossy(&show.stdout);
-    assert!(s.contains(&link_id),
-        "pane.show should include link_id; got: {s}");
+    assert!(s.contains(&link_id), "pane.show should include link_id; got: {s}");
 
-    // 5. Create a window + put the pane in it.
+    // 4. Create a window + put the pane in it.
     let add_window = xscore()
         .args(["window", "add", "--cols", "120", "--rows", "30"])
         .output().unwrap();
-    assert!(add_window.status.success());
+    assert!(ok(&add_window));
     let window_id = parse_id_from_stdout(&add_window.stdout, "window");
 
     let add_to_window = xscore()
         .args(["pane", "add-to-window", "--pane", &pane_id, "--window", &window_id])
         .output().unwrap();
-    assert!(add_to_window.status.success(),
+    assert!(ok(&add_to_window),
         "add-to-window failed: {}", String::from_utf8_lossy(&add_to_window.stderr));
 
-    // 6. Verify the window list shows the pane.
+    // 5. Verify the lists agree.
     let window_list = xscore().args(["window", "list"]).output().unwrap();
     let wl = String::from_utf8_lossy(&window_list.stdout);
     assert!(wl.contains(&window_id), "window list should contain wid: {wl}");
 
-    // 7. Verify the pane list, filtered by window, shows the pane.
     let pane_list = xscore()
         .args(["pane", "list", "--window", &window_id])
         .output().unwrap();
@@ -299,13 +671,13 @@ fn xscore_full_flow_create_pane_attach_data() {
     assert!(pl.contains(&pane_id),
         "pane list (--window) should contain pane id; got: {pl}");
 
-    // 8. Detach the pane (orphan again).
+    // 6. Detach the pane (orphan again).
     let detach = xscore()
         .args(["pane", "detach", "--pane", &pane_id])
         .output().unwrap();
-    assert!(detach.status.success());
+    assert!(ok(&detach));
 
-    // 9. data write should fail now (orphan).
+    // 7. data write fails now (orphan).
     let write_fail = xscore()
         .args(["data", "write", "--pane", &pane_id])
         .stdin(std::process::Stdio::piped())
@@ -320,6 +692,7 @@ fn xscore_full_flow_create_pane_attach_data() {
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["window", "del", "--id", &window_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &auto_pane]).output();
 }
 
 // ----- Q1: direct link 1-active-pane auto-detach -----
@@ -354,7 +727,7 @@ fn xscore_q1_direct_link_auto_detaches_old_active_pane() {
     let _ = xscore().args(["pane", "del", "--id", &p2]).output();
 }
 
-// ----- v0.3.0: window add/list/del (no link needed) -----
+// ----- window add/list/del without a link -----
 
 #[test]
 fn xscore_window_add_list_del_orphan() {
@@ -362,7 +735,7 @@ fn xscore_window_add_list_del_orphan() {
     let add = xscore()
         .args(["window", "add", "--name", "scratch", "--cols", "100", "--rows", "20"])
         .output().unwrap();
-    assert!(add.status.success());
+    assert!(ok(&add));
     let wid = parse_id_from_stdout(&add.stdout, "window");
 
     let list = xscore().args(["window", "list"]).output().unwrap();
@@ -370,10 +743,10 @@ fn xscore_window_add_list_del_orphan() {
     assert!(ls.contains(&wid), "window list should contain wid: {ls}");
 
     let del = xscore().args(["window", "del", "--id", &wid]).output().unwrap();
-    assert!(del.status.success());
+    assert!(ok(&del));
 }
 
-// ----- v0.3.0: link del also detaches panes (panes survive as orphan) -----
+// ----- link del also detaches panes (panes survive as orphans) -----
 
 #[test]
 fn xscore_link_del_detaches_pane_keeps_pane_alive() {
@@ -387,7 +760,7 @@ fn xscore_link_del_detaches_pane_keeps_pane_alive() {
         .output().unwrap();
 
     let del = xscore().args(["link", "del", "--id", &link_id]).output().unwrap();
-    assert!(del.status.success());
+    assert!(ok(&del));
 
     // The pane survives — info.link_id is now None.
     let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();

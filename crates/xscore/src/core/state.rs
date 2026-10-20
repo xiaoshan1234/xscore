@@ -1,36 +1,51 @@
-// core/state.rs (v0.3.0 — flat schema, ADR 0007 v2)
+// core/state.rs (v0.4.0 — schema_version = 2, ADR 0008)
 //
-// v0.3.0 schema redesign. Pre-v0.3.0 the snapshot was `Vec<LinkSnapshot>`
-// where each snapshot grouped one link's `windows: Vec<WindowInfo>` and
-// `panes: Vec<PaneInfo>` under the link. v0.3.0 is FLAT: three parallel
-// lists (links, windows, panes) — the entities are independent and the
-// associations are now stored ON the panes (pane.info.link_id + window_id),
-// not on the snapshot wrapper.
+// v0.3.0 made the snapshot FLAT: three parallel lists (links, windows,
+// panes) — the entities are independent and the associations are stored
+// ON the panes (pane.info.link_id + window_id), not on a snapshot
+// wrapper grouping them by link.
 //
-// Why flat?
-//   - Windows are no longer link-scoped (a window can exist without any
-//     link, or move between panes that span multiple links in the future).
-//   - Panes are orphan-creatable and switchable between links (Q1+Q2 from
-//     ADR 0007 v2); the `link_id`/`window_id` references live ON the pane.
-//   - Save/load is just `Vec<LinkInfo>` + `Vec<WindowInfo>` +
-//     `Vec<PaneInfo>` (plus the panes list on each window).
+// v0.4.0 adds an explicit `schema_version` and refuses to load anything
+// that isn't exactly `SCHEMA_VERSION`. Rationale (P0-e): before v0.4.0
+// a stale file was silently deserialized into a half-empty snapshot
+// (serde filled the missing fields), so the user's links simply
+// "disappeared" with no diagnostic. Explicit failure is always better
+// than silent data loss. Users upgrading from v0.3.0 must delete
+// `~/.config/xscore/state/state.json`.
 //
-// BREAKING: the v0.2.0 schema is NOT backward-compatible. There is no
-// auto-migration. Users must `rm ~/.config/xscore/state/state.json` on
-// upgrade — documented in CHANGELOG.
+// `schema_version` deliberately has NO serde default: a missing field
+// must not be able to masquerade as the current version. The loader
+// reads it as a probe first (treating "missing" as 0) so the error
+// message can be specific.
 
 use std::path::Path;
 
-use crate::core::Result;
+use crate::core::{Error, Result};
 use crate::core::PaneId;
 use crate::model::{LinkInfo, PaneInfo, WindowInfo};
 
-/// v0.3.0 flat snapshot: three parallel lists, no grouping.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+/// Current on-disk schema version. Bump on any breaking shape change.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// v0.4.0 flat snapshot: three parallel lists, no grouping.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StateSnapshot {
+    /// Must equal `SCHEMA_VERSION`. No serde default on purpose.
+    pub schema_version: u32,
     pub links: Vec<LinkInfo>,
     pub windows: Vec<WindowSnapshot>,
     pub panes: Vec<PaneInfo>,
+}
+
+impl Default for StateSnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            links: Vec::new(),
+            windows: Vec::new(),
+            panes: Vec::new(),
+        }
+    }
 }
 
 /// One window's worth of persisted state. Flattened `WindowInfo` + the
@@ -51,14 +66,14 @@ pub fn save(snapshot: &StateSnapshot) -> Result<()> {
     let path = super::super::config::paths::state_snapshot_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| crate::core::Error::Config(format!("mkdir {}: {e}", parent.display())))?;
+            .map_err(|e| Error::Config(format!("mkdir {}: {e}", parent.display())))?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &bytes)
-        .map_err(|e| crate::core::Error::Config(format!("write {}: {e}", tmp.display())))?;
+        .map_err(|e| Error::Config(format!("write {}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path)
-        .map_err(|e| crate::core::Error::Config(format!("rename {}: {e}", path.display())))?;
+        .map_err(|e| Error::Config(format!("rename {}: {e}", path.display())))?;
     Ok(())
 }
 
@@ -74,11 +89,67 @@ fn load_from(path: &Path) -> Result<Option<StateSnapshot>> {
         return Ok(None);
     }
     let bytes = std::fs::read(path)
-        .map_err(|e| crate::core::Error::Config(format!("read {}: {e}", path.display())))?;
+        .map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
+    parse_snapshot(&bytes, path)
+}
+
+/// Parse + validate a snapshot. Split out from `load_from` so the
+/// version gate is unit-testable without touching `$HOME`.
+pub fn parse_snapshot(bytes: &[u8], path: &Path) -> Result<Option<StateSnapshot>> {
     if bytes.is_empty() {
         return Ok(None);
     }
-    let snapshot: StateSnapshot = serde_json::from_slice(&bytes)
-        .map_err(|e| crate::core::Error::Config(format!("parse {}: {e}", path.display())))?;
+    // Probe the version first: a missing/incompatible `schema_version`
+    // must fail loudly instead of deserializing into a half-empty state.
+    let probe: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| Error::Config(format!("parse {}: {e}", path.display())))?;
+    let found = probe.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    if found != SCHEMA_VERSION as u64 {
+        return Err(Error::Config(format!(
+            "state.json schema_version={found}, expected {SCHEMA_VERSION}; \
+             delete ~/.config/xscore/state/state.json to reset"
+        )));
+    }
+    let snapshot: StateSnapshot = serde_json::from_slice(bytes)
+        .map_err(|e| Error::Config(format!("parse {}: {e}", path.display())))?;
     Ok(Some(snapshot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn path() -> PathBuf { PathBuf::from("/tmp/does-not-matter.json") }
+
+    #[test]
+    fn empty_bytes_is_none() {
+        assert!(parse_snapshot(b"", &path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn missing_schema_version_is_rejected() {
+        // v0.3.0 shape — three lists, no version field.
+        let legacy = br#"{"links":[],"windows":[],"panes":[]}"#;
+        let err = parse_snapshot(legacy, &path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("schema_version=0"), "got: {msg}");
+        assert!(msg.contains("expected 2"), "got: {msg}");
+        assert!(msg.contains("delete"), "got: {msg}");
+    }
+
+    #[test]
+    fn wrong_schema_version_is_rejected() {
+        let bad = br#"{"schema_version":1,"links":[],"windows":[],"panes":[]}"#;
+        let err = parse_snapshot(bad, &path()).unwrap_err();
+        assert!(format!("{err}").contains("schema_version=1"), "{err}");
+    }
+
+    #[test]
+    fn current_schema_version_roundtrips() {
+        let snap = StateSnapshot::default();
+        let bytes = serde_json::to_vec(&snap).unwrap();
+        let parsed = parse_snapshot(&bytes, &path()).unwrap().unwrap();
+        assert_eq!(parsed.schema_version, SCHEMA_VERSION);
+    }
 }

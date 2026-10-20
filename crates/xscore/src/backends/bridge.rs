@@ -1,75 +1,148 @@
-// backends/bridge.rs
-//
-// v0.3.0 — `PaneBridge` trait + `DirectBridge` and `TmuxBridge` impls.
+// backends/bridge.rs (v0.4.0 — pane buffers + detach that doesn't kill, ADR 0008)
 //
 // The bridge is the per-pane runtime that exposes `read` / `write` /
 // `resize` / `close`. Two concrete kinds:
 //
-//   - `DirectBridge`: wraps the link's `Arc<dyn Transport>` directly.
-//     `read` is a one-shot (whatever bytes are immediately available).
-//     `write` is forward-and-forget. No history (a local ring buffer is
-//     deferred to v0.4.0+).
+//   - `DirectBridge`: the pane's BUFFER. A background task continuously
+//     drains the link's `Arc<dyn Transport>` into a `RingBuffer`; `read`
+//     serves a snapshot of that buffer. This is what makes "the pane's
+//     core is its buffer" true for raw links (P0-b in v0.4.0).
 //
 //   - `TmuxBridge`: wraps the link's `TmuxSink` (via `Weak<TmuxSink>` to
-//     avoid reference cycles). `read` calls `tmux capture-pane` (returns
-//     tmux's scrollback). `write` calls `tmux send-keys`. `resize` calls
-//     `tmux resize-pane`. `close` calls `tmux kill-pane`.
+//     avoid reference cycles). `read` = `tmux capture-pane` (tmux's own
+//     scrollback IS the buffer), `write` = `send-keys`, `resize` =
+//     `resize-pane`, `close` = `kill-pane` (a real tmux pane dies).
 //
-// Each pane holds `Mutex<Option<Arc<dyn PaneBridge>>>`. `None` means the
-// pane is orphan (no link attached). Setting the bridge is what
-// `xscore pane attach` does; clearing it is what `xscore pane detach`
-// does. The pane keeps its buffer content (in tmux's scrollback or in
-// whatever the transport has buffered); the bridge is just the I/O
-// handle.
-
+// `close()` means "release THIS pane's hold on the resource", never
+// "kill a shared resource" (P0-a):
+//   - DirectBridge::close(): stop the reader task. The link's transport
+//     stays OPEN — other panes (and a later re-attach) still use it.
+//   - TmuxBridge::close(): kill the tmux pane (it is this pane's alone).
+//
+// The manager holds the bridges (and, for direct panes, the buffers) in
+// maps keyed by PaneId, so detaching a direct pane keeps its history.
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
+use tokio::sync::Mutex;
 
 use crate::core::Result;
 use crate::sink::Sink;
 use crate::transport::Transport;
 
+use super::ring_buffer::RingBuffer;
+
+/// Default capacity of a direct pane's buffer (64 KiB of scrollback).
+pub const DIRECT_BUFFER_CAPACITY: usize = 64 * 1024;
+
+/// How long `DirectBridge::read` waits for the reader task to produce
+/// bytes before reporting "nothing available" (`Ok(0)`).
+const READ_WAIT: Duration = Duration::from_millis(200);
+const READ_POLL: Duration = Duration::from_millis(10);
+
 /// Per-pane runtime bridge. Object-safe (`dyn PaneBridge` is valid)
 /// because every method takes `&self` and the trait has no associated
 /// types. `Send + Sync` is required so the bridge can be shared into
-/// background tasks (snapshot/writer pump) and into the data CLI.
+/// background tasks and into the data CLI.
 #[async_trait]
 pub trait PaneBridge: Send + Sync + std::fmt::Debug {
-    /// What kind of bridge this is — `"direct"` or `"tmux"`. Used for
-    /// diagnostics and (later) for read-write mode switching (e.g. tmux
-    /// bridges want capture-pane while raw bridges need a ring buffer).
+    /// What kind of bridge this is — `"direct"` or `"tmux"`.
     fn kind(&self) -> &'static str;
 
-    /// Pull bytes from the bridge into `buf`. Returns the number of
-    /// bytes read (0 means "no data available right now"). For tmux
-    /// bridges this is a `tmux capture-pane` snapshot (one frame); for
-    /// raw bridges it's a one-shot `transport.read(buf)` (whatever the
-    /// transport has buffered).
+    /// Read a snapshot of the pane's buffer into `buf`. Returns the
+    /// number of bytes copied; `Ok(0)` means "no data available right
+    /// now" (after a short wait). Non-destructive: a pane's buffer is
+    /// scrollback, not a consumable stream.
     async fn read(&self, buf: &mut [u8]) -> Result<usize>;
 
-    /// Push bytes into the bridge. Returns the number of bytes
-    /// accepted (some sinks may do partial writes if their internal
-    /// buffer is full).
+    /// Push bytes into the pane. Returns the number of bytes accepted.
     async fn write(&self, data: &[u8]) -> Result<usize>;
 
-    /// Resize the pane's terminal dimensions. For tmux bridges this
-    /// also resizes the transport (so the remote shell sees the new
-    /// size). For raw bridges only the transport is resized.
+    /// Resize the pane's terminal dimensions.
     async fn resize(&self, cols: u16, rows: u16) -> Result<()>;
 
-    /// Close the bridge (kills the tmux split-pane, or closes the
-    /// transport). The link survives — only this pane's I/O handle
-    /// goes away.
+    /// Release this pane's hold on its I/O resource. Never kills a
+    /// resource shared with the link (see the module comment).
     async fn close(&self) -> Result<()>;
 }
 
-/// Direct bridge over the link's `Arc<dyn Transport>`. Used when the
-/// link's sink is `RawSink` (default — no tmux). One direct bridge per
-/// attached pane; the transport is shared across all direct bridges on
-/// the same link (via `Arc`).
-#[derive(Debug)]
+/// Direct bridge over the link's `Arc<dyn Transport>`, with the pane's
+/// own ring buffer fed by a background reader task.
 pub struct DirectBridge {
-    pub transport: Arc<dyn Transport>,
+    transport: Arc<dyn Transport>,
+    buffer: Arc<Mutex<RingBuffer>>,
+    stop: Arc<AtomicBool>,
+    task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+impl std::fmt::Debug for DirectBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectBridge")
+            .field("transport", &self.transport.kind())
+            .field("stop", &self.stop.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl DirectBridge {
+    /// Create a bridge with a fresh private buffer.
+    pub fn new(transport: Arc<dyn Transport>) -> Self {
+        Self::new_with_buffer(
+            transport,
+            Arc::new(Mutex::new(RingBuffer::new(DIRECT_BUFFER_CAPACITY))),
+        )
+    }
+
+    /// Create a bridge that writes into a caller-owned buffer. The
+    /// manager uses this so a detached pane keeps its history and a
+    /// re-attach continues appending to the same scrollback.
+    pub fn new_with_buffer(
+        transport: Arc<dyn Transport>,
+        buffer: Arc<Mutex<RingBuffer>>,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task = {
+            let t = Arc::clone(&transport);
+            let b = Arc::clone(&buffer);
+            let s = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 4096];
+                while !s.load(Ordering::Relaxed) {
+                    // The transport's `read` BLOCKS until bytes arrive, and
+                    // transports are allowed to serialize read/write behind
+                    // one lock (ShellTransport does). Holding that lock in a
+                    // blocking read forever would starve `write` — so poll
+                    // with a short timeout: the cancel releases the
+                    // transport lock, giving writers a window, and pipe
+                    // reads are cancel-safe (no bytes are lost).
+                    let read = tokio::time::timeout(READ_POLL, t.read(&mut buf)).await;
+                    match read {
+                        Ok(Ok(0)) => tokio::time::sleep(READ_POLL).await,
+                        Ok(Ok(n)) => {
+                            let mut ring = b.lock().await;
+                            ring.push_slice(&buf[..n]);
+                        }
+                        Ok(Err(_)) => break,
+                        // Timed out: no bytes yet. Loop and re-arm.
+                        Err(_elapsed) => {}
+                    }
+                }
+            })
+        };
+        Self {
+            transport,
+            buffer,
+            stop,
+            task: Arc::new(Mutex::new(Some(task))),
+        }
+    }
+
+    /// The buffer this bridge appends to (shared with the manager).
+    pub fn buffer(&self) -> Arc<Mutex<RingBuffer>> {
+        Arc::clone(&self.buffer)
+    }
 }
 
 #[async_trait]
@@ -77,10 +150,20 @@ impl PaneBridge for DirectBridge {
     fn kind(&self) -> &'static str { "direct" }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        // One-shot: whatever bytes the transport has right now. A ring
-        // buffer sidecar (so detached panes keep their history) is
-        // deferred to v0.4.0+ per ADR 0007 v2.
-        self.transport.read(buf).await
+        let deadline = tokio::time::Instant::now() + READ_WAIT;
+        loop {
+            {
+                let ring = self.buffer.lock().await;
+                let n = ring.copy_out(buf);
+                if n > 0 {
+                    return Ok(n);
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(0);
+            }
+            tokio::time::sleep(READ_POLL).await;
+        }
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize> {
@@ -92,9 +175,14 @@ impl PaneBridge for DirectBridge {
     }
 
     async fn close(&self) -> Result<()> {
-        // Closing one direct bridge does NOT close the link's transport
-        // — other panes may still be using it. The transport closes
-        // when the link itself is deleted.
+        // P0-a: stop OUR pump only. The link's transport is shared —
+        // closing it here killed every other pane on the link and made
+        // a later re-attach dead on arrival.
+        self.stop.store(true, Ordering::Relaxed);
+        let mut slot = self.task.lock().await;
+        if let Some(handle) = slot.take() {
+            handle.abort();
+        }
         Ok(())
     }
 }
@@ -107,9 +195,17 @@ impl PaneBridge for DirectBridge {
 #[derive(Debug)]
 pub struct TmuxBridge {
     pub sink: std::sync::Weak<crate::sink::tmux::TmuxSink>,
-    /// tmux pane handle — the "%N" string tmux assigns to a split.
-    /// All tmux CLI commands are addressed via this handle.
+    /// tmux pane handle — the "%N" string tmux assigns to a pane. All
+    /// tmux CLI commands are addressed via this handle.
     pub handle: String,
+}
+
+impl TmuxBridge {
+    fn sink(&self) -> Result<Arc<crate::sink::tmux::TmuxSink>> {
+        self.sink
+            .upgrade()
+            .ok_or_else(|| crate::core::Error::Sink("tmux sink dropped".into()))
+    }
 }
 
 #[async_trait]
@@ -117,27 +213,20 @@ impl PaneBridge for TmuxBridge {
     fn kind(&self) -> &'static str { "tmux" }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        let sink = self.sink.upgrade()
-            .ok_or_else(|| crate::core::Error::Sink("tmux sink dropped".into()))?;
-        sink.snapshot(&self.handle, buf).await
+        self.sink()?.snapshot(&self.handle, buf).await
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize> {
-        let sink = self.sink.upgrade()
-            .ok_or_else(|| crate::core::Error::Sink("tmux sink dropped".into()))?;
-        sink.write(&self.handle, data).await
+        self.sink()?.write(&self.handle, data).await
     }
 
     async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        let sink = self.sink.upgrade()
-            .ok_or_else(|| crate::core::Error::Sink("tmux sink dropped".into()))?;
-        sink.resize(&self.handle, cols, rows).await
+        self.sink()?.resize(&self.handle, cols, rows).await
     }
 
     async fn close(&self) -> Result<()> {
-        let sink = self.sink.upgrade()
-            .ok_or_else(|| crate::core::Error::Sink("tmux sink dropped".into()))?;
-        // close = kill-pane -t <handle>. The link survives.
-        sink.close_pane(&self.handle).await
+        // A tmux pane belongs to exactly one xscore pane: closing it is
+        // a real `tmux kill-pane`. The link (session) survives.
+        self.sink()?.close_pane(&self.handle).await
     }
 }

@@ -13,4 +13,4 @@ pub mod window_registry;
 pub use address::LinkAddress;
 pub use error::{Error, Result};
 pub use id::{LinkId, PaneId, WindowId};
-pub use manager::SessionManager;
+pub use manager::{LinkAddResult, SessionManager, SyncReport};
