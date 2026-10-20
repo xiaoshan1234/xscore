@@ -165,13 +165,24 @@ async fn round_trip_across_two_managers() {
 
     let info_b = mgr_b.panes.get(pane_id_a).await.expect("b.pane_info");
     assert_eq!(info_b.id, pane_id_a, "hydrated pane id mismatch");
+    // v0.4.1 (P0-3): the *binding* survives a restart, but the
+    // *connection* does not — a direct transport dies with the process
+    // that spawned it. `link_id` stays `Some(..)` (the pane is still
+    // bound to that link) and data ops report `LinkNotConnected`
+    // instead of the misleading `NotAttached`.
     assert_eq!(info_b.link_id, Some(link_id_a),
-        "hydrated pane should preserve link_id; got {:?}", info_b.link_id);
+        "hydrated pane keeps its binding; got {:?}", info_b.link_id);
 
     // Direct panes cannot rebuild their bridge (the transport died with
-    // the old process) — data ops fail until re-attach.
+    // the old process) — data ops fail until re-attach, and they must
+    // say WHY (v0.4.1 / P0-3). "Not attached" would be a lie: the pane
+    // is still bound; the *connection* is gone.
     let res = mgr_b.data_read(pane_id_a, &mut [0u8; 16]).await;
-    assert!(res.is_err(), "data_read on hydrated direct pane (no bridge) must fail");
+    let err = format!("{}", res.expect_err("data_read on hydrated direct pane must fail"));
+    assert!(
+        err.contains("not connected") || err.contains("LinkNotConnected"),
+        "expected LinkNotConnected, got: {err}"
+    );
 
     let _ = mgr_a.del_link(link_id_a).await;
     let _ = mgr_b.del_link(link_id_a).await;

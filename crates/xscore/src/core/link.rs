@@ -40,6 +40,18 @@ pub struct Link {
     /// no pane is attached. For tmux-backed links this field is ignored
     /// (multiple panes can be attached). See ADR 0007 v2 § Q1.
     pub active_pane: Mutex<Option<PaneId>>,
+    /// v0.4.1 (P0-3): whether the underlying connection is ALIVE.
+    ///
+    /// `false` only after hydration: a direct (shell/serial/ssh)
+    /// transport is owned by the process that created it, so when that
+    /// process exits the connection dies but the persisted binding
+    /// (`PaneInfo.link_id`) survives. Keeping this flag separate from
+    /// the binding lets `pane show` keep reporting the truth ("this
+    /// pane is bound to link X") while data ops report the real
+    /// problem ("link X is not connected") instead of the misleading
+    /// `NotAttached`. tmux-backed links stay `true` after hydration —
+    /// the tmux session outlives the CLI process.
+    pub connected: bool,
 }
 
 pub type ArcLink = Arc<Link>;

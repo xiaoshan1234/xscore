@@ -291,7 +291,7 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). 
 - `open` attaches to an existing tmux session (tmux only — shell/serial/ssh return `OpenOnlyForTmux`).
 - `close` is a no-op for v0.4.0 (tmux sessions are inherently persistent across xscore invocations).
 
-## Status (v0.4.0)
+## Status (v0.4.1)
 
 **Working end-to-end:**
 - 3-entity decoupled model with dynamic associations (ADR 0007 v2)
@@ -324,7 +324,7 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). 
 - Pre-built binaries (currently install via `cargo install --path .`)
 
 **Known limitations (deferred):**
-- Direct panes cannot keep live I/O across a process restart (the transport died with the process). Their `PaneInfo` survives; use `pane attach` to resume. tmux panes DO rebuild their bridge on hydration from `%N`.
+- Direct panes cannot keep live I/O across a process restart: the transport is owned by the process that spawned it. The *binding* still survives — `pane show` reports the pane's `link_id`, and `link show` reports `connected: false` — but data ops fail with `LinkNotConnected` (not `NotAttached`, which would wrongly claim the pane was never bound). Re-add the link to reconnect. tmux panes DO rebuild their bridge on hydration from `%N` and stay `connected: true`. A long-lived daemon would lift this limitation; it is not in scope yet.
 - `link sync` never adopts panes it did not create — that is deliberate (ADR 0008). Create them through `pane add --window`.
 - `xscore link open` for tmux is `todo!()` — will land in v0.5.0.
 - SSH `check_server_key` accepts any host key. Real users want `StrictHostKeyChecking=yes` with `~/.ssh/known_hosts`.
@@ -337,7 +337,7 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). 
 # Unit tests (29 tests, in-process, <1s)
 cargo test -p xscore --lib
 
-# CLI integration tests (23 tests, ~2s)
+# CLI integration tests (24 tests, ~2s)
 cargo test -p xscore --test cli_smoke
 
 # Data-path integration tests (10 tests, single-process, real tmux round-trip)

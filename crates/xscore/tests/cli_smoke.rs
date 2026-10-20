@@ -772,3 +772,51 @@ fn xscore_link_del_detaches_pane_keeps_pane_alive() {
 
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
 }
+
+// ----- v0.4.1 (P0-3): binding survives a restart, connection does not -----
+
+#[test]
+fn xscore_direct_link_reports_not_connected_after_restart() {
+    let xscore = || xscore_for("direct_not_connected");
+
+    // Process 1: create a direct link. It auto-creates a window + pane,
+    // and the pane is genuinely attached *in this process*.
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    // Process 2: the transport died with process 1. `link show` must
+    // say so instead of presenting a dead link as a live one.
+    let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
+    assert!(ok(&show));
+    let link = json(&show.stdout);
+    assert_eq!(link["connected"], serde_json::json!(false),
+        "hydrated direct link must report connected=false: {link}");
+
+    // The pane's *binding* is still real — that part must not be erased.
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output().unwrap().stdout);
+    assert_eq!(pane["link_id"], serde_json::json!(link_id),
+        "binding must survive the restart: {pane}");
+
+    // And data ops must explain the real problem (connection lost), not
+    // claim the pane was never attached.
+    let write = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .output().unwrap();
+    assert!(!write.status.success(), "write on a disconnected link must fail");
+    let err = String::from_utf8_lossy(&write.stderr);
+    assert!(
+        err.contains("not connected") || err.contains("LinkNotConnected"),
+        "expected LinkNotConnected, got: {err}"
+    );
+    assert!(
+        !err.contains("not attached"),
+        "must not report NotAttached for a bound pane: {err}"
+    );
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+}

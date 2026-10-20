@@ -296,6 +296,7 @@ impl SessionManager {
             sink,
             tmux_sink: tmux_arc,
             active_pane: Mutex::new(Some(pane_id)),
+            connected: true,
         };
         self.links.insert(link).await;
         if let Some(w) = window_record {
@@ -821,39 +822,64 @@ impl SessionManager {
     // ===== data ops (read / write / resize via bridge) =====
 
     pub async fn data_read(&self, pid: PaneId, buf: &mut [u8]) -> Result<usize> {
-        let _ = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        let bridge = self.pane_bridges.lock().await.get(&pid).cloned();
-        match bridge {
-            Some(b) => b.read(buf).await,
-            None => Err(Error::NotAttached(pid)),
-        }
+        let b = self.bridge_for(pid).await?;
+        b.read(buf).await
     }
 
     pub async fn data_write(&self, pid: PaneId, data: &[u8]) -> Result<usize> {
-        let _ = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        let bridge = self.pane_bridges.lock().await.get(&pid).cloned();
-        match bridge {
-            Some(b) => b.write(data).await,
-            None => Err(Error::NotAttached(pid)),
-        }
+        let b = self.bridge_for(pid).await?;
+        b.write(data).await
     }
 
     /// Resize a pane's bridge AND its info (cols/rows). Errors with
     /// `NotAttached(pid)` for orphan panes — use `resize_pane` if you
     /// want to update geometry without going through the bridge.
     pub async fn data_resize(&self, pid: PaneId, cols: u16, rows: u16) -> Result<()> {
-        let _ = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        let bridge = self.pane_bridges.lock().await.get(&pid).cloned();
-        match bridge {
-            Some(b) => {
-                b.resize(cols, rows).await?;
-                if let Some(mut info) = self.panes.get(pid).await {
-                    info.cols = cols;
-                    info.rows = rows;
-                    self.panes.insert(info).await;
+        let b = self.bridge_for(pid).await?;
+        b.resize(cols, rows).await?;
+        if let Some(mut info) = self.panes.get(pid).await {
+            info.cols = cols;
+            info.rows = rows;
+            self.panes.insert(info).await;
+        }
+        self.save_state().await?;
+        Ok(())
+    }
+
+    /// Resolve a pane's live bridge, distinguishing the two ways it can
+    /// be missing:
+    ///
+    /// * `NotAttached(pid)` — the pane has no link binding at all
+    ///   (orphan). The user must `pane attach`.
+    /// * `LinkNotConnected(lid)` — the pane IS bound, but the link's
+    ///   transport died with the process that owned it (only possible
+    ///   for direct links, and only after a restart). The binding is
+    ///   real; the connection is not. Re-adding the link reconnects.
+    ///
+    /// v0.4.1 (P0-3): before this split, both cases surfaced as
+    /// `NotAttached`, which told the user their still-bound pane had
+    /// never been attached — persisted state and runtime disagreed.
+    async fn bridge_for(&self, pid: PaneId) -> Result<Arc<dyn PaneBridge>> {
+        if let Some(b) = self.pane_bridges.lock().await.get(&pid).cloned() {
+            return Ok(b);
+        }
+        let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        match info.link_id {
+            Some(lid) => {
+                let connected = self
+                    .links
+                    .get(lid)
+                    .await
+                    .map(|l| l.connected)
+                    .unwrap_or(false);
+                if connected {
+                    // Connected link but no bridge: a bug, not a user
+                    // state. Surface it as NotAttached rather than
+                    // silently returning zero bytes.
+                    Err(Error::NotAttached(pid))
+                } else {
+                    Err(Error::LinkNotConnected(lid))
                 }
-                self.save_state().await?;
-                Ok(())
             }
             None => Err(Error::NotAttached(pid)),
         }
@@ -1105,8 +1131,10 @@ impl SessionManager {
         }
         // P0-c: with stable `%N` handles we can rebuild tmux bridges on
         // hydrate without touching tmux's structure. Direct panes cannot
-        // be rebuilt (their transport died with the process) — they stay
-        // orphan-ish until re-attached.
+        // be rebuilt (their transport died with the process) — see
+        // `Link::connected`, which is false for hydrated direct links so
+        // data ops report `LinkNotConnected` instead of the misleading
+        // `NotAttached`.
         for pinfo in mgr.panes.list_all().await {
             let (Some(lid), Some(handle)) = (pinfo.link_id, pinfo.sink_handle.clone()) else {
                 continue;
@@ -1148,6 +1176,16 @@ impl SessionManager {
                 Some(Arc::new(TmuxSink::adopt(link_id, mode, &name)))
             }
         };
+        // v0.4.1 (P0-3): a tmux session outlives the CLI process, so a
+        // hydrated tmux link IS still connected. A direct link is not:
+        // its transport died with the previous process (see the `Raw`
+        // arm above, which installs `NoopTransport`). Recording that
+        // honestly is what lets data ops report `LinkNotConnected`
+        // instead of the misleading `NotAttached`.
+        let connected = matches!(
+            info.sink,
+            crate::model::SinkConfig::Tmux { .. }
+        );
         let link = Link {
             id: link_id,
             info,
@@ -1155,6 +1193,7 @@ impl SessionManager {
             sink,
             tmux_sink,
             active_pane: Mutex::new(None),
+            connected,
         };
         self.links.insert(link).await;
         Ok(())

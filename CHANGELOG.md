@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-20
+
+### Fixed
+
+- **Connection liveness is now modelled separately from the binding.**
+  A pane's `link_id` says "which link this pane belongs to"; a link now
+  also carries `connected`. A direct link hydrated from disk keeps its
+  binding and metadata but reports `connected: false`, because its
+  transport (child process / serial fd / ssh channel) died with the
+  process that created it. Before this, `pane show` said the pane was
+  attached while `data read` said it was not — persisted state and
+  runtime state contradicted each other.
+  - `link show` now includes a `connected` field.
+  - Data ops on a bound-but-dead link return the new
+    `Error::LinkNotConnected(link_id)` ("…not connected (its transport
+    died with the previous process); re-add the link to reconnect")
+    instead of the misleading `NotAttached`, which wrongly implies the
+    pane was never bound. Orphan panes still get `NotAttached`.
+  - tmux links stay `connected: true` after hydration: the tmux session
+    outlives the CLI process and `%N` handles rebuild the bridge.
+  - NOT fixed by this release: direct links still cannot keep live I/O
+    across a process boundary. Lifting that needs a long-lived daemon
+    owning the transport (tracked for a future release).
+
+- **Serial read timeout no longer starves writes.** `SerialTransport`
+  opened the port with a 200 ms read timeout while the direct-bridge
+  reader pump polls with a 10 ms timeout. Because the transport is
+  synchronous, each pump tick aborted its await and left a blocking
+  task queued behind the port mutex — writes stalled and blocking
+  threads accumulated. The read timeout is now 5 ms (< the pump's
+  10 ms poll), so each blocking read completes inside one pump tick.
+  On Linux this timeout governs reads only (VMIN/VTIME), so writes are
+  unaffected.
+
 ## [0.4.0] - 2026-10-20
 
 tmux adoption, real pane buffers, and `link add` that hands you a usable

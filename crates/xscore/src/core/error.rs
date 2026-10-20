@@ -37,6 +37,15 @@ pub enum Error {
     #[error("pane {pane} is not attached to link {link}")]
     PaneNotOnLink { link: LinkId, pane: PaneId },
 
+    /// v0.4.1 (P0-3): the pane is bound to a link whose transport is no
+    /// longer alive (the process that owned it exited). The binding is
+    /// real — persisted state is not lying — but no I/O can happen until
+    /// the link is re-established. Distinct from `NotAttached` (no
+    /// binding at all) on purpose: one is "connection lost", the other
+    /// is "never connected".
+    #[error("link {0} is not connected (its transport died with the previous process); re-add the link to reconnect")]
+    LinkNotConnected(LinkId),
+
     #[error("`xscore link open` is only valid for tmux sessions, not {0}")]
     OpenOnlyForTmux(&'static str),
 

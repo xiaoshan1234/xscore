@@ -109,7 +109,17 @@ impl super::Transport for SerialTransport {
             .data_bits(data_bits)
             .parity(parity)
             .stop_bits(stop_bits)
-            .timeout(std::time::Duration::from_millis(200))
+            // Read timeout MUST stay below the direct-bridge pump's
+            // poll interval (see backends::bridge::READ_POLL). The
+            // transport is synchronous, so `read` runs inside
+            // `spawn_blocking` holding the port mutex; if it blocked
+            // longer than the pump's timeout, every pump tick would
+            // abort its await and leave another blocking task queued
+            // behind the same mutex — writes would stall and blocking
+            // threads would pile up. 5ms < 10ms keeps each blocking
+            // read inside one pump tick. On Linux this timeout applies
+            // to reads only (VMIN/VTIME), so writes are unaffected.
+            .timeout(std::time::Duration::from_millis(5))
             .open()
             .map_err(|e| Error::Transport(format!("open {}: {e}", self.path)))?;
         *self.port.lock().unwrap() = Some(port);
