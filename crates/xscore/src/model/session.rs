@@ -1,21 +1,23 @@
 // model/session.rs
 //
-// v0.3.0 — 3-entity decoupled model (ADR 0007 rewrite).
+// v0.6.0 (ADR 0010) — Session owns the backend.
 //
-// Three independent entities:
-//   - Link   = transport + sink + the link's connection state (no windows/panes owned)
-//   - Pane   = core is a buffer (here represented as `bridge: Option<Arc<dyn PaneBridge>>`)
-//              + UI info (geometry cols/rows/x/y + which link/window it's attached to)
-//   - Window = pure UI layout container (panes list + layout + total cols/rows)
+//   - Session = the workspace, and the only place "does this go through tmux?"
+//               is answered (`SessionBackend`).
+//   - Link    = one connection inside a session: a byte pipe xscore owns, or
+//               the session's single tmux control client (`EndpointRef`).
+//   - Pane    = a buffer + its geometry; on a `Control` link it addresses
+//               itself with `link_key` (`%N`).
+//   - Window  = a tmux window (`WindowBackend::Tmux { handle }`) or a purely
+//               xscore-side one (`Native`).
 //
-// Associations are dynamic via Option IDs on Pane.info.link_id / Pane.info.window_id.
-// Windows and panes are orphan-creatable (no link required). Links can be created
-// without any window/pane (the default in v0.3.0 — see ADR 0007 v2).
+// Associations stay dynamic through `link_id` / `window_id` on the pane. A
+// `Pipe` link serves at most one pane (attach auto-detaches the previous one);
+// a `Control` link serves every pane of its session, addressed by `%N`.
 //
-// A direct link tracks ONE active pane at a time (Q1 — user-confirmed 2026-10-19):
-// when a new pane is attached, the previously-active pane is auto-detached (its
-// `link_id` becomes `None`, its buffer survives). A tmux-backed link has no such
-// restriction; multiple panes can be attached simultaneously (Q1 corollary).
+// v0.6.0 PR4 removed the last traces of "tmux-ness on the link": the sink
+// enum, the URL query that selected it, the layout enum and the window handle
+// field are gone (see ADR 0010 §D7).
 
 use serde::{Deserialize, Serialize};
 use crate::core::{LinkAddress, LinkId, PaneId, SessionId, WindowId};
@@ -30,37 +32,10 @@ pub enum TransportConfig {
           #[serde(default)] identity: Option<String>, #[serde(default)] proxy: Option<String> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "sink", rename_all = "snake_case")]
-pub enum SinkConfig {
-    /// Direct transport I/O. No tmux server involvement — the
-    /// shell/serial/ssh transport is the I/O source directly. Use
-    /// for simple pipe-like scenarios or when you don't want the
-    /// tmux overhead.
-    Raw,
-    /// Wrap the link in a tmux session (per ADR 0003, the shared
-    /// `tmux -L xscore` server). `mode` controls auto/local/remote;
-    /// `session_name` is an optional override for the auto-generated
-    /// `xscore-<link_id>` name.
-    ///
-    /// Opt in via the URL query `?tmux=on` (defaults to mode=auto)
-    /// or `?tmux=auto|local|remote` (explicit mode).
-    ///
-    /// v0.3.0 semantics: a tmux-backed link is multi-pane capable —
-    /// multiple panes may be attached simultaneously (Q1 corollary).
-    Tmux {
-        #[serde(default = "default_tmux_mode")]
-        mode: String,
-        #[serde(default)]
-        session_name: Option<String>,
-    },
-}
-
 fn default_ssh_port() -> u16 { 22 }
 fn default_data_bits() -> u8 { 8 }
 fn default_parity() -> String { "n".into() }
 fn default_stop_bits() -> u8 { 1 }
-fn default_tmux_mode() -> String { "auto".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectSpec {
@@ -68,7 +43,6 @@ pub struct ConnectSpec {
     pub name: String,
     #[serde(flatten)]
     pub transport: TransportConfig,
-    pub sink: SinkConfig,
     /// Persisted address — for the "save URL as template" workflow, the
     /// user types `xscore link config add <name> <url>`; the address is
     /// parsed from the URL and stored here so `link add -c <name>` can
@@ -91,47 +65,35 @@ pub struct LinkInfo {
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub address: LinkAddress,
-    pub transport: TransportConfig,
-    pub sink: SinkConfig,
-    /// v0.6.0 (ADR 0010 §4): what this connection carries. Not yet a full
-    /// `EndpointRef` — the transport spec still lives in `transport` until the
-    /// old `SinkConfig` path goes away — but the discriminant is what decides
-    /// how many panes a link may serve, so it has to exist now: a `Control`
-    /// link addresses its panes by `link_key` (`%N`) and may not be deleted or
-    /// re-bound.
-    #[serde(default)]
+    /// What this connection carries (ADR 0010 §4). A `Pipe` link owns a
+    /// transport and serves one pane; a `Control` link is the session's one
+    /// tmux control client and carries nothing of its own — host, socket and
+    /// session name live on `SessionBackend::Tmux`, so a link can never
+    /// disagree with its session about which tmux server it is talking to.
     pub endpoint: EndpointRef,
 }
 
 /// Which side owns this link's stream (ADR 0010 §4).
 ///
-/// `Pipe` is everything the old model called "raw" or "tmux": one byte stream,
+/// `Pipe` is everything the old model called a "raw" link: one byte stream,
 /// at most one reader. `Control` is the tmux control client of a session — one
 /// connection to a server, demultiplexed by `%N`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EndpointRef {
-    #[default]
-    Pipe,
+    Pipe(TransportConfig),
     Control,
 }
 
 impl LinkInfo {
     pub fn transport_str(&self) -> &'static str { self.address.kind() }
-    pub fn sink_str(&self) -> &'static str {
-        match &self.sink {
-            SinkConfig::Raw => "raw",
-            SinkConfig::Tmux { .. } => "tmux",
-        }
-    }
 
     /// True for the per-session control client (ADR 0010 §D2).
-    pub fn is_control(&self) -> bool { self.endpoint == EndpointRef::Control }
+    pub fn is_control(&self) -> bool { matches!(self.endpoint, EndpointRef::Control) }
 }
 
-/// v0.3.0: Window is a pure UI layout container (ADR 0007 rewrite).
-/// It does NOT know its parent link — windows are independent entities
-/// that may be empty of panes and may exist without any link.
+/// v0.6.0: a window belongs to a session and mirrors either nothing (native)
+/// or one tmux window.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowInfo {
     pub id: WindowId,
@@ -140,57 +102,48 @@ pub struct WindowInfo {
     pub session_id: SessionId,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
-    /// Layout shape the window presents to the user (ADR 0007 v2 — Q2-adjacent).
-    pub layout: WindowLayout,
     /// Total window size in cells. The window's panes fit inside these
     /// dimensions (the pane reports its own geometry separately).
     pub cols: u16,
     pub rows: u16,
-    /// v0.4.0 (ADR 0008): the tmux window handle, e.g. `"@0"`. `None`
-    /// for virtual (purely xscore-side) windows. This is the identity
-    /// anchor that lets a WindowId be mapped back to tmux after a
-    /// restart — never use the tmux window *index* for identity (it
-    /// shifts when windows are added or removed).
+    /// Who owns this window's structure (ADR 0010 §D5).
     #[serde(default)]
-    pub tmux_window_handle: Option<String>,
+    pub backend: WindowBackend,
 }
 
-/// Window layout shape (ADR 0007 v2). The pane geometry in `PaneInfo`
-/// is the source of truth for where each pane actually appears; the
-/// window's `layout` is a hint for how to arrange them. `Single` is the
-/// default for new windows.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Where a window's structure comes from.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum WindowLayout {
-    /// Single pane fills the window (the default).
-    #[serde(rename = "single")]
-    Single,
-    /// Tab bar at the top; panes are full-window and switchable.
-    #[serde(rename = "tabs")]
-    Tabs,
-    /// All panes stacked left-to-right (horizontal split).
-    #[serde(rename = "split_h")]
-    SplitHorizontal,
-    /// All panes stacked top-to-bottom (vertical split).
-    #[serde(rename = "split_v")]
-    SplitVertical,
-    /// Uniform NxM grid of panes.
-    #[serde(rename = "grid")]
-    Grid { cols: u16, rows: u16 },
+pub enum WindowBackend {
+    /// A purely xscore-side window: no renderer exists yet, so it is a name and
+    /// a geometry (arch.md §13).
+    #[default]
+    Native,
+    /// A projection of a tmux window. `handle` is `@N` — the identity anchor,
+    /// never the window *index*, which shifts when windows are added or
+    /// removed (ADR 0008).
+    Tmux { handle: String },
 }
 
-impl Default for WindowLayout {
-    fn default() -> Self { WindowLayout::Single }
+impl WindowBackend {
+    /// The `@N` this window mirrors, if any.
+    pub fn tmux_handle(&self) -> Option<&str> {
+        match self {
+            WindowBackend::Native => None,
+            WindowBackend::Tmux { handle } => Some(handle),
+        }
+    }
+
+    pub fn is_tmux(&self) -> bool { self.tmux_handle().is_some() }
 }
 
-/// v0.3.0: Pane is the buffer-holder + UI geometry (ADR 0007 rewrite).
+
+/// v0.6.0: Pane is the buffer-holder + UI geometry.
 ///
-/// The pane's *buffer* is `Pane.bridge: Option<Arc<dyn PaneBridge>>` —
-/// `None` means the pane is orphan (no link attached); `Some(bridge)`
-/// means it has a live I/O channel (DirectBridge for raw links,
-/// TmuxBridge for tmux-backed links). The pane keeps its buffer
-/// content even when detached (it's the bridge that closes; the pane
-/// itself stays).
+/// The pane's *buffer* is the manager's per-pane `Arc<Mutex<RingBuffer>>` plus
+/// the live bridge it reads through (`DirectBridge`, `DaemonBridge` or
+/// `ControlBridge`); no bridge means the pane is orphan or detached. The buffer
+/// survives detach — the bridge is what closes, the pane stays (ADR 0008).
 ///
 /// The pane's *UI info* is the geometry fields (cols/rows/x/y) +
 /// which window it lives in + which link it's currently attached to.
@@ -218,20 +171,13 @@ pub struct PaneInfo {
     /// `xscore pane add-to-window --pane <pid> --window <wid>`; cleared
     /// by `xscore pane remove-from-window`.
     pub window_id: Option<WindowId>,
-    /// v0.4.0 (ADR 0008): the tmux pane handle, e.g. `"%3"`. `None` for
-    /// direct panes (buffered by `DirectBridge`'s ring buffer). When
-    /// `Some`, this pane is OWNED by tmux: it cannot be detached, and
-    /// it dies with the tmux session.
-    ///
-    /// v0.6.0 (ADR 0010 §D6): a pane on a `Control` link addresses itself with
-    /// `link_key` instead, and leaves this `None` — the sink handle belongs to
-    /// the old per-command tmux path.
-    #[serde(default)]
-    pub sink_handle: Option<String>,
     /// v0.6.0 (ADR 0010 §D3/D6): the address inside a shared link — `"%N"` for
     /// a pane on its session's control link, `None` on a `Pipe` link (one
     /// reader needs no address). This is what `%output %N` is routed by, so it
     /// must be unique inside a link.
+    ///
+    /// A pane that carries a key belongs to tmux: it cannot be detached and it
+    /// cannot be re-bound to a `Pipe` link.
     #[serde(default)]
     pub link_key: Option<String>,
 }

@@ -27,9 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ControlBridge`, `EndpointRef::{Pipe, Control}` on `LinkInfo`, `link_key` on
   `PaneInfo`, `tmux::format` (the `-F` parsers and `send_keys_literal`), and
   `util::resolve_socket` (`--socket`, then `XSCORE_SOCKET`, then the default
-  server). The old `?tmux=on` path is untouched and still used by migrated v2
-  links; the two cannot collide because an old link names its session
-  `xscore-<link_id>` and a managed session is named by the user.
+  server). The control client is now the only tmux path: the old `?tmux=on`
+  path it replaced is gone (see *Removed*), and `state migrate` converts the
+  rows it left behind.
 
 - **The Session tier: a workspace that owns windows, panes and links.**
   Links, windows and panes used to float with no owner — "which links belong to
@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Error::NotInSession`): a pane may only attach to a link, or join a window,
   of its own session.
 
+- **`--session <name>` on `window list`, `pane list` and `link list`**, so a
+  listing can be scoped to one workspace (arch.md §10). `window list` also
+  gained a `SESSION` column and lost `LAYOUT`; `link list` reports `pipe` or
+  `control`, since that is now what decides how many panes a link serves.
+
 ### Changed
 
 - **State schema v3, and `xscore state migrate` to get there.** `state.json`
@@ -63,6 +68,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default`) and reports how many sessions it created. `state migrate` runs
   before hydration, like `daemon serve`, because the file it converts is exactly
   the one hydration rejects.
+
+- **`WindowInfo.backend: WindowBackend { Native, Tmux { handle } }`** replaces
+  `tmux_window_handle` plus `layout`, and **`LinkInfo.endpoint: EndpointRef {
+  Pipe(TransportConfig), Control }`** replaces the `transport` + `sink` pair (one
+  of which was dead). A `Control` link stores no host, socket or session name of
+  its own — they live on `SessionBackend::Tmux`, so a link can never disagree
+  with its session about which tmux server it is talking to. A tmux session's
+  rows are created by structure commands through its control client (`window
+  new`, `pane new --window`) instead of by `link add`.
+
+- **`xscore state migrate` also upgrades a v3 file written before this change.**
+  v3 was never released, so the version stays 3 — but such a file must not
+  silently lose a tmux session. Each link still carrying the old tmux sink turns
+  its session into `SessionBackend::Tmux` (host `Local`, socket
+  `Named($XSCORE_SOCKET or "xscore")`, session name from the sink or
+  `xscore-<link id>`), and that session's link, window and pane rows are
+  dropped: the rows described a mechanism that no longer exists, and the
+  session re-enumerates itself over the control client on its next attach.
+  Native sessions keep every row. Loading such a file without migrating is a
+  hard error that names the command.
 
 ### Fixed
 
@@ -88,6 +113,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deleted temp dir, a stale mount) made every spawn fail with a bare
   `No such file or directory` naming the program, not the directory. The pty
   now falls back to the process's own cwd when `$HOME` is not a directory.
+
+### Removed
+
+- **The old tmux path: `?tmux=on`, the `sink/` module, and everything that
+  keyed off it.** There is exactly one way xscore touches tmux now — the
+  session's control client. Deleted: the whole `sink/` module (`Sink`,
+  `RawSink`, `TmuxSink`, the sink factory, `layout_from_tmux`), `TmuxBridge`
+  (one `capture-pane` / `send-keys` / `kill-pane` exec per operation),
+  `SinkConfig::{Raw, Tmux}` and the `?tmux=on|auto|local|remote` URL query with
+  its parser branches and tests, `Link.sink`, `Link.tmux_sink`,
+  `Link.active_pane` (the Q1 ledger), `WindowLayout` and `window set-layout`,
+  and the manager and CLI surface that existed only for them:
+  `SessionManager::{open_link, close_link, sync_link, tmux_sink,
+  link_for_window_handle, window_for_handle, first_window_with_retry,
+  sink_info_from_spec, set_window_layout}`, `SyncReport`,
+  `WindowInfo.tmux_window_handle`, `PaneInfo.sink_handle`, the errors
+  `NotTmuxLink` / `OpenOnlyForTmux` / `CloseOnlyForTmux` /
+  `TmuxLinkCannotBindPane`, and the `link open` / `link close` / `link sync`
+  subcommands (with `window add --link` and `--layout`).
+
+  Exclusivity is now a property of the link kind, not a ledger: a `Pipe` link
+  scan-detaches its previous pane on attach, a `Control` link addresses its
+  panes by `link_key`. `backends/ring_buffer.rs` became `core/buffer.rs` — the
+  pane's buffer belongs to the pane, not to the connection.
 
 ## [0.5.1] - 2026-10-21
 

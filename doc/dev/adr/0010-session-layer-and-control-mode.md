@@ -124,6 +124,20 @@ carry-over line buffer (a read can split a line; a screen redraw is one long
 unknown notifications — tmux renames them across versions (3.5a emits
 `%unlinked-window-close` where older releases emitted `%window-close`).
 
+**Amendment (implementation, 2026-10-21): the `Sink` trait is *not*
+introduced.** What shipped is `TmuxControl`'s reader loop: it already owns the
+carry-over buffer, because it already has to frame `%begin`/`%end` replies, so
+routing `%output %N` to the pane with that `link_key` (and every other
+notification to an event) is a match arm inside the code that parses the
+protocol — not a policy object. It has exactly one implementation: a `Pipe` link
+needs no demultiplexer at all (one reader, `key: None` is a tautology), so
+`PipeSink` would be a trivial forwarder and `Box<dyn Sink>` would buy a dynamic
+dispatch per chunk for nothing. That pairing — one impl plus a trivial
+forwarder — is precisely the ceremony that got the first `Sink` deleted (D7).
+Introduce the trait when a second link kind genuinely needs to demultiplex;
+`ControlBridge` is the per-pane handle the manager holds today, and it is what
+`data read/write` goes through.
+
 ### D5 — Window mirrors `@N`; layout belongs to tmux
 
 For a tmux-backed session, `WindowInfo` is a projection of a tmux window and the

@@ -1,4 +1,10 @@
-// cli/link.rs (v0.4.0 — `link add` auto-creates window/pane; tmux adoption)
+// cli/link.rs (v0.6.0 — a link is one connection inside a session)
+//
+// `link add` creates a `Pipe` link (a transport xscore owns) plus its first
+// window and pane; a tmux session's single link is created by `session new
+// --tmux` / `session adopt` and cannot be added to or deleted here (ADR 0010
+// §4/§D5). The old open/close/reconcile verbs are gone with the old tmux path:
+// those jobs belong to the session verbs and to control-mode events.
 use crate::core::{Error, LinkId, PaneId, SessionManager};
 use crate::url;
 use clap::{Args, Subcommand};
@@ -6,36 +12,24 @@ use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum LinkCmd {
-    /// Create a link plus its first window/pane.
+    /// Create a pipe link plus its first window/pane.
     ///
-    /// * default: a virtual window + a pane with a ring buffer
-    /// * `?tmux=on`: adopt the tmux session's window/pane (tmux is the
-    ///   source of truth for `@N`/`%N` and geometry)
-    /// * `--pane <pid>`: bind that existing pane instead (direct links only)
+    /// * default: a native window + a pane with a ring buffer
+    /// * `--pane <pid>`: bind that existing pane instead
+    ///
+    /// A tmux session has exactly one link — its control client — so this verb
+    /// is refused inside one; use `session new --tmux` / `session adopt`.
     Add(LinkAddArgs),
 
-    /// Attach to an existing tmux session by URL or `-c CONFIG` (tmux only)
-    Open(LinkOpenArgs),
-
-    /// No-op for tmux sessions (the tmux session is inherently persistent);
-    /// errors for non-tmux links (ADR 0005 invariant).
-    Close { #[arg(long)] id: String },
-
-    /// Full teardown: kill transport + sink; detach every attached pane (silently).
+    /// Full teardown of a pipe link: close its transport and orphan every
+    /// attached pane (buffers kept).
     Del { #[arg(long)] id: String },
 
     /// Print LinkInfo JSON
     Show { #[arg(long)] id: String },
 
-    /// List all in-memory links
-    List,
-
-    /// Compare xscore's registry against tmux's real structure (`@N`/`%N`).
-    /// Read-only unless `--heal`; externally created panes are only reported.
-    Sync {
-        #[arg(long)] id: String,
-        #[arg(long)] heal: bool,
-    },
+    /// List links, optionally only one session's.
+    List(LinkListArgs),
 
     /// Persistent ConnectSpec templates
     Config {
@@ -59,8 +53,8 @@ pub struct LinkAddArgs {
     pub id: Option<String>,
 
     /// Bind an EXISTING pane to the new link instead of creating one.
-    /// Not allowed for tmux links (tmux owns its panes) and not allowed
-    /// for a pane that is already attached (detach it first).
+    /// Refused for a pane that is already attached (detach it first) and for a
+    /// pane tmux owns (its `%N` addresses it on its session's control link).
     #[arg(long, value_name = "PANE_ID")]
     pub pane: Option<String>,
 
@@ -71,10 +65,10 @@ pub struct LinkAddArgs {
 }
 
 #[derive(Args)]
-pub struct LinkOpenArgs {
-    pub url: Option<String>,
-    #[arg(short = 'c', long)]
-    pub config: Option<String>,
+pub struct LinkListArgs {
+    /// Only this session's links.
+    #[arg(long, value_name = "NAME")]
+    pub session: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -88,12 +82,9 @@ pub enum LinkConfigCmd {
 pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
     match cmd {
         LinkCmd::Add(args) => add(mgr, args).await,
-        LinkCmd::Open(args) => open(mgr, args).await,
-        LinkCmd::Close { id } => close(mgr, &id).await,
         LinkCmd::Del { id } => del(mgr, &id).await,
         LinkCmd::Show { id } => show(mgr, &id).await,
-        LinkCmd::List => list(mgr).await,
-        LinkCmd::Sync { id, heal } => sync(mgr, &id, heal).await,
+        LinkCmd::List(args) => list(mgr, args).await,
         LinkCmd::Config { cmd } => config_cmd(cmd).await,
     }
 }
@@ -115,51 +106,6 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
         println!("window: {wid}");
     }
     println!("pane:  {}", result.pane_id);
-    Ok(())
-}
-
-async fn sync(mgr: Arc<SessionManager>, id: &str, heal: bool) -> anyhow::Result<()> {
-    let lid = LinkId::parse(id)?;
-    let report = mgr.sync_link(lid, heal).await?;
-    println!("link: {}", lid);
-    if report.is_clean() {
-        println!("in sync: registry matches tmux");
-        return Ok(());
-    }
-    for h in &report.missing_windows {
-        println!("drift: window {h} exists in tmux but not in xscore");
-    }
-    for h in &report.stale_windows {
-        println!("drift: window {h} in xscore is gone from tmux");
-    }
-    for h in &report.missing_panes {
-        println!("drift: pane {h} exists in tmux but not in xscore (not adopted)");
-    }
-    for h in &report.stale_panes {
-        println!("drift: pane {h} in xscore is gone from tmux");
-    }
-    if heal {
-        println!(
-            "healed: {} row(s) corrected, {} removed",
-            report.healed, report.removed
-        );
-    } else {
-        println!("run `xscore link sync --id {lid} --heal` to apply");
-    }
-    Ok(())
-}
-
-async fn open(mgr: Arc<SessionManager>, args: LinkOpenArgs) -> anyhow::Result<()> {
-    let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
-    let link_id = mgr.open_link(spec, address).await?;
-    println!("link:  {link_id}");
-    Ok(())
-}
-
-async fn close(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
-    let lid = LinkId::parse(id)?;
-    mgr.close_link(lid).await?;
-    println!("closed: {lid}");
     Ok(())
 }
 
@@ -187,11 +133,21 @@ async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
-    println!("{:<36}  {:<36}", "LINK ID", "NAME");
+async fn list(mgr: Arc<SessionManager>, args: LinkListArgs) -> anyhow::Result<()> {
+    let only = match args.session.as_deref() {
+        Some(name) => Some(mgr.resolve_session(Some(name)).await?),
+        None => None,
+    };
+    println!("{:<36}  {:<36}  {:<8}", "LINK ID", "NAME", "KIND");
     for link in mgr.links.list().await {
         let info = &link.info;
-        println!("{:<36}  {:<36}", info.id, info.name);
+        if let Some(sid) = only {
+            if info.session_id != sid {
+                continue;
+            }
+        }
+        let kind = if info.is_control() { "control" } else { "pipe" };
+        println!("{:<36}  {:<36}  {:<8}", info.id, info.name, kind);
     }
     Ok(())
 }
@@ -253,7 +209,6 @@ fn merge_specs(template: crate::model::ConnectSpec, cli: crate::model::ConnectSp
     crate::model::ConnectSpec {
         name: if cli.name.is_empty() { template.name } else { cli.name },
         transport: cli.transport,
-        sink: template.sink,
         address: cli.address,
     }
 }

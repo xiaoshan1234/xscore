@@ -1,49 +1,43 @@
-// core/manager.rs (v0.4.0 — tmux adoption, ADR 0008)
+// core/manager.rs (v0.6.0 — Session owns the backend, ADR 0010)
 //
 // All methods are async; all errors flow through `core::Error`. The
 // manager holds `Arc<...>` registries so cloning the manager is cheap.
 //
-// Creation semantics changed in v0.4.0:
-//   - `add_link(spec, addr, id, pane)` ALWAYS yields a usable pane.
-//       * tmux link        → adopts the tmux session's first window and
-//                            first pane (tmux is the source of truth for
-//                            `@N`/`%N` and for geometry).
-//       * direct + `pane`  → binds that existing (hollow) pane.
-//       * direct + no pane → creates a virtual window + a pane and its
-//                            `DirectBridge` (ring buffer).
-//   - `add_window(..., link)` creates a tmux window when a tmux link is
-//     given (tmux reports the handle/geometry), else a virtual window.
-//   - `add_pane(..., window)` splits inside a real tmux window when the
-//     window has a `tmux_window_handle`; otherwise it is a hollow pane.
+// Creation semantics:
+//   - `add_link(spec, addr, id, pane)` yields a `Pipe` link and a usable pane:
+//       * `pane: Some(pid)` → binds that existing (hollow) pane;
+//       * `pane: None`      → creates a native window + a pane and its
+//                             `DirectBridge` (ring buffer).
+//     There is no tmux branch: a tmux session is created/adopted at the
+//     session level (`create_tmux_session` / `adopt_tmux_session`).
+//   - `add_window_in(session, ..)` creates a real tmux window through the
+//     session's control client when the session is tmux-backed, else a native
+//     window.
+//   - `add_pane_in(.., window)` splits inside a real tmux window (through the
+//     control client) when the window has a `WindowBackend::Tmux`, else it
+//     inserts a hollow pane.
 //
-// `detach_pane` never touches a shared transport (P0-a) and refuses for
-// tmux-owned panes (they are tmux's, not ours). `del_link` on a tmux
-// link kills the session and drops the panes with it; on a direct link
-// it orphans the panes and keeps their buffers.
+// `detach_pane` never touches a shared transport (P0-a) and refuses for panes
+// that tmux owns (they are addressed by `link_key`). `del_link` on a `Pipe`
+// link orphans its panes and keeps their buffers; a `Control` link cannot be
+// deleted at all — `session kill` / `session forget` are the verbs.
 //
-// v0.6.0 (ADR 0010 §1) adds the Session tier ABOVE these three entities. A
-// session is the workspace that owns links, windows and panes; the children
-// carry `session_id`, and `del_session` is the only cascade in the model. The
-// `*_in(session, ..)` methods take the session explicitly; the older
-// `add_link`/`add_window`/`add_pane` are thin delegates that resolve the
-// default session first, so no caller had to change.
+// v0.6.0 PR3b (ADR 0010 §D2) added tmux-backed sessions: `create_tmux_session`
+// / `adopt_tmux_session` spawn ONE `tmux -C attach` client per session, which
+// is the session's single `Control` link. Pane bytes arrive as `%output %N`
+// and are routed to the pane whose `link_key` is that handle; structure arrives
+// as events. PR4 deleted the old per-command tmux path, so the control client is
+// only way xscore touches tmux data.
 //
 // State persistence: `save_state` writes `StateSnapshot` (schema v3);
-// see `core::state` for the version gate and `migrate_v2_to_v3`.
-//
-// v0.6.0 PR3b (ADR 0010 §D2) adds tmux-backed sessions: `create_tmux_session` /
-// `adopt_tmux_session` spawn ONE `tmux -C attach` client per session, which is
-// the session's single `Control` link. Pane bytes arrive as `%output %N` and
-// are routed to the pane whose `link_key` is that handle; structure arrives as
-// events. The two mechanisms must never meet: the old `?tmux=on` path names its
-// sessions `xscore-<link_id>`, a managed session is named by the user, and
-// nothing here ever reaches for a `TmuxSink`.
+// see `core::state` for the version gate and the migrations.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{Error, LinkAddress, Result};
+use super::buffer::{RingBuffer, DIRECT_BUFFER_CAPACITY};
 use super::id::{LinkId, PaneId, SessionId, WindowId};
 use super::link::Link;
 use super::link_registry::LinkRegistry;
@@ -53,55 +47,23 @@ use super::session_registry::SessionRegistry;
 use super::window::Window;
 use super::window_registry::WindowRegistry;
 
-use crate::backends::{ControlBridge, DaemonBridge, DirectBridge, PaneBridge, RingBuffer, TmuxBridge};
+use crate::backends::{ControlBridge, DaemonBridge, DirectBridge, PaneBridge};
 use crate::daemon::client::DaemonClient;
 use crate::model::{
-    ConnectSpec, EndpointRef, PaneInfo, SessionBackend, SessionInfo, SinkConfig, TmuxHostConfig,
-    TmuxSocket, WindowInfo, WindowLayout,
+    ConnectSpec, EndpointRef, PaneInfo, SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket,
+    TransportConfig, WindowBackend, WindowInfo,
 };
-use crate::sink::factory::sink_for;
-use crate::sink::tmux::TmuxSink;
-use crate::sink::{layout_from_tmux, Sink};
 use crate::tmux::{PaneLine, TmuxControl, TmuxEvent, WindowLine};
 use crate::transport::factory as transport_factory;
 use crate::transport::NoopTransport;
-use crate::util::tmux_arg_socket;
 
-/// What `link add` produced. v0.4.0: a link always comes with a pane
-/// (and usually a window), so the CLI can print all three ids.
+/// What `link add` produced. A pipe link always comes with a pane (and usually
+/// a window), so the CLI can print all three ids.
 #[derive(Debug, Clone, Copy)]
 pub struct LinkAddResult {
     pub link_id: LinkId,
     pub window_id: Option<WindowId>,
     pub pane_id: PaneId,
-}
-
-/// Drift report for `link sync` (v0.4.0). Handles are `@N`/`%N`, never
-/// indexes.
-#[derive(Debug, Clone, Default)]
-pub struct SyncReport {
-    /// Windows tmux has but xscore does not track.
-    pub missing_windows: Vec<String>,
-    /// Windows xscore tracks but tmux no longer has.
-    pub stale_windows: Vec<String>,
-    /// Panes tmux has in a tracked window but xscore does not track
-    /// (never adopted — report only).
-    pub missing_panes: Vec<String>,
-    /// Panes xscore tracks but tmux no longer has.
-    pub stale_panes: Vec<String>,
-    /// Registry rows corrected in place (geometry etc.).
-    pub healed: usize,
-    /// Registry rows dropped by `--heal`.
-    pub removed: usize,
-}
-
-impl SyncReport {
-    pub fn is_clean(&self) -> bool {
-        self.missing_windows.is_empty()
-            && self.stale_windows.is_empty()
-            && self.missing_panes.is_empty()
-            && self.stale_panes.is_empty()
-    }
 }
 
 #[derive(Clone)]
@@ -127,11 +89,9 @@ pub struct SessionManager {
     /// (that is what `data_smoke` exercises).
     daemon: Option<Arc<DaemonClient>>,
     /// v0.6.0 (ADR 0010 §D2): the live control client of every tmux-backed
-    /// session this manager has attached. One per session, because a tmux
-    /// session is driven by exactly one mechanism: the old `?tmux=on` path
-    /// (`TmuxSink`) must never touch a session listed here, and the two cannot
-    /// collide because old links name their sessions `xscore-<link_id>` while
-    /// a managed session is named by the user.
+    /// session this manager has attached. One per session — a tmux session is
+    /// driven by exactly one client, and a second subscriber for the same
+    /// `%output %N` would append every byte twice.
     tmux_controls: Arc<Mutex<HashMap<SessionId, Arc<TmuxControl>>>>,
     /// Serialises structure reconciliation. The event pump and a command can
     /// both reconcile at once (a `%window-add` arriving during `window ls`),
@@ -187,16 +147,21 @@ impl SessionManager {
 
     /// v0.5.0: is this link's transport alive right now?
     ///
-    /// tmux links: yes — tmux is its own resident server (and hydration
-    /// already refused to load a link whose session is gone).
-    /// direct links: ask the daemon. Without a daemon (in-process mode)
-    /// fall back to the flag recorded at construction/hydration time.
+    /// tmux (`Control`) links: the link's liveness is the session's — it is the
+    /// one connection to the server, so "is the link up" and "is the session
+    /// streaming" are the same question (arch.md §4).
+    /// pipe links: ask the daemon. Without a daemon (in-process mode) fall back
+    /// to the flag recorded at construction/hydration time.
     pub async fn link_is_connected(&self, lid: LinkId) -> bool {
         let Some(link) = self.links.get(lid).await else { return false };
-        // A control link's liveness is the session's: it is the one connection
-        // to the server, so "is the link up" and "is the session streaming" are
-        // the same question (arch.md §4).
         if link.info.is_control() {
+            // The attached client is the fast, exact answer; note that a stale
+            // handle (closed by `%exit`) must not count as connected.
+            if let Some(control) = &link.control {
+                if !control.is_closed() {
+                    return true;
+                }
+            }
             let held = { self.tmux_controls.lock().await.get(&link.info.session_id).cloned() };
             if let Some(control) = held {
                 return !control.is_closed();
@@ -214,12 +179,9 @@ impl SessionManager {
                 SessionBackend::Native => false,
             };
         }
-        match &link.info.sink {
-            SinkConfig::Tmux { .. } => true,
-            SinkConfig::Raw => match &self.daemon {
-                Some(_) => crate::daemon::client::probe_link(lid).await.unwrap_or(false),
-                None => link.connected,
-            },
+        match &self.daemon {
+            Some(_) => crate::daemon::client::probe_link(lid).await.unwrap_or(false),
+            None => link.connected,
         }
     }
 
@@ -339,25 +301,21 @@ impl SessionManager {
             .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
 
         if let SessionBackend::Tmux { host, socket, session: name } = &session.info.backend {
-            // Only a session we actually manage through a control link is
-            // killed here: a migrated v2 tmux session is still driven by its
-            // old `TmuxSink` link, and killing it twice (or behind its back)
-            // would be the two-mechanisms bug this PR exists to prevent.
-            if self.control_link_id(id).await.is_some() {
-                let control = { self.tmux_controls.lock().await.remove(&id) };
-                if let Some(control) = control {
-                    let _ = control.close().await;
-                }
-                // Best effort: the session may already be gone, and `session
-                // kill` must still drop the rows in that case.
-                let _ = self
-                    .run_tmux(
-                        host,
-                        socket,
-                        &["kill-session".to_string(), "-t".to_string(), name.clone()],
-                    )
-                    .await;
+            // Destroy means destroy: the control client goes first (so nothing
+            // is streaming into rows that are about to disappear), then
+            // `kill-session` takes the server session down. Both steps are best
+            // effort — a session that is already gone must still lose its rows.
+            let control = { self.tmux_controls.lock().await.remove(&id) };
+            if let Some(control) = control {
+                let _ = control.close().await;
             }
+            let _ = self
+                .run_tmux(
+                    host,
+                    socket,
+                    &["kill-session".to_string(), "-t".to_string(), name.clone()],
+                )
+                .await;
         }
 
         let link_ids: Vec<LinkId> = self
@@ -392,14 +350,11 @@ impl SessionManager {
         for info in &stragglers {
             let bridge = self.pane_bridges.lock().await.remove(&info.id);
             self.pane_buffers.lock().await.remove(&info.id);
-            // A tmux bridge is dropped, never closed: `close()` is a real
-            // `kill-pane`, and the tmux session is already gone (del_link).
-            // A native bridge is closed so its pump stops instead of being
-            // left holding the transport.
+            // Releasing a bridge only stops a pump: a direct bridge's `close`
+            // is "stop my reader", a control bridge's is a no-op, and the tmux
+            // session is already gone either way.
             if let Some(b) = bridge {
-                if info.sink_handle.is_none() {
-                    let _ = b.close().await;
-                }
+                let _ = b.close().await;
             }
             self.panes.remove(info.id).await;
         }
@@ -589,13 +544,9 @@ impl SessionManager {
     /// The event pump keeps a live manager in step, but this CLI is one
     /// process per command: between commands no client is attached, so a
     /// window created outside xscore is invisible until something attaches.
-    /// Listings call this for exactly that reason. A session with no control
-    /// link (the old `?tmux=on` shape) is left alone — two mechanisms must
-    /// never drive one tmux session.
+    /// Listings call this for exactly that reason, and attaching is also what
+    /// gives a migrated session its control link (see `ensure_control_link`).
     pub async fn refresh_tmux_session(&self, id: SessionId) -> Result<()> {
-        if self.control_link_id(id).await.is_none() {
-            return Ok(());
-        }
         self.ensure_tmux_attached(id).await.map(|_| ())
     }
 
@@ -621,7 +572,10 @@ impl SessionManager {
     /// Spawn the control client, enumerate the session, start the pumps.
     ///
     /// The caller serialises attaches (`tmux_attach`); this is not reentrant.
+    /// A session that has no control link yet (one whose rows were converted by
+    /// `state migrate`) gets it here: attaching IS what creates it.
     async fn attach_tmux(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
+        self.ensure_control_link(id).await?;
         let info = self.get_session(id).await?;
         let SessionBackend::Tmux { host, socket, session } = info.backend else {
             return Err(Error::NotTmuxSession(id));
@@ -648,8 +602,27 @@ impl SessionManager {
         }
 
         self.tmux_controls.lock().await.insert(id, Arc::clone(&control));
+        self.record_control(id, &control).await;
         self.start_event_pump(id, Arc::clone(&control), events);
         Ok(control)
+    }
+
+    /// Note the live client on the session's control link (ADR 0010 §4: the
+    /// link IS the connection, so the handle belongs on the link row as well as
+    /// in the session-keyed map). Best effort: a session that has no control
+    /// link yet (attachment happens before the row exists on the very first
+    /// attach) simply has nothing to record.
+    async fn record_control(&self, id: SessionId, control: &Arc<TmuxControl>) {
+        let Some(link_id) = self.control_link_id(id).await else { return };
+        let Some(existing) = self.links.get(link_id).await else { return };
+        let rebuilt = Link {
+            id: link_id,
+            info: existing.info.clone(),
+            transport: Arc::clone(&existing.transport),
+            control: Some(Arc::clone(control)),
+            connected: true,
+        };
+        self.links.insert(rebuilt).await;
     }
 
     /// The session's one link (ADR 0010 §4, "One tmux session, one link").
@@ -710,16 +683,30 @@ impl SessionManager {
 
     /// Create the session's single link and attach its control client.
     async fn open_control_link(&self, id: SessionId) -> Result<LinkId> {
+        let link_id = self.ensure_control_link(id).await?;
+        self.attach_tmux(id).await?;
+        Ok(link_id)
+    }
+
+    /// Make sure the session has its control link row, and return its id.
+    ///
+    /// Idempotent: this is the one place that materialises the link, so a
+    /// session created by `session new --tmux`, one adopted, and one whose rows
+    /// came from `state migrate` all end up with exactly one.
+    async fn ensure_control_link(&self, id: SessionId) -> Result<LinkId> {
+        if let Some(link_id) = self.control_link_id(id).await {
+            return Ok(link_id);
+        }
         let info = self.get_session(id).await?;
         let SessionBackend::Tmux { host, socket, session } = info.backend else {
             return Err(Error::NotTmuxSession(id));
         };
         let link_id = LinkId::new();
         // The link is the connection to the *server*, so the process is the
-        // connection: `transport` records the argv that spawned it (readable in
+        // connection: `address` records the argv that spawned it (readable in
         // `link show`), while the live client is the `TmuxControl` handle in
-        // `tmux_controls`. Neither a transport nor a sink is ever used to move
-        // these bytes.
+        // `control`/`tmux_controls`. Neither a transport nor a sink is ever
+        // used to move these bytes — the endpoints's kind says so.
         let argv = crate::tmux::argv(&crate::tmux::host_prefix(&host), &socket, &session);
         let mut words = argv.into_iter();
         let command = words.next().unwrap_or_else(|| "tmux".to_string());
@@ -732,19 +719,14 @@ impl SessionManager {
                 session_id: id,
                 name: format!("{session}-ctl"),
                 created_at: chrono::Utc::now(),
-                address: LinkAddress::Shell { command: command.clone(), args: args.clone() },
-                transport: crate::model::TransportConfig::Shell { command, args, cwd: None },
-                sink: SinkConfig::Raw,
+                address: LinkAddress::Shell { command, args },
                 endpoint: EndpointRef::Control,
             },
             transport: Arc::new(NoopTransport),
-            sink: Box::new(crate::sink::raw::RawSink),
-            tmux_sink: None,
-            active_pane: Mutex::new(None),
+            control: None,
             connected: true,
         };
         self.links.insert(link).await;
-        self.attach_tmux(id).await?;
         Ok(link_id)
     }
 
@@ -782,7 +764,7 @@ impl SessionManager {
             .await
             .iter()
             .filter(|w| w.info.session_id == id)
-            .filter(|w| match &w.info.tmux_window_handle {
+            .filter(|w| match w.info.backend.tmux_handle() {
                 Some(handle) => !seen.contains(handle),
                 None => false,
             })
@@ -861,7 +843,6 @@ impl SessionManager {
                 updated.name = window.name.clone();
                 updated.cols = window.cols;
                 updated.rows = window.rows;
-                updated.layout = layout_from_tmux(&window.layout);
                 if updated != before {
                     let w = Window::new(updated);
                     *w.panes.lock().await = arc.panes.lock().await.clone();
@@ -877,10 +858,9 @@ impl SessionManager {
                     session_id: id,
                     name: window.name.clone(),
                     created_at: chrono::Utc::now(),
-                    layout: layout_from_tmux(&window.layout),
                     cols: window.cols,
                     rows: window.rows,
-                    tmux_window_handle: Some(window.handle.clone()),
+                    backend: WindowBackend::Tmux { handle: window.handle.clone() },
                 };
                 self.windows.insert(Window::new(info)).await;
                 changed = true;
@@ -936,7 +916,6 @@ impl SessionManager {
                         y: pane.y,
                         link_id: Some(link_id),
                         window_id: Some(wid),
-                        sink_handle: None,
                         link_key: Some(pane.handle.clone()),
                     };
                     self.panes.insert(info).await;
@@ -978,7 +957,7 @@ impl SessionManager {
             .list_all()
             .await
             .iter()
-            .find(|w| w.info.session_id == id && w.info.tmux_window_handle.as_deref() == Some(handle))
+            .find(|w| w.info.session_id == id && w.info.backend.tmux_handle() == Some(handle))
             .map(|w| w.info.id)
     }
 
@@ -1194,27 +1173,26 @@ impl SessionManager {
         self.require_session(session).await?;
         // ADR 0010 §4: a tmux session has exactly one link — the control
         // client. A second one would be a second mechanism driving the same
-        // server session, which is the one thing this PR must never allow.
+        // server session.
         if let Some(existing) = self.sessions.get(session).await {
             if existing.info.is_tmux() {
                 return Err(Error::TmuxSessionHasOneLink(session));
             }
         }
-        // --- validate before allocating anything (a rejected call must
-        //     not leave a tmux session or a spawned child behind) ---
-        let is_tmux = !matches!(spec.sink, SinkConfig::Raw);
-        if is_tmux && pane.is_some() {
-            return Err(Error::TmuxLinkCannotBindPane);
-        }
+        // --- validate before allocating anything (a rejected call must not
+        //     leave a spawned child behind) ---
         if let Some(pid) = pane {
             let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
             if let Some(existing) = info.link_id {
                 return Err(Error::PaneAlreadyAttached(pid, existing));
             }
-            if info.sink_handle.is_some() {
-                // tmux-owned panes are never re-bound: their identity is
-                // the `%N` handle tmux gave them.
-                return Err(Error::TmuxLinkCannotBindPane);
+            if let Some(key) = info.link_key.clone() {
+                // A pane that carries a `%N` belongs to tmux and is addressed on
+                // its session's control link; there is nothing here to re-bind.
+                return Err(Error::Invalid(format!(
+                    "pane {pid} is addressed by {key} on its session's control link; \
+                     it cannot be attached to a pipe link"
+                )));
             }
             if info.session_id != session {
                 // Cross-session binding is never implicit (arch.md §8).
@@ -1234,39 +1212,27 @@ impl SessionManager {
             None => LinkId::new(),
         };
 
-        // v0.5.0 (ADR 0009): with the daemon enabled, a direct link's REAL
+        // v0.5.0 (ADR 0009): with the daemon enabled, a pipe link's REAL
         // transport is created inside the daemon and the CLI only keeps a
         // handle to it. That is what makes the link outlive this process.
-        // tmux links never take this path — tmux is already resident.
-        let daemon = match (&spec.sink, &self.daemon) {
-            (SinkConfig::Raw, Some(client)) => Some(Arc::clone(client)),
-            _ => None,
-        };
+        let daemon = self.daemon.clone();
         if let Some(client) = &daemon {
             client.ensure().await?;
             client.create_link(link_id, spec.transport.clone()).await?;
         }
 
-        let mut transport_arc: Arc<dyn crate::transport::Transport> = match &daemon {
+        let transport_arc: Arc<dyn crate::transport::Transport> = match &daemon {
             Some(_) => Arc::new(crate::daemon::DaemonTransport::new(link_id)),
-            None => Arc::from(transport_factory::transport_for(spec.transport.clone()).await?),
-        };
-        let transport_kind: &'static str = transport_arc.kind();
-        let transport_mut: &mut dyn crate::transport::Transport =
-            Arc::get_mut(&mut transport_arc)
-                .ok_or_else(|| Error::Config(
-                    "transport Arc unexpectedly shared at link-construction time".into()
-                ))?;
-        let sink = sink_for(link_id, &spec.sink, transport_kind, transport_mut).await?;
-        // Wire the sink to the transport (no-op for both current impls, but
-        // this is the documented once-per-link-lifetime hook).
-        sink.attach(&*transport_mut).await?;
-
-        let tmux_arc: Option<Arc<TmuxSink>> = match &spec.sink {
-            SinkConfig::Raw => None,
-            SinkConfig::Tmux { .. } => {
-                let (mode, session_name) = sink_info_from_spec(&spec, link_id);
-                Some(Arc::new(TmuxSink::adopt(link_id, &mode, &session_name)))
+            None => {
+                // The transport IS the byte source of a pipe link, so it is
+                // opened once here (the other callers of `transport_for` own
+                // their own lifetime): a bridge may then read and write without
+                // a second handshake. The deleted sink factory used to do this
+                // for the raw case; PR4 moved the one call that mattered here.
+                let mut transport =
+                    transport_factory::transport_for(spec.transport.clone()).await?;
+                transport.open().await?;
+                Arc::from(transport)
             }
         };
 
@@ -1278,57 +1244,10 @@ impl SessionManager {
             Option<Arc<dyn PaneBridge>>,
             Option<Window>,
         );
-        let (window_id, pane_id, pane_record, bridge, window_record): Branch =
-            match (&spec.sink, pane) {
-            // (a) tmux link: adopt what tmux created for us.
-            (SinkConfig::Tmux { .. }, _) => {
-                let ts = tmux_arc.as_ref().expect("tmux sink present");
-                let win = first_window_with_retry(ts).await?;
-                let wid = WindowId::new();
-                let w = Window::new(WindowInfo {
-                    id: wid,
-                    session_id: session,
-                    name: win.name.clone(),
-                    created_at: chrono::Utc::now(),
-                    layout: layout_from_tmux(&win.layout),
-                    cols: win.cols,
-                    rows: win.rows,
-                    tmux_window_handle: Some(win.handle.clone()),
-                });
-                let panes = ts.list_panes(&win.handle).await?;
-                let first = panes.into_iter().next().ok_or_else(|| {
-                    Error::Sink(format!("tmux window {} has no panes", win.handle))
-                })?;
-                let pid = PaneId::new();
-                let _ = w.add_pane(pid).await;
-                (
-                    Some(wid),
-                    pid,
-                    PaneInfo {
-                        id: pid,
-                        session_id: session,
-                        name: format!("p-{pid}"),
-                        created_at: chrono::Utc::now(),
-                        cols: first.cols,
-                        rows: first.rows,
-                        x: first.x,
-                        y: first.y,
-                        link_id: Some(link_id),
-                        window_id: Some(wid),
-                        sink_handle: Some(first.handle.clone()),
-                        link_key: None,
-                    },
-                    Some(Arc::new(TmuxBridge {
-                        sink: Arc::downgrade(ts),
-                        handle: first.handle,
-                    }) as Arc<dyn PaneBridge>),
-                    Some(w),
-                )
-            }
-
-            // (b) direct link bound to an existing pane: no window is
-            //     created — the pane keeps whatever window it had.
-            (SinkConfig::Raw, Some(pid)) => {
+        let (window_id, pane_id, pane_record, bridge, window_record): Branch = match pane {
+            // (a) bind an existing pane: no window is created — the pane keeps
+            //     whatever window it had.
+            Some(pid) => {
                 let bridge: Arc<dyn PaneBridge> = match &daemon {
                     Some(client) => {
                         client.create_pane(pid).await?;
@@ -1341,13 +1260,13 @@ impl SessionManager {
                         ))
                     }
                 };
-                let mut info = self.panes.get(pid).await.expect("checked above");
+                let mut info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
                 info.link_id = Some(link_id);
                 (None, pid, info, Some(bridge), None)
             }
 
-            // (c) direct link with no pane: virtual window + first pane.
-            (SinkConfig::Raw, None) => {
+            // (b) a pipe link with no pane: native window + first pane.
+            None => {
                 let wid = WindowId::new();
                 let pid = PaneId::new();
                 let w = Window::new(WindowInfo {
@@ -1355,10 +1274,9 @@ impl SessionManager {
                     session_id: session,
                     name: format!("w-{}", &wid.to_string()[..8]),
                     created_at: chrono::Utc::now(),
-                    layout: WindowLayout::Single,
                     cols: 120,
                     rows: 30,
-                    tmux_window_handle: None,
+                    backend: WindowBackend::Native,
                 });
                 let _ = w.add_pane(pid).await;
                 let bridge: Arc<dyn PaneBridge> = match &daemon {
@@ -1387,7 +1305,6 @@ impl SessionManager {
                         y: 0,
                         link_id: Some(link_id),
                         window_id: Some(wid),
-                        sink_handle: None,
                         link_key: None,
                     },
                     Some(bridge),
@@ -1402,21 +1319,17 @@ impl SessionManager {
             name: if spec.name.is_empty() { link_id.to_string() } else { spec.name.clone() },
             created_at: chrono::Utc::now(),
             address: address.clone(),
-            transport: spec.transport.clone(),
-            sink: spec.sink.clone(),
-            // The old (`?tmux=on`) and native paths are `Pipe` links: one byte
-            // stream, at most one reader. A `Control` link is created only by
+            // Every link this method creates is a pipe: one byte stream, at
+            // most one reader. A `Control` link is created only by
             // `open_control_link` (ADR 0010 §D2).
-            endpoint: EndpointRef::Pipe,
+            endpoint: EndpointRef::Pipe(spec.transport.clone()),
         };
 
         let link = Link {
             id: link_id,
             info: link_info,
             transport: transport_arc,
-            sink,
-            tmux_sink: tmux_arc,
-            active_pane: Mutex::new(Some(pane_id)),
+            control: None,
             connected: true,
         };
         self.links.insert(link).await;
@@ -1451,27 +1364,12 @@ impl SessionManager {
         Ok(LinkAddResult { link_id, window_id, pane_id })
     }
 
-    /// Attach to an existing tmux session (ADR 0005). Stub — full wiring
-    /// lands in the tmux-attach persistence PR.
-    pub async fn open_link(
-        &self,
-        _spec: ConnectSpec,
-        address: LinkAddress,
-    ) -> Result<LinkId> {
-        let kind = address.kind();
-        if kind != "tmux" {
-            return Err(Error::OpenOnlyForTmux(kind));
-        }
-        todo!("stub for slice; real impl lands in tmux-attach persistence PR")
-    }
-
     /// Full teardown of a link.
     ///
-    /// * tmux link: kill the session; every pane/window that came from it
-    ///   is removed from the registry (no per-pane `kill-pane` needed —
-    ///   the session takes them all down).
-    /// * direct link: orphan every attached pane (buffer kept), close the
+    /// * pipe link: orphan every attached pane (buffer kept), close the
     ///   transport ONCE, remove the link.
+    /// * control link: refused (ADR 0010 §D5) — see `del_session` /
+    ///   `forget_session` for the two verbs that do tear a tmux session down.
     pub async fn del_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
 
@@ -1481,93 +1379,39 @@ impl SessionManager {
             return Err(Error::ControlLinkNotDeletable(id));
         }
 
-        if let Some(ts) = arc_link.tmux_sink.clone() {
-            let handles: HashSet<String> = ts
-                .list_windows()
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|w| w.handle)
-                .collect();
-
-            // Windows that belong to this session, plus panes attached to
-            // the link (the two sets should coincide; use the union so a
-            // drifted registry is still cleaned up).
-            let doomed_windows: Vec<WindowId> = self
-                .windows
-                .list_all()
-                .await
-                .iter()
-                .filter(|w| match &w.info.tmux_window_handle {
-                    Some(h) => handles.contains(h),
-                    None => false,
-                })
-                .map(|w| w.info.id)
-                .collect();
-
-            let doomed_panes: Vec<PaneId> = self
-                .panes
-                .list_all()
-                .await
-                .iter()
-                .filter(|p| {
-                    p.link_id == Some(id)
-                        || p.window_id.map(|w| doomed_windows.contains(&w)).unwrap_or(false)
-                })
-                .map(|p| p.id)
-                .collect();
-
-            {
-                let mut bridges = self.pane_bridges.lock().await;
-                let mut buffers = self.pane_buffers.lock().await;
-                for pid in &doomed_panes {
-                    // No close(): kill-session is about to take them down.
-                    bridges.remove(pid);
-                    buffers.remove(pid);
-                }
+        let attached: Vec<PaneId> = self
+            .panes
+            .list_all()
+            .await
+            .iter()
+            .filter(|p| p.link_id == Some(id))
+            .map(|p| p.id)
+            .collect();
+        for pid in attached {
+            let bridge = self.pane_bridges.lock().await.remove(&pid);
+            if let Some(b) = bridge {
+                // DirectBridge::close() stops the pump only (in daemon
+                // mode: Detach), so the transport below is closed
+                // exactly once, on purpose.
+                let _ = b.close().await;
             }
-            for pid in &doomed_panes {
-                self.panes.remove(*pid).await;
+            if let Some(mut info) = self.panes.get(pid).await {
+                info.link_id = None;
+                self.panes.insert(info).await;
             }
-            for wid in &doomed_windows {
-                self.windows.remove(*wid).await;
+        }
+        match &self.daemon {
+            // ADR 0009: the daemon owns the transport. DeleteLink
+            // closes it once and unbinds its panes — but keeps their
+            // slots and buffers, so the history is still readable and
+            // a later re-attach resumes where it left off.
+            Some(client) => {
+                // Best effort: if the daemon is down the transport is
+                // already gone, which is the state we wanted anyway.
+                let _ = client.delete_link(id).await;
             }
-            ts.close().await?;
-        } else {
-            let attached: Vec<PaneId> = self
-                .panes
-                .list_all()
-                .await
-                .iter()
-                .filter(|p| p.link_id == Some(id))
-                .map(|p| p.id)
-                .collect();
-            for pid in attached {
-                let bridge = self.pane_bridges.lock().await.remove(&pid);
-                if let Some(b) = bridge {
-                    // DirectBridge::close() stops the pump only (in daemon
-                    // mode: Detach), so the transport below is closed
-                    // exactly once, on purpose.
-                    let _ = b.close().await;
-                }
-                if let Some(mut info) = self.panes.get(pid).await {
-                    info.link_id = None;
-                    self.panes.insert(info).await;
-                }
-            }
-            match &self.daemon {
-                // ADR 0009: the daemon owns the transport. DeleteLink
-                // closes it once and unbinds its panes — but keeps their
-                // slots and buffers, so the history is still readable and
-                // a later re-attach resumes where it left off.
-                Some(client) => {
-                    // Best effort: if the daemon is down the transport is
-                    // already gone, which is the state we wanted anyway.
-                    let _ = client.delete_link(id).await;
-                }
-                None => {
-                    arc_link.transport.close().await?;
-                }
+            None => {
+                arc_link.transport.close().await?;
             }
         }
 
@@ -1576,96 +1420,74 @@ impl SessionManager {
         Ok(())
     }
 
-    pub async fn close_link(&self, id: LinkId) -> Result<()> {
-        let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
-        let kind = arc_link.info.transport_str();
-        if kind != "tmux" {
-            return Err(Error::CloseOnlyForTmux(kind));
-        }
-        Ok(())
-    }
-
-    // ===== add_window / del_window / set_window_layout =====
+    // ===== add_window / del_window =====
 
     /// Create a window in the default session. See `add_window_in`.
-    pub async fn add_window(
-        &self,
-        name: Option<String>,
-        layout: WindowLayout,
-        cols: u16,
-        rows: u16,
-        link: Option<LinkId>,
-    ) -> Result<WindowId> {
+    pub async fn add_window(&self, name: Option<String>, cols: u16, rows: u16) -> Result<WindowId> {
         let sid = self.resolve_session(None).await?;
-        self.add_window_in(sid, name, layout, cols, rows, link).await
+        self.add_window_in(sid, name, cols, rows).await
     }
 
-    /// Create a window. With `link: Some(tmux_lid)` a real tmux window is
-    /// created (and adopted); `layout`/`cols`/`rows` are then IGNORED in
-    /// favour of what tmux reports. With `link: None` the window is
-    /// virtual (purely xscore-side).
+    /// Create a window in `session`.
     ///
-    /// v0.6.0 (ADR 0010): the window belongs to `session`, and a `link` given
-    /// here must belong to that same session — a tmux window from another
-    /// workspace would make the two disagree about `session_id`.
+    /// A tmux-backed session gets a real window (`new-window` through its
+    /// control client; tmux reports the `@N`, the name and the geometry). A
+    /// native session gets a purely xscore-side window with the requested
+    /// geometry — there is no renderer yet, so it displays nothing (arch.md
+    /// §13).
     pub async fn add_window_in(
         &self,
         session: SessionId,
         name: Option<String>,
-        layout: WindowLayout,
         cols: u16,
         rows: u16,
-        link: Option<LinkId>,
     ) -> Result<WindowId> {
         self.require_session(session).await?;
-        let window_id = WindowId::new();
-        let resolved_name = name.unwrap_or_else(|| format!("w-{}", &window_id.to_string()[..8]));
-
-        let info = match link {
-            None => WindowInfo {
-                id: window_id,
-                session_id: session,
-                name: resolved_name,
-                created_at: chrono::Utc::now(),
-                layout,
-                cols,
-                rows,
-                tmux_window_handle: None,
-            },
-            Some(lid) => {
-                let arc_link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
-                if arc_link.info.session_id != session {
-                    return Err(Error::NotInSession {
-                        session,
-                        what: "link",
-                        id: lid.to_string(),
-                    });
-                }
-                if matches!(arc_link.info.sink, SinkConfig::Raw) {
-                    return Err(Error::NotTmuxLink(lid));
-                }
-                let ts = arc_link.tmux_sink.clone()
-                    .ok_or_else(|| Error::Sink("tmux-backed link has no TmuxSink".into()))?;
-                let snap = ts.new_window(&resolved_name).await?;
-                WindowInfo {
+        match self.get_session(session).await?.backend {
+            SessionBackend::Native => {
+                let window_id = WindowId::new();
+                let info = WindowInfo {
                     id: window_id,
                     session_id: session,
-                    name: snap.name.clone(),
+                    name: name.unwrap_or_else(|| format!("w-{}", &window_id.to_string()[..8])),
                     created_at: chrono::Utc::now(),
-                    layout: layout_from_tmux(&snap.layout),
-                    cols: snap.cols,
-                    rows: snap.rows,
-                    tmux_window_handle: Some(snap.handle),
-                }
+                    cols,
+                    rows,
+                    backend: WindowBackend::Native,
+                };
+                self.windows.insert(Window::new(info)).await;
+                self.save_state().await?;
+                Ok(window_id)
             }
-        };
-
-        let window = Window::new(info);
-        self.windows.insert(window).await;
-        self.save_state().await?;
-        Ok(window_id)
+            SessionBackend::Tmux { .. } => {
+                let control = self.ensure_tmux_attached(session).await?;
+                let lines = control
+                    .send(&crate::tmux::new_window_command(name.as_deref()))
+                    .await?;
+                let handle = tmux_handle_from(&lines, '@').ok_or_else(|| {
+                    Error::Sink(format!(
+                        "tmux new-window did not report a window handle: {lines:?}"
+                    ))
+                })?;
+                // Read the new window back: the row must be tmux's view of it,
+                // not our guess at its geometry or name.
+                self.reconcile_window(session, &control, &handle).await?;
+                self.window_for_handle_in(session, &handle)
+                    .await
+                    .ok_or_else(|| {
+                        Error::Sink(format!(
+                            "tmux created window {handle} but it did not become a row"
+                        ))
+                    })
+            }
+        }
     }
 
+    /// Tear down a window row. Panes inside survive as orphans.
+    ///
+    /// The row is xscore's, not the backend's: for a tmux window the next
+    /// reconciliation (any listing, or an event) brings it back, which is why
+    /// the verb is about the row only.
     pub async fn del_window(&self, id: WindowId) -> Result<()> {
         let arc_window = self.windows.get(id).await.ok_or(Error::WindowNotFound(id))?;
         let pids: Vec<PaneId> = arc_window.panes.lock().await.clone();
@@ -1676,18 +1498,6 @@ impl SessionManager {
             }
         }
         self.windows.remove(id).await;
-        self.save_state().await?;
-        Ok(())
-    }
-
-    pub async fn set_window_layout(&self, id: WindowId, layout: WindowLayout) -> Result<()> {
-        let old = self.windows.get(id).await.ok_or(Error::WindowNotFound(id))?;
-        let mut info = old.info.clone();
-        info.layout = layout;
-        let updated = Window::new(info);
-        let old_panes = old.panes.lock().await.clone();
-        *updated.panes.lock().await = old_panes;
-        self.windows.insert(updated).await;
         self.save_state().await?;
         Ok(())
     }
@@ -1711,10 +1521,12 @@ impl SessionManager {
     /// Create a pane.
     ///
     /// * `window: None` → hollow orphan pane (no link, no window).
-    /// * `window: Some(wid)` where the window has a `tmux_window_handle`
-    ///   → split inside that real tmux window; the new pane is owned by
-    ///   tmux, gets that window's link, and uses tmux's geometry.
-    /// * `window: Some(wid)` virtual → hollow pane inside the window.
+    /// * `window: Some(wid)` mirroring a tmux window → split inside that real
+    ///   window through the session's control client; the row is the one
+    ///   reconciliation creates, addressed by its `%N` `link_key` on the
+    ///   session's existing link (no link is created — a tmux session has
+    ///   exactly one).
+    /// * `window: Some(wid)` native → hollow pane inside the window.
     ///
     /// v0.6.0 (ADR 0010): the pane belongs to `session`, and the window it is
     /// put into must belong there too (arch.md §8).
@@ -1732,90 +1544,63 @@ impl SessionManager {
         window: Option<WindowId>,
     ) -> Result<PaneId> {
         self.require_session(session).await?;
-        let pane_id = PaneId::new();
-        let resolved_name = name.unwrap_or_else(|| format!("p-{pane_id}"));
 
-        let (info, bridge) = match window {
-            None => (
-                PaneInfo {
-                    id: pane_id,
-                    session_id: session,
-                    name: resolved_name,
-                    created_at: chrono::Utc::now(),
-                    cols,
-                    rows,
-                    x,
-                    y,
-                    link_id: None,
-                    window_id: None,
-                    sink_handle: None,
-                    link_key: None,
-                },
-                None,
-            ),
-            Some(wid) => {
-                let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
-                if arc_window.info.session_id != session {
-                    return Err(Error::NotInSession {
-                        session,
-                        what: "window",
-                        id: wid.to_string(),
-                    });
-                }
-                match arc_window.info.tmux_window_handle.clone() {
-                    Some(handle) => {
-                        let lid = self.link_for_window_handle(&handle).await?;
-                        let ts = self.tmux_sink(lid).await?;
-                        let snap = ts.split_pane(&handle).await?;
-                        let info = PaneInfo {
-                            id: pane_id,
-                            session_id: session,
-                            name: resolved_name,
-                            created_at: chrono::Utc::now(),
-                            cols: snap.cols,
-                            rows: snap.rows,
-                            x: snap.x,
-                            y: snap.y,
-                            link_id: Some(lid),
-                            window_id: Some(wid),
-                            sink_handle: Some(snap.handle.clone()),
-                            link_key: None,
-                        };
-                        let bridge = Arc::new(TmuxBridge {
-                            sink: Arc::downgrade(&ts),
-                            handle: snap.handle,
-                        }) as Arc<dyn PaneBridge>;
-                        (info, Some(bridge))
-                    }
-                    None => (
-                        PaneInfo {
-                            id: pane_id,
-                            session_id: session,
-                            name: resolved_name,
-                            created_at: chrono::Utc::now(),
-                            cols,
-                            rows,
-                            x,
-                            y,
-                            link_id: None,
-                            window_id: Some(wid),
-                            sink_handle: None,
-                            link_key: None,
-                        },
-                        None,
-                    ),
-                }
+        // A tmux window's panes are tmux's: split it and adopt what tmux
+        // creates, rather than inventing a hollow row that no byte could reach.
+        if let Some(wid) = window {
+            let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+            if arc_window.info.session_id != session {
+                return Err(Error::NotInSession {
+                    session,
+                    what: "window",
+                    id: wid.to_string(),
+                });
             }
-        };
+            if let Some(handle) = arc_window.info.backend.tmux_handle().map(str::to_string) {
+                let control = self.ensure_tmux_attached(session).await?;
+                let lines = control
+                    .send(&crate::tmux::split_window_command(&handle))
+                    .await?;
+                let key = tmux_handle_from(&lines, '%').ok_or_else(|| {
+                    Error::Sink(format!(
+                        "tmux split-window did not report a pane handle: {lines:?}"
+                    ))
+                })?;
+                self.reconcile_window(session, &control, &handle).await?;
+                let existing = self.pane_by_link_key(session, &key).await.ok_or_else(|| {
+                    Error::Sink(format!(
+                        "tmux created pane {key} but it did not become a row"
+                    ))
+                })?;
+                if let Some(requested) = name {
+                    let mut renamed = existing.clone();
+                    renamed.name = requested;
+                    self.panes.insert(renamed).await;
+                    self.save_state().await?;
+                }
+                return Ok(existing.id);
+            }
+        }
 
+        let pane_id = PaneId::new();
+        let info = PaneInfo {
+            id: pane_id,
+            session_id: session,
+            name: name.unwrap_or_else(|| format!("p-{pane_id}")),
+            created_at: chrono::Utc::now(),
+            cols,
+            rows,
+            x,
+            y,
+            link_id: None,
+            window_id: window,
+            link_key: None,
+        };
         self.panes.insert(info).await;
         if let Some(wid) = window {
             if let Some(arc_window) = self.windows.get(wid).await {
                 arc_window.panes.lock().await.push(pane_id);
             }
-        }
-        if let Some(b) = bridge {
-            self.pane_bridges.lock().await.insert(pane_id, b);
         }
         self.save_state().await?;
         Ok(pane_id)
@@ -1823,8 +1608,8 @@ impl SessionManager {
 
     pub async fn del_pane(&self, id: PaneId) -> Result<()> {
         let info = self.panes.get(id).await.ok_or(Error::PaneNotFound(id))?;
-        // Drop the bridge if attached. For tmux panes this kills the real
-        // tmux pane — which is exactly what `pane del` should do.
+        // Drop the bridge if attached. Releasing a bridge stops a pump; a
+        // control pane is killed on the server further down.
         let bridge = self.pane_bridges.lock().await.remove(&id);
         if let Some(b) = bridge {
             let _ = b.close().await;
@@ -1835,11 +1620,16 @@ impl SessionManager {
         if let Some(client) = &self.daemon {
             let _ = client.delete_pane(id).await;
         }
-        if let Some(lid) = info.link_id {
-            if let Some(arc_link) = self.links.get(lid).await {
-                let mut active = arc_link.active_pane.lock().await;
-                if *active == Some(id) {
-                    *active = None;
+        // A pane tmux owns is killed on the server: dropping only the row would
+        // leave a `%N` that the next reconciliation adopts right back.
+        if let Some(key) = info.link_key.clone() {
+            if let Ok(control) = self.ensure_tmux_attached(info.session_id).await {
+                if let Err(e) = control
+                    .send(&crate::tmux::kill_pane_command(&key))
+                    .await
+                {
+                    // Already gone is the state we wanted.
+                    tracing::debug!("pane del: kill-pane {key} failed: {e}");
                 }
             }
         }
@@ -1853,8 +1643,14 @@ impl SessionManager {
         Ok(())
     }
 
-    // ===== attach_pane / detach_pane (Q1 logic) =====
+    // ===== attach_pane / detach_pane (exclusivity, per link kind) =====
 
+    /// Bind a pane to a `Pipe` link.
+    ///
+    /// Exclusivity is per link kind (ADR 0010 §D3): a pipe link carries one byte
+    /// stream, so at most one pane may read it — attaching auto-detaches the
+    /// previous reader (its buffer survives). A `Control` link is not something
+    /// a pane can be attached to: its panes arrive from tmux with a `%N`.
     pub async fn attach_pane(&self, pid: PaneId, lid: LinkId) -> Result<()> {
         let arc_link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
@@ -1869,6 +1665,12 @@ impl SessionManager {
                 id: pid.to_string(),
             });
         }
+        if arc_link.info.is_control() {
+            return Err(Error::Invalid(format!(
+                "link {lid} is the session's tmux control link; a pane reaches it by \
+                 being created in tmux (its `%N` is its address), not by attaching"
+            )));
+        }
 
         if info.link_id == Some(lid) {
             return Ok(());
@@ -1876,96 +1678,64 @@ impl SessionManager {
         if let Some(existing) = info.link_id {
             return Err(Error::PaneAlreadyAttached(pid, existing));
         }
-        if info.sink_handle.is_some() {
-            // A tmux-owned pane reads its structure from tmux; re-binding
-            // it would fork its identity. Refuse rather than corrupt.
-            return Err(Error::TmuxLinkCannotBindPane);
-        }
-        if info.link_key.is_some() {
+        if let Some(key) = info.link_key.as_deref() {
             // A pane on a control link is addressed by `%N` on that link and
             // nothing else (ADR 0010 §D6).
-            return Err(Error::TmuxLinkCannotBindPane);
+            return Err(Error::Invalid(format!(
+                "pane {pid} is addressed by {key} on its session's control link; \
+                 it cannot be attached to a pipe link"
+            )));
         }
 
-        // Q1: for direct (raw) links, auto-detach any OTHER pane already
-        // attached to this link (only one may be active at a time).
-        if matches!(arc_link.info.sink, SinkConfig::Raw) {
-            let mut to_detach: Vec<PaneId> = Vec::new();
-            for p in self.panes.list_all().await {
-                if p.id != pid && p.link_id == Some(lid) {
-                    to_detach.push(p.id);
-                }
+        // One reader per pipe: detach whatever pane was reading this link.
+        let mut to_detach: Vec<PaneId> = Vec::new();
+        for p in self.panes.list_all().await {
+            if p.id != pid && p.link_id == Some(lid) {
+                to_detach.push(p.id);
             }
-            for old_pid in to_detach {
-                let old_bridge = self.pane_bridges.lock().await.remove(&old_pid);
-                if let Some(b) = old_bridge {
-                    let _ = b.close().await;
-                }
-                if let Some(mut old_info) = self.panes.get(old_pid).await {
-                    old_info.link_id = None;
-                    self.panes.insert(old_info).await;
-                }
-                tracing::info!(
-                    "Q1: auto-detached pane {old_pid} from link {lid} (new attach: {pid})"
-                );
+        }
+        for old_pid in to_detach {
+            let old_bridge = self.pane_bridges.lock().await.remove(&old_pid);
+            if let Some(b) = old_bridge {
+                let _ = b.close().await;
             }
-            *arc_link.active_pane.lock().await = Some(pid);
+            if let Some(mut old_info) = self.panes.get(old_pid).await {
+                old_info.link_id = None;
+                self.panes.insert(old_info).await;
+            }
+            tracing::info!(
+                "auto-detached pane {old_pid} from link {lid} (new attach: {pid})"
+            );
         }
 
         // Build the bridge.
-        let bridge: Arc<dyn PaneBridge> = match &arc_link.info.sink {
-            SinkConfig::Raw => match &self.daemon {
-                // ADR 0009: the daemon owns the pump and the buffer. It
-                // enforces the same Q1 rule locally (it must — two pumps
-                // on one transport would duplicate every byte into two
-                // buffers), so the metadata loop above and the daemon
-                // agree on which pane is active.
-                Some(client) => {
-                    if client.attach(pid, lid).await.is_err() {
-                        // The daemon may have restarted since this link
-                        // was created. Heal it from the persisted
-                        // transport spec, then bind again — this is what
-                        // makes `pane attach` a reconnect, not just a
-                        // metadata edit.
-                        client.ensure().await?;
-                        client
-                            .create_link(lid, arc_link.info.transport.clone())
-                            .await?;
-                        client.attach(pid, lid).await?;
-                    }
-                    Arc::new(DaemonBridge::new(Arc::clone(client), pid))
+        let bridge: Arc<dyn PaneBridge> = match &self.daemon {
+            // ADR 0009: the daemon owns the pump and the buffer. It
+            // enforces the same one-reader rule locally (it must — two pumps
+            // on one transport would duplicate every byte into two
+            // buffers), so the metadata loop above and the daemon
+            // agree on which pane is active.
+            Some(client) => {
+                if client.attach(pid, lid).await.is_err() {
+                    // The daemon may have restarted since this link
+                    // was created. Heal it from the persisted
+                    // transport spec, then bind again — this is what
+                    // makes `pane attach` a reconnect, not just a
+                    // metadata edit.
+                    client.ensure().await?;
+                    client
+                        .create_link(lid, pipe_transport(&arc_link.info)?)
+                        .await?;
+                    client.attach(pid, lid).await?;
                 }
-                None => {
-                    let buf = self.buffer_for(pid).await;
-                    Arc::new(DirectBridge::new_with_buffer(
-                        Arc::clone(&arc_link.transport),
-                        buf,
-                    ))
-                }
-            },
-            SinkConfig::Tmux { .. } => {
-                let tmux_arc = arc_link.tmux_sink.as_ref()
-                    .ok_or_else(|| Error::Sink("tmux-backed link has no TmuxSink".into()))?
-                    .clone();
-                let win = first_window_with_retry(&tmux_arc).await?;
-                let snap = tmux_arc.split_pane(&win.handle).await?;
-                if let Some(mut i) = self.panes.get(pid).await {
-                    i.sink_handle = Some(snap.handle.clone());
-                    i.cols = snap.cols;
-                    i.rows = snap.rows;
-                    i.x = snap.x;
-                    i.y = snap.y;
-                    if i.window_id.is_none() {
-                        i.window_id = self
-                            .window_for_handle(&win.handle)
-                            .await;
-                    }
-                    self.panes.insert(i).await;
-                }
-                Arc::new(TmuxBridge {
-                    sink: Arc::downgrade(&tmux_arc),
-                    handle: snap.handle,
-                })
+                Arc::new(DaemonBridge::new(Arc::clone(client), pid))
+            }
+            None => {
+                let buf = self.buffer_for(pid).await;
+                Arc::new(DirectBridge::new_with_buffer(
+                    Arc::clone(&arc_link.transport),
+                    buf,
+                ))
             }
         };
 
@@ -1975,22 +1745,20 @@ impl SessionManager {
             i.link_id = Some(lid);
             self.panes.insert(i).await;
         }
-        *arc_link.active_pane.lock().await = Some(pid);
 
         self.save_state().await?;
         Ok(())
     }
 
-    /// Detach a pane from its link. Direct panes keep their buffer;
-    /// tmux-owned panes cannot be detached at all.
+    /// Detach a pane from its link. A pipe pane keeps its buffer; a tmux pane
+    /// cannot be detached at all (its `%N` is its identity on the server).
     pub async fn detach_pane(&self, pid: PaneId) -> Result<()> {
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        // A tmux pane cannot be detached, only killed: its `%N` is its identity
-        // on the server (arch.md §8).
-        if info.sink_handle.is_some() || info.link_key.is_some() {
+        // A tmux pane cannot be detached, only killed (arch.md §8).
+        if info.link_key.is_some() {
             return Err(Error::TmuxPaneNotDetachable(pid));
         }
-        let lid = match info.link_id {
+        let _lid = match info.link_id {
             Some(l) => l,
             None => return Err(Error::NotAttached(pid)),
         };
@@ -2003,12 +1771,6 @@ impl SessionManager {
         // cached bridge, but its pump in the daemon may still be running.
         if let Some(client) = &self.daemon {
             let _ = client.detach(pid).await;
-        }
-        if let Some(arc_link) = self.links.get(lid).await {
-            let mut active = arc_link.active_pane.lock().await;
-            if *active == Some(pid) {
-                *active = None;
-            }
         }
         if let Some(mut i) = self.panes.get(pid).await {
             i.link_id = None;
@@ -2168,18 +1930,15 @@ impl SessionManager {
         }
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
 
-        // A pane on a control link comes FIRST: the old tmux path keys off
-        // `sink_handle` (which these panes do not have) and the daemon branch
-        // below only looks at `sink_handle` too, so either order would route a
-        // tmux pane into the wrong mechanism.
+        // A pane that carries a `link_key` belongs to a control link: tmux is
+        // already resident and holds its scrollback, so it is never
+        // daemon-backed and comes first.
         if let Some(b) = self.control_bridge(&info).await? {
             self.pane_bridges.lock().await.insert(pid, Arc::clone(&b));
             return Ok(b);
         }
 
-        // tmux-owned panes (sink_handle is Some) are never daemon-backed:
-        // tmux is already resident and holds their scrollback.
-        if let (Some(client), None) = (&self.daemon, info.sink_handle.as_ref()) {
+        if let Some(client) = &self.daemon {
             return match info.link_id {
                 Some(lid) => {
                     if crate::daemon::client::probe_link(lid).await.unwrap_or(false) {
@@ -2242,194 +2001,15 @@ impl SessionManager {
         Ok(Some(Arc::new(ControlBridge::new(control, key, buffer))))
     }
 
-    // ===== sync (v0.4.0, ADR 0008) =====
-    /// Compare xscore's registry against tmux's actual structure for a
-    /// tmux link. Read-only unless `heal` is set; then registry rows are
-    /// corrected to match tmux. Panes tmux has but xscore never adopted
-    /// are REPORTED and never adopted.
-    pub async fn sync_link(&self, id: LinkId, heal: bool) -> Result<SyncReport> {
-        let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
-        let ts = match arc_link.tmux_sink.clone() {
-            Some(ts) => ts,
-            None => return Err(Error::NotTmuxLink(id)),
-        };
-
-        let mut report = SyncReport::default();
-        let tmux_windows = ts.list_windows().await?;
-        let tmux_handles: HashSet<&str> =
-            tmux_windows.iter().map(|w| w.handle.as_str()).collect();
-
-        // Scope the comparison to THIS link: the windows that hold panes
-        // attached to it. Without this, `sync --heal` on link A would
-        // treat link B's windows as stale and delete them.
-        let link_window_ids: HashSet<WindowId> = self
-            .panes
-            .list_all()
-            .await
-            .iter()
-            .filter(|p| p.link_id == Some(id))
-            .filter_map(|p| p.window_id)
-            .collect();
-
-        let registry_windows: Vec<_> = self
-            .windows
-            .list_all()
-            .await
-            .into_iter()
-            .filter(|w| match w.info.tmux_window_handle.as_deref() {
-                // Owned by this link (holds one of its panes), or
-                // currently part of this link's session. Anything else is
-                // another link's business — never touch it.
-                Some(h) => tmux_handles.contains(h) || link_window_ids.contains(&w.info.id),
-                None => false,
-            })
-            .collect();
-
-        for tw in &tmux_windows {
-            if !registry_windows.iter().any(|w| {
-                w.info.tmux_window_handle.as_deref() == Some(tw.handle.as_str())
-            }) {
-                report.missing_windows.push(tw.handle.clone());
-            }
-        }
-
-        for rw in &registry_windows {
-            let handle = rw.info.tmux_window_handle.clone().unwrap_or_default();
-            if !tmux_handles.contains(handle.as_str()) {
-                report.stale_windows.push(handle.clone());
-                if heal {
-                    // The tmux window is gone. Its tmux panes are gone too.
-                    let pids = rw.panes.lock().await.clone();
-                    for pid in pids {
-                        let info = match self.panes.get(pid).await { Some(i) => i, None => continue };
-                        if info.sink_handle.is_some() {
-                            self.pane_bridges.lock().await.remove(&pid);
-                            self.pane_buffers.lock().await.remove(&pid);
-                            self.panes.remove(pid).await;
-                            report.removed += 1;
-                        } else if let Some(mut i) = self.panes.get(pid).await {
-                            i.window_id = None;
-                            self.panes.insert(i).await;
-                        }
-                    }
-                    self.windows.remove(rw.info.id).await;
-                    report.removed += 1;
-                }
-                continue;
-            }
-
-            // Window exists on both sides: compare/refresh.
-            if heal {
-                if let Some(tw) = tmux_windows.iter().find(|t| t.handle == handle) {
-                    let mut updated = rw.info.clone();
-                    let mut changed = false;
-                    if updated.cols != tw.cols { updated.cols = tw.cols; changed = true; }
-                    if updated.rows != tw.rows { updated.rows = tw.rows; changed = true; }
-                    let layout = layout_from_tmux(&tw.layout);
-                    if updated.layout != layout { updated.layout = layout; changed = true; }
-                    if updated.name != tw.name { updated.name = tw.name.clone(); changed = true; }
-                    if changed {
-                        let w = Window::new(updated);
-                        *w.panes.lock().await = rw.panes.lock().await.clone();
-                        self.windows.insert(w).await;
-                        report.healed += 1;
-                    }
-                }
-            }
-
-            let tmux_panes = ts.list_panes(&handle).await?;
-            let tmux_pane_handles: HashSet<&str> =
-                tmux_panes.iter().map(|p| p.handle.as_str()).collect();
-            let registry_panes: Vec<_> = self
-                .panes
-                .list_all()
-                .await
-                .into_iter()
-                .filter(|p| p.window_id == Some(rw.info.id))
-                .collect();
-
-            for tp in &tmux_panes {
-                if !registry_panes.iter().any(|p| {
-                    p.sink_handle.as_deref() == Some(tp.handle.as_str())
-                }) {
-                    report.missing_panes.push(tp.handle.clone());
-                }
-            }
-
-            for rp in &registry_panes {
-                let rp_handle = rp.sink_handle.clone().unwrap_or_default();
-                if !tmux_pane_handles.contains(rp_handle.as_str()) {
-                    report.stale_panes.push(rp_handle.clone());
-                    if heal {
-                        self.pane_bridges.lock().await.remove(&rp.id);
-                        self.pane_buffers.lock().await.remove(&rp.id);
-                        self.panes.remove(rp.id).await;
-                        report.removed += 1;
-                    }
-                } else if heal {
-                    if let Some(tp) = tmux_panes.iter().find(|t| t.handle == rp_handle) {
-                        if rp.cols != tp.cols || rp.rows != tp.rows || rp.x != tp.x || rp.y != tp.y {
-                            let mut i = rp.clone();
-                            i.cols = tp.cols;
-                            i.rows = tp.rows;
-                            i.x = tp.x;
-                            i.y = tp.y;
-                            self.panes.insert(i).await;
-                            report.healed += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        if heal {
-            self.save_state().await?;
-        }
-        Ok(report)
-    }
-
     // ===== internal helpers =====
 
-    /// The per-pane buffer for a direct pane, created on first use and
-    /// kept across detach/re-attach.
+    /// The per-pane buffer, created on first use and kept across
+    /// detach/re-attach.
     async fn buffer_for(&self, pid: PaneId) -> Arc<Mutex<RingBuffer>> {
         let mut map = self.pane_buffers.lock().await;
         map.entry(pid)
-            .or_insert_with(|| Arc::new(Mutex::new(RingBuffer::new(crate::backends::bridge::DIRECT_BUFFER_CAPACITY))))
+            .or_insert_with(|| Arc::new(Mutex::new(RingBuffer::new(DIRECT_BUFFER_CAPACITY))))
             .clone()
-    }
-
-    async fn tmux_sink(&self, lid: LinkId) -> Result<Arc<TmuxSink>> {
-        let arc_link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
-        arc_link.tmux_sink.clone()
-            .ok_or_else(|| Error::Sink("tmux-backed link has no TmuxSink".into()))
-    }
-
-    /// Which link owns a tmux window handle? Checked against tmux itself
-    /// (not against session naming), so custom `?name=` sessions work.
-    async fn link_for_window_handle(&self, handle: &str) -> Result<LinkId> {
-        for arc_link in self.links.list().await {
-            if let Some(ts) = &arc_link.tmux_sink {
-                if let Ok(wins) = ts.list_windows().await {
-                    if wins.iter().any(|w| w.handle == handle) {
-                        return Ok(arc_link.id);
-                    }
-                }
-            }
-        }
-        Err(Error::Sink(format!(
-            "no tmux link owns window handle {handle}"
-        )))
-    }
-
-    /// The xscore window that mirrors a tmux window handle, if registered.
-    async fn window_for_handle(&self, handle: &str) -> Option<WindowId> {
-        self.windows
-            .list_all()
-            .await
-            .iter()
-            .find(|w| w.info.tmux_window_handle.as_deref() == Some(handle))
-            .map(|w| w.info.id)
     }
 
     // ===== state persistence =====
@@ -2490,9 +2070,7 @@ impl SessionManager {
                 );
                 continue;
             }
-            if let Err(e) = mgr.hydrate_link(info).await {
-                tracing::warn!("hydration: skipping link: {e}");
-            }
+            mgr.hydrate_link(info).await;
         }
         for ws in snapshot.windows {
             if mgr.sessions.get(ws.info.session_id).await.is_none() {
@@ -2518,108 +2096,53 @@ impl SessionManager {
             }
             mgr.panes.insert(pinfo).await;
         }
-        // P0-c: with stable `%N` handles we can rebuild tmux bridges on
-        // hydrate without touching tmux's structure. Direct panes cannot
-        // be rebuilt (their transport died with the process) — see
-        // `Link::connected`, which is false for hydrated direct links so
-        // data ops report `LinkNotConnected` instead of the misleading
-        // `NotAttached`.
-        for pinfo in mgr.panes.list_all().await {
-            let (Some(lid), Some(handle)) = (pinfo.link_id, pinfo.sink_handle.clone()) else {
-                continue;
-            };
-            let Some(arc_link) = mgr.links.get(lid).await else { continue };
-            let Some(ts) = arc_link.tmux_sink.clone() else { continue };
-            mgr.pane_bridges.lock().await.insert(
-                pinfo.id,
-                Arc::new(TmuxBridge { sink: Arc::downgrade(&ts), handle }),
-            );
-        }
+        // Nothing else is rebuilt here on purpose. A pipe link's transport died
+        // with the process that owned it (see `Link::connected`: false is the
+        // honest answer, so data ops say `LinkNotConnected`), and a control
+        // link has no client until this process attaches — `bridge_for` and
+        // `ensure_tmux_attached` build both on first use, which is what makes a
+        // fresh CLI process work against a session it never created.
         Ok(mgr)
     }
 
-    async fn hydrate_link(&self, info: crate::model::LinkInfo) -> Result<()> {
-        let link_id = info.id;
-        let session_name = format!("xscore-{link_id}");
-        let transport: Arc<dyn crate::transport::Transport> = Arc::new(NoopTransport);
-        let sink: Box<dyn crate::sink::Sink> = match &info.sink {
-            SinkConfig::Raw => Box::new(crate::sink::raw::RawSink),
-            SinkConfig::Tmux { mode, session_name: custom } => {
-                let name = custom.clone().unwrap_or_else(|| session_name.clone());
-                let has = tokio::process::Command::new("tmux")
-                    .args(tmux_arg_socket())
-                    .args(["has-session", "-t", &name])
-                    .status().await?;
-                if !has.success() {
-                    return Err(Error::Sink(format!(
-                        "tmux session {name} gone, skipping link {link_id}"
-                    )));
-                }
-                Box::new(TmuxSink::adopt(link_id, mode, &name))
-            }
-        };
-        let tmux_sink = match &info.sink {
-            SinkConfig::Raw => None,
-            SinkConfig::Tmux { mode, session_name: custom } => {
-                let name = custom.clone().unwrap_or_else(|| session_name.clone());
-                Some(Arc::new(TmuxSink::adopt(link_id, mode, &name)))
-            }
-        };
-        // v0.4.1 (P0-3): a tmux session outlives the CLI process, so a
-        // hydrated tmux link IS still connected. A direct link is not:
-        // its transport died with the previous process (see the `Raw`
-        // arm above, which installs `NoopTransport`). Recording that
-        // honestly is what lets data ops report `LinkNotConnected`
-        // instead of the misleading `NotAttached`.
-        //
-        // v0.6.0: a `Control` link is connected only while a client is
-        // attached, and hydration attaches nothing — `link_is_connected` asks
-        // `tmux_controls`, so this flag is not consulted for it.
-        let connected = if info.is_control() {
-            false
-        } else {
-            matches!(info.sink, crate::model::SinkConfig::Tmux { .. })
-        };
+    /// A hydrated link has no live connection yet: the transport of a pipe died
+    /// with the previous process, and a control link's client is spawned on
+    /// first use. Recording that honestly is what lets data ops report
+    /// `LinkNotConnected` instead of the misleading `NotAttached`.
+    async fn hydrate_link(&self, info: crate::model::LinkInfo) {
         let link = Link {
-            id: link_id,
+            id: info.id,
             info,
-            transport,
-            sink,
-            tmux_sink,
-            active_pane: Mutex::new(None),
-            connected,
+            transport: Arc::new(NoopTransport),
+            control: None,
+            connected: false,
         };
         self.links.insert(link).await;
-        Ok(())
     }
 }
 
-/// tmux creates a session with one window; ask for it, tolerating the
-/// brief moment where the server hasn't populated the list yet.
-async fn first_window_with_retry(ts: &TmuxSink) -> Result<crate::sink::TmuxWindowSnapshot> {
-    for attempt in 0..5 {
-        if let Ok(windows) = ts.list_windows().await {
-            if let Some(w) = windows.into_iter().next() {
-                return Ok(w);
-            }
-        }
-        if attempt < 4 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
-    Err(Error::Sink(format!(
-        "tmux session {} has no windows",
-        ts.session_name
-    )))
+/// The first line of a tmux command's output that is a handle of the expected
+/// kind (`@N` for a window, `%N` for a pane).
+///
+/// `-P -F '#{window_id}'` makes the create commands answer with their handle,
+/// which is the only reliable way to learn it: matching on names would confuse
+/// two windows that share one.
+fn tmux_handle_from(lines: &[String], sigil: char) -> Option<String> {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| line.starts_with(sigil) && line.len() > 1)
+        .map(str::to_string)
 }
 
-fn sink_info_from_spec(spec: &ConnectSpec, link_id: LinkId) -> (String, String) {
-    match &spec.sink {
-        SinkConfig::Raw => ("raw".into(), String::new()),
-        SinkConfig::Tmux { mode, session_name } => {
-            let name = session_name.clone()
-                .unwrap_or_else(|| format!("xscore-{link_id}"));
-            (mode.clone(), name)
-        }
+/// The transport spec of a `Pipe` link. A `Control` link has none — its host,
+/// socket and session live on the session — so asking one is a caller bug.
+fn pipe_transport(info: &crate::model::LinkInfo) -> Result<TransportConfig> {
+    match &info.endpoint {
+        EndpointRef::Pipe(transport) => Ok(transport.clone()),
+        EndpointRef::Control => Err(Error::Invalid(format!(
+            "link {} is a control link and has no transport of its own",
+            info.id
+        ))),
     }
 }

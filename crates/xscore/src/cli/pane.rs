@@ -14,12 +14,12 @@ pub enum PaneCmd {
     /// Print PaneInfo JSON.
     Show { #[arg(long)] id: String },
 
-    /// List panes (optional --window <wid> or --link <lid> filter).
-    List { #[arg(long)] window: Option<String>, #[arg(long)] link: Option<String> },
+    /// List panes (optional --session <s>, --window <wid> or --link <lid>
+    /// filter).
+    List(PaneListArgs),
 
-    /// Bind the pane to a link. Creates the bridge (DirectBridge for raw,
-    /// TmuxBridge for tmux). For raw links, the previously-active pane (if
-    /// any) is auto-detached (Q1).
+    /// Bind the pane to a pipe link. Creates the bridge; the link's previous
+    /// pane (if any) is auto-detached, because a pipe carries one reader.
     Attach { #[arg(long)] pane: String, #[arg(long)] link: String },
 
     /// Unbind the pane from its link. Closes the bridge. Pane survives as
@@ -59,6 +59,15 @@ pub struct PaneAddArgs {
 }
 
 #[derive(Args)]
+pub struct PaneListArgs {
+    /// Only this session's panes.
+    #[arg(long, value_name = "NAME")]
+    pub session: Option<String>,
+    #[arg(long)] pub window: Option<String>,
+    #[arg(long)] pub link: Option<String>,
+}
+
+#[derive(Args)]
 pub struct PaneResizeArgs {
     #[arg(long)] pub pane: String,
     #[arg(long)] pub cols: u16,
@@ -83,7 +92,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: PaneCmd) -> anyhow::Result<()> {
         PaneCmd::Add(args) => add(mgr, args).await,
         PaneCmd::Del { id } => del(mgr, &id).await,
         PaneCmd::Show { id } => show(mgr, &id).await,
-        PaneCmd::List { window, link } => list(mgr, window, link).await,
+        PaneCmd::List(args) => list(mgr, args).await,
         PaneCmd::Attach { pane, link } => attach(mgr, &pane, &link).await,
         PaneCmd::Detach { pane } => detach(mgr, &pane).await,
         PaneCmd::Resize(args) => resize(mgr, args).await,
@@ -120,26 +129,29 @@ async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn list(
-    mgr: Arc<SessionManager>,
-    window: Option<String>,
-    link: Option<String>,
-) -> anyhow::Result<()> {
+async fn list(mgr: Arc<SessionManager>, args: PaneListArgs) -> anyhow::Result<()> {
     // Same reason as `window ls`: a tmux session's panes are tmux's, and with a
     // process per command the only way to see one created by someone else is to
     // attach for the duration of the command (ADR 0010 §7).
+    let only: Option<crate::core::SessionId> = match args.session.as_deref() {
+        Some(name) => Some(mgr.resolve_session(Some(name)).await?),
+        None => None,
+    };
     for session in mgr.list_sessions().await? {
+        if only.is_some_and(|id| id != session.id) {
+            continue;
+        }
         if session.is_tmux() {
             if let Err(e) = mgr.refresh_tmux_session(session.id).await {
                 tracing::debug!("pane ls: could not refresh tmux session {}: {e}", session.name);
             }
         }
     }
-    let wid_filter = match window.as_deref() {
+    let wid_filter = match args.window.as_deref() {
         Some(s) => Some(WindowId::parse(s)?),
         None => None,
     };
-    let lid_filter = match link.as_deref() {
+    let lid_filter = match args.link.as_deref() {
         Some(s) => Some(crate::core::LinkId::parse(s)?),
         None => None,
     };
@@ -149,6 +161,9 @@ async fn list(
     let mut sorted = panes.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|p| p.id.to_string());
     for p in sorted {
+        if let Some(sid) = only {
+            if p.session_id != sid { continue; }
+        }
         if let Some(wid) = wid_filter {
             if p.window_id != Some(wid) { continue; }
         }

@@ -1,13 +1,18 @@
-// backends/ring_buffer.rs (v0.4.0 — pane history, ADR 0008)
+// core/buffer.rs (v0.6.0 — the pane's buffer, moved out of `backends/`)
 //
 // The pane's core is its buffer: a fixed-capacity byte history that
-// survives bridge churn (detach keeps the bytes, see `DirectBridge`).
+// survives bridge churn (detach keeps the bytes). It belongs to the pane, not
+// to the connection layer, which is why it lives here rather than beside the
+// conduit (arch.md §9).
 //
 // `copy_out` is a *snapshot* read (like `tmux capture-pane`): it copies
 // the most recent `min(len, out.len())` bytes in order and does NOT
 // consume them. A pane's buffer is scrollback, not a stream — reading
 // twice must not lose the screen's content.
 use std::collections::VecDeque;
+
+/// Default capacity of a pane's buffer (64 KiB of scrollback).
+pub const DIRECT_BUFFER_CAPACITY: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RingBuffer {

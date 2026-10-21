@@ -18,10 +18,13 @@
 //
 // v0.4.0 semantics still under test (ADR 0008):
 //   - `link add` always yields link + (usually) window + pane
-//   - tmux links ADOPT the session's window/pane (`@N` / `%N` handles)
-//   - `link add --pane` binds a hollow pane, refuses tmux links, and
-//     refuses panes already attached elsewhere
-//   - tmux panes cannot be detached; they die with their session
+//   - `link add --pane` binds a hollow pane and refuses panes already attached
+//     elsewhere
+//
+// v0.6.0 semantics (ADR 0010): a tmux session is created/adopted at the SESSION
+// level, has exactly one (control) link, addresses its panes by `%N` in
+// `link_key`, keeps its windows in `WindowBackend::Tmux`, refuses `link add`
+// and `pane detach`, and loses all of it to `session kill`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -154,21 +157,6 @@ fn xscore_link_add_requires_url_or_config() {
     assert!(!out.status.success(), "`link add` with no inputs must fail");
 }
 
-#[test]
-fn xscore_link_open_unsupported_for_shell() {
-    let xscore = || xscore_for("link_open_unshell");
-    let out = xscore()
-        .args(["link", "open", "shell:///bin/cat"])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "shell + `link open` must fail");
-    let s = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        s.contains("tmux") || s.contains("OpenOnlyForTmux"),
-        "expected OpenOnlyForTmux error, got: {s}"
-    );
-}
-
 // ----- `link config` template (disk-based, no in-memory state needed) -----
 
 #[test]
@@ -239,7 +227,7 @@ fn xscore_link_add_direct_creates_window_and_pane() {
         .stdout);
     assert_eq!(pane["link_id"], serde_json::json!(link_id));
     assert_eq!(pane["window_id"], serde_json::json!(window_id));
-    assert!(pane["sink_handle"].is_null(), "direct pane must have no tmux handle: {pane}");
+    assert!(pane["link_key"].is_null(), "a pipe pane carries no %N address: {pane}");
 
     // Window is virtual: no tmux handle.
     let window = json(&xscore()
@@ -247,15 +235,19 @@ fn xscore_link_add_direct_creates_window_and_pane() {
         .output()
         .unwrap()
         .stdout);
-    assert!(window["tmux_window_handle"].is_null(), "virtual window: {window}");
+    assert_eq!(window["backend"]["kind"], serde_json::json!("native"), "native window: {window}");
 
-    // The link really is the raw sink.
+    // The link really is a pipe: one byte stream, no tmux in the middle.
     let link = json(&xscore()
         .args(["link", "show", "--id", &link_id])
         .output()
         .unwrap()
         .stdout);
-    assert_eq!(link["sink"]["sink"], serde_json::json!("raw"));
+    assert_eq!(
+        link["endpoint"]["pipe"]["transport"],
+        serde_json::json!("shell"),
+        "expected EndpointRef::Pipe(shell): {link}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     cleanup_daemon("link_add_direct_auto");
@@ -334,85 +326,64 @@ fn xscore_link_add_direct_with_attached_pane_errors() {
     cleanup_daemon("link_add_attached_pane");
 }
 
-// ----- v0.4.0 #4: tmux link adopts the session's window and pane -----
+// ----- ADR 0010 §D2: a tmux session has exactly one link -----
+//
+// The old per-command tmux adoption test is gone: the session path is the only
+// now, and `xscore_session_new_tmux_creates_window_and_pane` covers what it
+// asserted (`%N` on the pane, `@N` on the window, geometry adopted from tmux).
 
 #[test]
-fn xscore_link_add_tmux_adopts_window_and_pane() {
-    let xscore = || xscore_for("link_add_tmux_adopt");
+fn xscore_link_add_inside_a_tmux_session_is_refused() {
+    let name = "link_add_in_tmux_session";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
     let out = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=on"])
+        .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&out), "tmux add failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    let lid = parse_id_from_stdout(&out.stdout, "link");
 
-    let link_id = parse_id_from_stdout(&out.stdout, "link");
-    let window_id = parse_id_from_stdout(&out.stdout, "window");
-    let pane_id = parse_id_from_stdout(&out.stdout, "pane");
-
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output()
-        .unwrap()
-        .stdout);
-    let handle = pane["sink_handle"].as_str().expect("sink_handle present");
-    assert!(handle.starts_with('%'), "pane handle should be %N, got {handle}");
-    assert_eq!(pane["link_id"], serde_json::json!(link_id));
-    assert_eq!(pane["window_id"], serde_json::json!(window_id));
-
-    let window = json(&xscore()
-        .args(["window", "show", "--id", &window_id])
-        .output()
-        .unwrap()
-        .stdout);
-    let wh = window["tmux_window_handle"].as_str().expect("tmux_window_handle present");
-    assert!(wh.starts_with('@'), "window handle should be @N, got {wh}");
-    assert!(window["cols"].as_u64().unwrap() > 0, "geometry adopted from tmux: {window}");
-
-    // `link sync` on a freshly-adopted link is clean.
-    let sync = xscore()
-        .args(["link", "sync", "--id", &link_id])
+    // One tmux session, one connection: a second link would be a second
+    // mechanism driving the same server session.
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--session", "work"])
         .output()
         .unwrap();
-    assert!(ok(&sync));
+    assert!(!add.status.success(), "a tmux session must not take a second link");
+    let err = String::from_utf8_lossy(&add.stderr);
     assert!(
-        String::from_utf8_lossy(&sync.stdout).contains("in sync"),
-        "expected clean sync: {}",
-        String::from_utf8_lossy(&sync.stdout)
+        err.contains("control link") || err.contains("one link"),
+        "expected TmuxSessionHasOneLink, got: {err}"
     );
 
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-    cleanup_tmux("link_add_tmux_adopt");
-}
-
-// ----- v0.4.0 #5: `--pane` is rejected for tmux links -----
-
-#[test]
-fn xscore_link_add_tmux_with_pane_errors() {
-    let xscore = || xscore_for("link_add_tmux_with_pane");
-    let pane_id = parse_id_from_stdout(
+    // `--pane` must not make it legal, and the refusal must leave the pane
+    // exactly where it was.
+    let orphan = parse_id_from_stdout(
         &xscore().args(["pane", "add"]).output().unwrap().stdout,
         "pane",
     );
-    let out = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=on", "--pane", &pane_id])
+    let with_pane = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--session", "work", "--pane", &orphan])
         .output()
         .unwrap();
-    assert!(!out.status.success(), "tmux link + --pane must fail");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("create panes via tmux") || err.contains("TmuxLinkCannotBindPane"),
-        "expected TmuxLinkCannotBindPane, got: {err}"
-    );
-    // The rejected call must not leave a pane bound or a session behind.
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output()
-        .unwrap()
-        .stdout);
-    assert!(pane["link_id"].is_null(), "pane must stay orphan: {pane}");
+    assert!(!with_pane.status.success(), "`--pane` must not bypass the one-link rule");
+    let pane = json(&xscore().args(["pane", "show", "--id", &orphan]).output().unwrap().stdout);
+    assert!(pane["link_id"].is_null(), "a rejected add must leave the pane orphan: {pane}");
 
-    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
-    cleanup_tmux("link_add_tmux_with_pane");
+    // And the session still has exactly one link, as the filter reports.
+    let ls = xscore().args(["link", "list", "--session", "work"]).output().unwrap();
+    assert!(ok(&ls), "link list failed: {}", String::from_utf8_lossy(&ls.stderr));
+    let listing = String::from_utf8_lossy(&ls.stdout).to_string();
+    let rows = listing.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(rows, 1, "one tmux session, one link: {listing}");
+    assert!(listing.contains(&lid), "the control link is the one: {listing}");
+    assert!(listing.contains("control"), "and it is reported as such: {listing}");
+
+    let _ = xscore().args(["pane", "del", "--id", &orphan]).output();
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
 }
 
 // ----- v0.4.0 #6: virtual window (no --link) -----
@@ -431,106 +402,129 @@ fn xscore_window_add_virtual() {
         .output()
         .unwrap()
         .stdout);
-    assert!(w["tmux_window_handle"].is_null(), "virtual window: {w}");
+    assert_eq!(w["backend"]["kind"], serde_json::json!("native"), "native window: {w}");
     assert_eq!(w["cols"], serde_json::json!(100));
-    assert_eq!(w["layout"]["kind"], serde_json::json!("single"));
+    assert!(w["name"] == serde_json::json!("scratch"), "{w}");
     let _ = xscore().args(["window", "del", "--id", &wid]).output();
 }
 
-// ----- v0.4.0 #7: tmux-bound window gets a real @N handle -----
+// ----- ADR 0010: a window in a tmux session is a real tmux window -----
 
 #[test]
-fn xscore_window_add_tmux_bound() {
-    let xscore = || xscore_for("window_add_tmux_bound");
-    let link_id = parse_id_from_stdout(
-        &xscore()
-            .args(["link", "add", "shell:///bin/cat?tmux=on"])
-            .output()
-            .unwrap()
-            .stdout,
-        "link",
-    );
-    let out = xscore()
-        .args(["window", "add", "--name", "logs", "--link", &link_id])
+fn xscore_window_add_tmux_session() {
+    let name = "window_add_tmux_session";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    let created = xscore()
+        .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&out), "window add --link failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+
+    // No `--link`: the SESSION decides, which is the whole point of ADR 0010.
+    let out = xscore()
+        .args(["window", "add", "--name", "logs", "--session", "work"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "window add --session failed: {}", String::from_utf8_lossy(&out.stderr));
     let wid = parse_id_from_stdout(&out.stdout, "window");
 
-    let w = json(&xscore()
-        .args(["window", "show", "--id", &wid])
-        .output()
-        .unwrap()
-        .stdout);
-    let handle = w["tmux_window_handle"].as_str().expect("tmux handle");
+    let w = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
+    assert_eq!(w["backend"]["kind"], serde_json::json!("tmux"), "{w}");
+    let handle = w["backend"]["handle"].as_str().expect("tmux handle");
     assert!(handle.starts_with('@'), "expected @N, got {handle}");
     assert_eq!(w["name"], serde_json::json!("logs"));
 
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-    cleanup_tmux("window_add_tmux_bound");
+    // tmux is the source of truth: it has the window too.
+    let listing = tmux_stdout(name, &["list-windows", "-t", "work", "-F", "#{window_name}"]);
+    assert!(listing.contains("logs"), "tmux does not have the window: {listing:?}");
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
 }
 
-// ----- v0.4.0 #8: --link on a direct link is an error -----
-
-#[test]
-fn xscore_window_add_direct_link_errors() {
-    let xscore = || xscore_for("window_add_direct_errors");
-    let link_id = parse_id_from_stdout(
-        &xscore()
-            .args(["link", "add", "shell:///bin/cat"])
-            .output()
-            .unwrap()
-            .stdout,
-        "link",
-    );
-    let out = xscore()
-        .args(["window", "add", "--link", &link_id])
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "window add --link <direct> must fail");
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("does not use the tmux sink") || err.contains("NotTmuxLink"),
-        "expected NotTmuxLink, got: {err}"
-    );
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-    cleanup_daemon("window_add_direct_errors");
-}
-
-// ----- v0.4.0 #9: `pane add --window` splits a real tmux window -----
+// ----- ADR 0010: `pane add --window` splits a real tmux window -----
 
 #[test]
 fn xscore_pane_add_to_tmux_window() {
-    let xscore = || xscore_for("pane_add_tmux_window");
+    let name = "pane_add_tmux_window";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
     let add = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=on"])
+        .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&add));
-    let link_id = parse_id_from_stdout(&add.stdout, "link");
-    let window_id = parse_id_from_stdout(&add.stdout, "window");
+    assert!(ok(&add), "session new --tmux failed: {}", String::from_utf8_lossy(&add.stderr));
+    let lid = parse_id_from_stdout(&add.stdout, "link");
+    let wid = parse_id_from_stdout(&add.stdout, "window");
     let adopted = parse_id_from_stdout(&add.stdout, "pane");
 
     let out = xscore()
-        .args(["pane", "add", "--window", &window_id])
+        .args(["pane", "add", "--window", &wid, "--session", "work"])
         .output()
         .unwrap();
     assert!(ok(&out), "pane add --window failed: {}", String::from_utf8_lossy(&out.stderr));
     let pid = parse_id_from_stdout(&out.stdout, "pane");
     assert_ne!(pid, adopted);
 
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pid])
-        .output()
-        .unwrap()
-        .stdout);
-    let handle = pane["sink_handle"].as_str().expect("sink_handle");
-    assert!(handle.starts_with('%'), "expected %N, got {handle}");
-    assert_eq!(pane["link_id"], serde_json::json!(link_id));
-    assert_eq!(pane["window_id"], serde_json::json!(window_id));
+    // The new row is tmux's: it is addressed by its own `%N` on the session's
+    // ONE link, not by a link of its own.
+    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    let key = pane["link_key"].as_str().expect("link_key");
+    assert!(key.starts_with('%'), "expected %N, got {key}");
+    assert_eq!(pane["link_id"], serde_json::json!(lid));
+    assert_eq!(pane["window_id"], serde_json::json!(wid));
 
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-    cleanup_tmux("pane_add_tmux_window");
+    // Both panes are the session's; no other session sees them.
+    let ls = xscore().args(["pane", "list", "--session", "work"]).output().unwrap();
+    assert!(ok(&ls), "pane list failed: {}", String::from_utf8_lossy(&ls.stderr));
+    let listing = String::from_utf8_lossy(&ls.stdout).to_string();
+    let rows = listing.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(rows, 2, "expected the adopted pane plus the split: {listing}");
+    assert!(listing.contains(&pid) && listing.contains(&adopted), "{listing}");
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}
+
+// ----- ADR 0010 §10: the two list verbs take a --session filter -----
+
+#[test]
+fn xscore_window_and_pane_list_take_a_session_filter() {
+    let name = "list_session_filter";
+    let xscore = || xscore_for(name);
+
+    let a = xscore().args(["session", "new", "A"]).output().unwrap();
+    assert!(ok(&a), "session new A failed: {}", String::from_utf8_lossy(&a.stderr));
+    let wid_a = parse_id_from_stdout(&a.stdout, "window");
+    let pid_a = parse_id_from_stdout(&a.stdout, "pane");
+
+    let b = xscore().args(["session", "new", "B"]).output().unwrap();
+    assert!(ok(&b), "session new B failed: {}", String::from_utf8_lossy(&b.stderr));
+    let wid_b = parse_id_from_stdout(&b.stdout, "window");
+    let pid_b = parse_id_from_stdout(&b.stdout, "pane");
+
+    let windows = xscore().args(["window", "list", "--session", "A"]).output().unwrap();
+    assert!(ok(&windows), "window list failed: {}", String::from_utf8_lossy(&windows.stderr));
+    let wl = String::from_utf8_lossy(&windows.stdout).to_string();
+    assert!(wl.contains(&wid_a), "A's window missing: {wl}");
+    assert!(!wl.contains(&wid_b), "B's window leaked into A's listing: {wl}");
+    assert!(wl.contains("SESSION"), "the listing names the session column: {wl}");
+
+    let panes = xscore().args(["pane", "list", "--session", "A"]).output().unwrap();
+    assert!(ok(&panes), "pane list failed: {}", String::from_utf8_lossy(&panes.stderr));
+    let pl = String::from_utf8_lossy(&panes.stdout).to_string();
+    assert!(pl.contains(&pid_a), "A's pane missing: {pl}");
+    assert!(!pl.contains(&pid_b), "B's pane leaked into A's listing: {pl}");
+
+    // No filter still shows both.
+    let all = xscore().args(["window", "list"]).output().unwrap();
+    let al = String::from_utf8_lossy(&all.stdout).to_string();
+    assert!(al.contains(&wid_a) && al.contains(&wid_b), "{al}");
+
+    cleanup_daemon(name);
 }
 
 // ----- v0.4.0 #10: `pane add` with no window stays orphan -----
@@ -548,7 +542,7 @@ fn xscore_pane_add_orphan() {
         .stdout);
     assert!(pane["link_id"].is_null(), "{pane}");
     assert!(pane["window_id"].is_null(), "{pane}");
-    assert!(pane["sink_handle"].is_null(), "{pane}");
+    assert!(pane["link_key"].is_null(), "{pane}");
     assert_eq!(pane["cols"], serde_json::json!(90));
     assert_eq!(pane["rows"], serde_json::json!(25));
     let _ = xscore().args(["pane", "del", "--id", &pid]).output();
@@ -576,41 +570,53 @@ fn xscore_link_del_direct_orphans_panes() {
     cleanup_daemon("link_del_direct_orphans");
 }
 
-// ----- v0.4.0 #12: link del removes tmux panes with the session -----
+// ----- ADR 0010 §8: `session kill` is the cascade that removes tmux panes -----
 
 #[test]
-fn xscore_link_del_tmux_removes_panes() {
-    let xscore = || xscore_for("link_del_tmux_removes");
+fn xscore_session_kill_removes_tmux_panes() {
+    let name = "session_kill_removes_panes";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
     let add = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=on"])
+        .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&add));
-    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    assert!(ok(&add), "session new --tmux failed: {}", String::from_utf8_lossy(&add.stderr));
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
-    assert!(ok(&xscore().args(["link", "del", "--id", &link_id]).output().unwrap()));
+    let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
+    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
 
     let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
-    assert!(!show.status.success(), "tmux pane must be gone after link del");
+    assert!(!show.status.success(), "the tmux pane row must be gone after session kill");
     assert!(
         String::from_utf8_lossy(&show.stderr).contains("pane not found"),
         "expected PaneNotFound, got: {}",
         String::from_utf8_lossy(&show.stderr)
     );
-    cleanup_tmux("link_del_tmux_removes");
+    let windows = xscore().args(["window", "list"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&windows.stdout).lines().count(),
+        1,
+        "only the header should remain"
+    );
+    cleanup_tmux(name);
 }
 
-// ----- v0.4.0 #13: tmux panes cannot be detached -----
+// ----- ADR 0010 §8: a pane on a control link cannot be detached -----
 
 #[test]
 fn xscore_tmux_pane_cannot_detach() {
-    let xscore = || xscore_for("tmux_pane_cannot_detach");
+    let name = "tmux_pane_cannot_detach";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
     let add = xscore()
-        .args(["link", "add", "shell:///bin/cat?tmux=on"])
+        .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&add));
+    assert!(ok(&add), "session new --tmux failed: {}", String::from_utf8_lossy(&add.stderr));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
@@ -632,9 +638,11 @@ fn xscore_tmux_pane_cannot_detach() {
         .unwrap()
         .stdout);
     assert_eq!(pane["link_id"], serde_json::json!(link_id));
+    assert!(pane["link_key"].as_str().map(|k| k.starts_with('%')).unwrap_or(false),
+        "the pane keeps its %N address: {pane}");
 
-    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-    cleanup_tmux("tmux_pane_cannot_detach");
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
 }
 
 // ----- v0.4.0: legacy state.json is rejected, not silently emptied -----
@@ -1373,12 +1381,12 @@ fn xscore_session_new_tmux_creates_window_and_pane() {
     assert_eq!(pane["link_id"], serde_json::json!(lid));
     let key = pane["link_key"].as_str().expect("link_key must hold the %N handle");
     assert!(key.starts_with('%'), "pane key should be %N, got {key}");
-    assert!(pane["sink_handle"].is_null(), "control panes must not use sink_handle: {pane}");
+    assert!(pane["link_key"].is_string(), "control panes address by %N in link_key: {pane}");
     assert!(pane["cols"].as_u64().unwrap_or(0) > 0, "geometry adopted from tmux: {pane}");
 
     // The window mirrors `@N`.
     let window = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
-    let handle = window["tmux_window_handle"].as_str().expect("tmux_window_handle present");
+    let handle = window["backend"]["handle"].as_str().expect("WindowBackend::Tmux handle");
     assert!(handle.starts_with('@'), "window handle should be @N, got {handle}");
 
     // `session show` names the backend and the tmux session.
@@ -1621,5 +1629,131 @@ fn xscore_session_tmux_sees_an_externally_created_window() {
     assert!(stdout.contains("extra"), "the window name was not adopted: {stdout}");
 
     let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}
+
+// ----- v0.6.0 PR4: migrating a v3 file whose tmux session used the old path --
+//
+// This is the whole point of `migrate_v3_tmux_links`: the user's tmux session
+// survives the mechanism change. The rows that described the old per-command
+// path are dropped, and the first command that needs the session attaches a
+// control client, which re-enumerates it.
+
+/// A v3 `state.json` as the pre-PR4 build wrote it: one tmux session driven by
+/// the old per-command tmux link, with one window and one pane.
+fn legacy_v3_state(socket: &str) -> String {
+    format!(
+        r#"{{
+  "schema_version": 3,
+  "sessions": [
+    {{"id": "01928e0a-7d10-7000-8000-000000000101", "name": "build",
+      "created_at": "2026-10-01T10:00:00Z",
+      "backend": {{"kind": "tmux", "host": {{"kind": "local"}},
+                 "socket": {{"kind": "named", "name": "{socket}"}}, "session": "build"}}}}
+  ],
+  "links": [
+    {{"id": "01928e0a-7d10-7000-8000-000000000201",
+      "session_id": "01928e0a-7d10-7000-8000-000000000101",
+      "name": "build", "created_at": "2026-10-01T10:00:00Z",
+      "address": {{"transport": "shell", "command": "/bin/cat", "args": []}},
+      "transport": {{"transport": "shell", "command": "/bin/cat", "args": []}},
+      "sink": {{"sink": "tmux", "mode": "auto", "session_name": "build"}},
+      "endpoint": "pipe"}}
+  ],
+  "windows": [
+    {{"id": "01928e0a-7d10-7000-8000-000000000301",
+      "session_id": "01928e0a-7d10-7000-8000-000000000101",
+      "name": "sh", "created_at": "2026-10-01T10:00:00Z",
+      "layout": {{"kind": "single"}}, "cols": 100, "rows": 30,
+      "tmux_window_handle": "@0", "panes": ["01928e0a-7d10-7000-8000-000000000401"]}}
+  ],
+  "panes": [
+    {{"id": "01928e0a-7d10-7000-8000-000000000401",
+      "session_id": "01928e0a-7d10-7000-8000-000000000101",
+      "name": "b1", "created_at": "2026-10-01T10:00:00Z",
+      "cols": 100, "rows": 30, "x": 0, "y": 0,
+      "link_id": "01928e0a-7d10-7000-8000-000000000201",
+      "window_id": "01928e0a-7d10-7000-8000-000000000301",
+      "sink_handle": "%0", "link_key": null}}
+  ]
+}}"#
+    )
+}
+
+#[test]
+fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
+    let name = "state_migrate_tmux";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    // The tmux session is the user's, and it already exists.
+    let created = tmux_for(name)
+        .args(["new-session", "-d", "-s", "build", "-x", "100", "-y", "30"])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "tmux new-session failed");
+
+    // First touch wipes this test's HOME, so the legacy file is written after.
+    assert!(xscore().args(["session", "ls"]).output().unwrap().status.success());
+    let state = home_for(name)
+        .join(".config")
+        .join("xscore")
+        .join("state")
+        .join("state.json");
+    std::fs::create_dir_all(state.parent().unwrap()).unwrap();
+    std::fs::write(&state, legacy_v3_state(&format!("xscore-test-{name}"))).unwrap();
+
+    // Loading rows that still carry the old tmux path is refused, not silently
+    // emptied: losing a tmux session without saying so is the failure this
+    // test exists to prevent.
+    let refused = xscore().args(["session", "ls"]).output().unwrap();
+    assert!(!refused.status.success(), "an un-migrated v3 file must not load");
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(err.contains("state migrate"), "error should name the migration: {err}");
+
+    let migrate = xscore().args(["state", "migrate"]).output().unwrap();
+    assert!(ok(&migrate), "state migrate failed: {}", String::from_utf8_lossy(&migrate.stderr));
+    let out = String::from_utf8_lossy(&migrate.stdout);
+    assert!(out.contains("1 tmux session(s) converted"), "got: {out}");
+
+    // The session survived, and the next command that needs its structure
+    // attaches a control client — which rebuilds the rows from tmux itself.
+    let windows = xscore().args(["window", "list", "--session", "build"]).output().unwrap();
+    assert!(ok(&windows), "window list failed: {}", String::from_utf8_lossy(&windows.stderr));
+    let wl = String::from_utf8_lossy(&windows.stdout).to_string();
+    let rows = wl.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(rows, 1, "the tmux window was not re-enumerated: {wl}");
+    assert!(wl.contains('@'), "the window row must mirror @N: {wl}");
+
+    let panes = xscore().args(["pane", "list", "--session", "build"]).output().unwrap();
+    assert!(ok(&panes), "pane list failed: {}", String::from_utf8_lossy(&panes.stderr));
+    let pl = String::from_utf8_lossy(&panes.stdout).to_string();
+    assert_eq!(
+        pl.lines().skip(1).filter(|l| !l.trim().is_empty()).count(),
+        1,
+        "the tmux pane was not re-enumerated: {pl}"
+    );
+    let pane_id = pl
+        .lines()
+        .nth(1)
+        .and_then(|l| l.split_whitespace().next())
+        .expect("a pane row");
+    let pane = json(&xscore().args(["pane", "show", "--id", pane_id]).output().unwrap().stdout);
+    assert!(
+        pane["link_key"].as_str().map(|k| k.starts_with('%')).unwrap_or(false),
+        "the re-enumerated pane is addressed by %N: {pane}"
+    );
+
+    // ...and the one link is the control client, created on that attach.
+    let links = xscore().args(["link", "list", "--session", "build"]).output().unwrap();
+    let ll = String::from_utf8_lossy(&links.stdout).to_string();
+    assert_eq!(
+        ll.lines().skip(1).filter(|l| !l.trim().is_empty()).count(),
+        1,
+        "one tmux session, one link: {ll}"
+    );
+    assert!(ll.contains("control"), "and it is the control link: {ll}");
+
+    let _ = xscore().args(["session", "kill", "build"]).output();
     cleanup_tmux(name);
 }

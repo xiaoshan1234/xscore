@@ -31,8 +31,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
-use crate::backends::bridge::DIRECT_BUFFER_CAPACITY;
-use crate::backends::RingBuffer;
+use crate::core::buffer::{RingBuffer, DIRECT_BUFFER_CAPACITY};
 use crate::core::{Error, LinkId, PaneId, Result};
 use crate::transport::{factory as transport_factory, Transport};
 
@@ -314,9 +313,9 @@ impl DaemonState {
     }
 }
 
-/// Build + open a transport for a link. `open()` is normally called by
-/// `sink_for(RawSink)` in the CLI; the daemon has no sink, so it opens
-/// here — without it `ShellTransport::read/write` fail with "not open".
+/// Build + open a transport for a link. The CLI opens a pipe link's transport
+/// in `add_link_in`; the daemon owns its own transports, so it opens them here —
+/// without it `ShellTransport::read/write` fail with "not open".
 async fn create_transport(config: crate::model::TransportConfig) -> std::result::Result<Arc<dyn Transport>, String> {
     let mut transport = transport_factory::transport_for(config)
         .await

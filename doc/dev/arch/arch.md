@@ -256,6 +256,15 @@ Consequences:
 
 ### Sink is back, with a different job
 
+> **Not introduced (ADR 0010 D4 amendment).** The layout below is what sharing a
+> link *needs*; what shipped is `TmuxControl`'s reader loop: `%output %N` is
+> routed to the pane whose `link_key` is `%N`, and every other notification
+> becomes a `TmuxEvent`. It has exactly one implementation, and a trait with one
+> impl plus a trivial forwarder is the ceremony that got the first `Sink`
+> deleted. Introduce the trait when a second link kind has to demultiplex. The
+> section is kept because the reasoning about *why* sharing is addressing still
+> holds.
+
 `Sink` was retired when every link was exclusive: `capacity` / `grant` / `revoke`
 had nothing left to decide. A control link is genuinely shared, so a per-link
 demultiplexer is needed — but its keys are assigned by tmux, so there is still
@@ -642,7 +651,7 @@ Invariants and what enforces each:
   (tmux-backed sessions; for native it is equivalent to `kill`, because the
   daemon is the backend).
 
-## 9. Module structure (target)
+## 9. Module structure
 
 ```
 crates/xscore/src/
@@ -650,27 +659,32 @@ crates/xscore/src/
                manager, state, buffer (RingBuffer), events
   model/       SessionInfo, LinkInfo, WindowInfo, PaneInfo,
                SessionBackend, WindowBackend, EndpointRef, TransportConfig
-  sink/        Sink trait, PipeSink, ControlSink (control protocol: parse + demux)
+  backends/    PaneBridge: DirectBridge (a pipe's pump + buffer),
+               DaemonBridge (the daemon owns both), ControlBridge (a pane on
+               its session's control client)
   transport/   Transport trait, shell, serial, ssh, NoopTransport, DaemonTransport
-  tmux/        TmuxHost (Local / Ssh) spawns the control client; one-shot
-               queries; structure helpers
+  tmux/        TmuxControl (spawn, reader/writer threads, correlation),
+               protocol (pure parsing), format (the -F parsers and the command
+               lines: send-keys, new-window, split-window, resize-pane)
   daemon/      protocol, server, client
   url/         URL parser
   config/      link templates
-  cli/         session, window, pane, link, data, daemon
+  cli/         session, window, pane, link, data, daemon, state
 ```
 
-`backends/` disappears: it held the conduit (`PaneBridge`) and the pane's buffer.
-The conduit becomes `sink/` — it is now a real demultiplexer rather than a
-pass-through — and the buffer moves to `core/buffer.rs` because it belongs to the
-pane, not to the connection.
+`backends/` stays — it is the per-pane conduit — but it no longer holds the
+pane's buffer: that moved to `core/buffer.rs`, because it belongs to the pane,
+not to the connection. There is **no `sink/`**: the demultiplexer is
+`TmuxControl`'s reader loop (ADR 0010, D4 amendment), so a link kind is
+distinguished by `EndpointRef` and by which bridge its panes get, not by a trait
+object.
 
 ```mermaid
 graph LR
     CLI["cli/"]
     CORE["core/"]
     MODEL["model/"]
-    CHAN["sink/"]
+    BACK["backends/"]
     TR["transport/"]
     TM["tmux/"]
     DM["daemon/"]
@@ -684,16 +698,16 @@ graph LR
     CLI --> DM
 
     CORE --> MODEL
-    CORE --> CHAN
+    CORE --> BACK
     CORE --> TR
     CORE --> TM
     CORE --> DM
     CORE --> URL
     CORE --> CFG
 
-    CHAN --> TR
-    CHAN --> TM
-    CHAN --> MODEL
+    BACK --> TR
+    BACK --> TM
+    BACK --> MODEL
 
     TM --> TR
     TM --> MODEL
@@ -709,11 +723,11 @@ graph LR
     classDef bad stroke:#c62828,stroke-width:2px,stroke-dasharray: 5 5
     CLI -.->|forbidden| TR
     CLI -.->|forbidden| TM
-    CLI -.->|forbidden| CHAN
+    CLI -.->|forbidden| BACK
     MODEL -.->|forbidden| CORE
     URL -.->|forbidden| CORE
     CFG -.->|forbidden| CORE
-    class TR,TM,CHAN,CORE bad
+    class TR,TM,BACK,CORE bad
 ```
 
 Two notes that survive from v0.5.1:
@@ -797,33 +811,39 @@ Notes:
 
 ## 11. Delta from v0.5.1
 
+**Status: landed.** `v3` is unreleased, so this section describes the change as
+it exists in the code, not as an intention. Two rows below were revised while
+implementing it: `Sink` as a trait was *not* reintroduced (ADR 0010, D4
+amendment), and `backends/` did *not* disappear — only its buffer moved.
+
 ### Removed
 
 | Gone | Why |
 |---|---|
-| `Sink::capacity` / `grant` / `revoke`, `RawSink`, `TmuxSink: Sink` | tmux assigns the keys (`%N`) itself, so there is nothing to grant. `Sink` itself **returns** as a demultiplexer (§4) |
+| `Sink::capacity` / `grant` / `revoke`, `RawSink`, `TmuxSink: Sink`, the `sink/` module | tmux assigns the keys (`%N`) itself, so there is nothing to grant. The `Sink` trait was **not** reintroduced: one implementation is not a trait (§4) |
 | `Link.sink: Box<dyn Sink>` | it was dead: one `no-op attach` call, then never touched |
 | `Link.active_pane` (Q1 ledger) | a `Pipe` link has one reader by construction; a `Control` link addresses panes by key |
 | `SinkConfig::{Raw, Tmux}` | replaced by `SessionBackend`; a link no longer knows about tmux |
 | `?tmux=on\|auto\|local\|remote` | tmux-ness is a session property |
 | `socket: Option<String>` | replaced by `TmuxSocket { Default, Named, Path }`: a named socket resolves on the *host*, so a name is not a location |
-| `WindowInfo.tmux_window_handle`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux` (`@N`) and the pane's `link_key` (`%N`) |
+| `WindowInfo.tmux_window_handle`, `WindowInfo.layout`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux { handle }` (`@N`) and the pane's `link_key` (`%N`) |
 | `WindowLayout` (5 variants) | no consumer; tmux owns layout, native has no renderer |
 | `link open` / `link close` | `session attach` / `session kill` / `session forget` |
-| `link sync [--heal]` | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
-| `backends/` module | `sink/` (per-link demux) and `core/buffer.rs` (the pane's buffer) |
+| `link sync [--heal]` (`SyncReport`) | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
+| `TmuxBridge` (capture-pane per operation) | `ControlBridge`: `%output` fills the pane's buffer, `send-keys` is one line |
+| `backends/ring_buffer.rs` | the pane's buffer is `core/buffer.rs`; `backends/` keeps the conduit |
 
 ### Added
 
 | New | Role |
 |---|---|
 | `Session` + `SessionId` + `SessionBackend` | the workspace, and who keeps it alive |
-| `EndpointRef::{Pipe, Control}` | a stream xscore owns, or the session's one control connection |
-| `sink/{PipeSink,ControlSink}` | per-link demultiplexer: one pane, or `%output %N` for many |
-| `Sink::dispatch -> Data{key}/Event` | how bytes and structure leave a link |
+| `WindowBackend::{Native, Tmux}` | who owns a window's structure |
+| `EndpointRef::{Pipe(TransportConfig), Control}` | a stream xscore owns, or the session's one control connection |
+| `ControlBridge` | a pane's view of its session's control client: buffer reads, `send-keys` writes |
 | `tmux::TmuxHost` (`Local`, `Ssh`) | argv-prefix runner: local `tmux`, or `ssh <dest> tmux` once per command (§6) |
 | `session adopt` / `session forget` | manage sessions xscore did not create; stop managing without destroying |
-| `pane new --window` on a tmux session | creates tmux pane + link + pane atomically |
+| `pane new --window` on a tmux session | splits the tmux window and inserts the pane row with `link_key = %N` on the session's one link |
 
 ### Changed
 
@@ -834,7 +854,8 @@ Notes:
 | Q1 | special case in `attach_pane` | per link kind: a `Pipe` link one pane, a `Control` link every pane in its session |
 | tmux control | `Sink` methods + `link sync` + one exec per call | one control client per session; notifications update state (§7) |
 | remote tmux | `?tmux=remote`, never read — always local | `SessionBackend::Tmux { host: Ssh { .. } }`; one `ssh` exec per tmux command |
-| `Window.layout` | stored enum | gone; `#{window_layout}` read from tmux when needed |
+| `Window.layout` | stored enum | gone; tmux owns layout, and `WindowBackend` says who owns the window |
+| `Link.transport` + `Link.sink` | two fields, one of them dead | `LinkInfo.endpoint`: `Pipe(TransportConfig)` or `Control` (host/socket/session come from the session) |
 
 ### Behaviour that must change (defects, not features)
 
@@ -859,6 +880,16 @@ silently converted (same policy as v0.4.0). The one-time migration:
 3. windows and panes are re-parented to the session they came from.
 4. `link sync` output is discarded — it described cached structure that is now
    event-driven.
+
+A v3 file written by the pre-PR4 build (v3 was never released) is upgraded by
+the same command, in a second step: every link still carrying the old tmux sink
+turns its session into `SessionBackend::Tmux { host: Local, socket:
+Named(<XSCORE_SOCKET or "xscore">), session: <the sink's name or
+xscore-<link id>> }`, and that session's link, window and pane rows are
+**dropped** — the control link is created when the session is next attached, and
+tmux re-enumerates the structure. Native sessions keep their rows; every row is
+rewritten in the field shape above. Loading such a file without migrating is a
+hard error naming the command.
 
 ## 12. Open decisions
 

@@ -8,8 +8,10 @@
 // timing).
 //
 // v0.4.0 focus: the pane's buffer (DirectBridge + RingBuffer) really
-// holds bytes, detach does NOT kill the link's transport, and tmux links
-// drop their panes along with the session.
+// holds bytes, and detach does NOT kill the link's transport.
+// v0.6.0 (ADR 0010): a tmux session is driven by ONE control link that serves
+// every pane of the session (`link_key = %N`), and `session kill` is the only
+// cascade that takes those rows down.
 //
 // IMPORTANT: these tests use `std::env::set_var` for `XSCORE_SOCKET`
 // and `HOME` (the manager reads XSCORE_SOCKET at sink-creation time and
@@ -83,38 +85,67 @@ async fn data_read_after_link_pane_attach_write() {
     cleanup_socket(&sock).await;
 }
 
-// ----- (kept, adapted) tmux link hosts several panes at once -----
+// ----- one control link serves every pane of its tmux session -----
 
 #[tokio::test]
-async fn tmux_link_supports_multiple_attached_panes() {
-    // Q1 corollary: tmux-backed links may have multiple panes attached
-    // simultaneously — no auto-detach, and every pane carries its own
-    // %N handle.
+async fn one_control_link_serves_every_pane_of_its_session() {
+    // ADR 0010 §D3: sharing a link is ADDRESSING here, not a race. Three panes
+    // of one tmux session ride ONE `Control` link, each with its own `%N`, so
+    // there is no auto-detach — and exactly one link row.
     let sock = setup("tmux-multi").await;
-
+    let _guard = SocketGuard(sock.clone());
     let mgr = SessionManager::new();
-    let (spec, addr) = url::parse("shell:///bin/cat?tmux=on").expect("parse");
-    let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
-    let wid = res.window_id.expect("tmux link adopts a window");
+    let sid = mgr
+        .create_tmux_session("multi", TmuxHostConfig::Local, TmuxSocket::Named(sock.clone()), 80, 24)
+        .await
+        .expect("create tmux session");
 
-    let p2 = mgr.add_pane(None, 80, 24, 0, 0, Some(wid)).await.expect("p2");
-    let p3 = mgr.add_pane(None, 80, 24, 0, 0, Some(wid)).await.expect("p3");
+    let window = mgr
+        .windows
+        .list_all()
+        .await
+        .into_iter()
+        .find(|w| w.info.session_id == sid && w.info.backend.tmux_handle().is_some())
+        .expect("the session's tmux window");
+    let wid = window.info.id;
+    let first = mgr
+        .panes
+        .list_all()
+        .await
+        .into_iter()
+        .find(|p| p.session_id == sid)
+        .expect("the session's first pane")
+        .id;
 
-    let mut handles = Vec::new();
-    for pid in [res.pane_id, p2, p3] {
+    let p2 = mgr.add_pane_in(sid, None, 0, 0, 0, 0, Some(wid)).await.expect("split 1");
+    let p3 = mgr.add_pane_in(sid, None, 0, 0, 0, 0, Some(wid)).await.expect("split 2");
+
+    // One link for the session, and it is the control client.
+    let links: Vec<_> = mgr
+        .links
+        .list()
+        .await
+        .into_iter()
+        .filter(|l| l.info.session_id == sid)
+        .collect();
+    assert_eq!(links.len(), 1, "a tmux session has exactly one link");
+    assert!(links[0].info.is_control(), "and it is the control link: {:?}", links[0].info);
+    let lid = links[0].id;
+
+    let mut keys = Vec::new();
+    for pid in [first, p2, p3] {
         let info = mgr.panes.get(pid).await.expect("pane info");
-        assert_eq!(info.link_id, Some(res.link_id),
-            "tmux link should keep pane {pid} attached");
-        assert_eq!(info.window_id, Some(wid));
-        let h = info.sink_handle.expect("tmux pane handle");
-        assert!(h.starts_with('%'), "expected %N, got {h}");
-        handles.push(h);
+        assert_eq!(info.link_id, Some(lid), "every pane rides the one link: {info:?}");
+        assert_eq!(info.window_id, Some(wid), "and lives in the one tmux window");
+        let key = info.link_key.expect("a control pane is addressed by its %N");
+        assert!(key.starts_with('%'), "expected %N, got {key}");
+        keys.push(key);
     }
-    handles.sort();
-    handles.dedup();
-    assert_eq!(handles.len(), 3, "three distinct %N handles expected: {handles:?}");
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 3, "three distinct %N addresses expected: {keys:?}");
 
-    mgr.del_link(res.link_id).await.expect("del_link");
+    mgr.del_session(sid).await.expect("kill the session");
     cleanup_socket(&sock).await;
 }
 
@@ -295,50 +326,58 @@ async fn link_del_direct_keeps_pane_orphan() {
     cleanup_socket(&sock).await;
 }
 
-/// #17 — del_link on a tmux link removes its panes/windows (session death).
+/// #17 — `session kill` is the only cascade: the tmux panes, windows and link
+/// go with the session, and so does the server session itself.
 #[tokio::test]
-async fn link_del_tmux_removes_panes() {
+async fn session_kill_removes_the_tmux_panes() {
     let sock = setup("del-tmux").await;
+    let _guard = SocketGuard(sock.clone());
     let mgr = SessionManager::new();
-    let (spec, addr) = url::parse("shell:///bin/cat?tmux=on").expect("parse");
-    let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
-    let pid = res.pane_id;
-    let wid = res.window_id.expect("adopted window");
+    let sid = mgr
+        .create_tmux_session("killme", TmuxHostConfig::Local, TmuxSocket::Named(sock.clone()), 80, 24)
+        .await
+        .expect("create tmux session");
+    let pane = mgr
+        .panes
+        .list_all()
+        .await
+        .into_iter()
+        .find(|p| p.session_id == sid)
+        .expect("the session's pane")
+        .id;
+    let wid = mgr
+        .windows
+        .list_all()
+        .await
+        .into_iter()
+        .find(|w| w.info.session_id == sid)
+        .expect("the session's window")
+        .info
+        .id;
+    let lid = mgr
+        .links
+        .list()
+        .await
+        .into_iter()
+        .find(|l| l.info.session_id == sid)
+        .expect("the session's control link")
+        .id;
 
-    mgr.del_link(res.link_id).await.expect("del_link");
+    mgr.del_session(sid).await.expect("kill the session");
 
-    assert!(mgr.panes.get(pid).await.is_none(), "tmux pane must be removed with the link");
-    assert!(mgr.windows.get(wid).await.is_none(), "adopted window must be removed too");
-    assert!(mgr.links.get(res.link_id).await.is_none());
+    assert!(mgr.panes.get(pane).await.is_none(), "the tmux pane row must be removed");
+    assert!(mgr.windows.get(wid).await.is_none(), "its window row too");
+    assert!(mgr.links.get(lid).await.is_none(), "and the control link");
+    assert!(mgr.sessions.get(sid).await.is_none());
 
-    cleanup_socket(&sock).await;
-}
+    // The server session is the backend: kill means kill.
+    let alive = tokio::process::Command::new("tmux")
+        .args(["-L", &sock, "has-session", "-t", "killme"])
+        .output()
+        .await
+        .expect("tmux has-session");
+    assert!(!alive.status.success(), "`session kill` must end the tmux session");
 
-/// #18 — `sync_link` is scoped to its own session: healing link A must
-/// never touch link B's windows/panes.
-#[tokio::test]
-async fn sync_link_does_not_touch_other_links() {
-    let sock = setup("sync-scope").await;
-    let mgr = SessionManager::new();
-
-    let (spec_a, addr_a) = url::parse("shell:///bin/cat?tmux=on").expect("parse a");
-    let a = mgr.add_link(spec_a, addr_a, None, None).await.expect("add a");
-    let (spec_b, addr_b) = url::parse("shell:///bin/cat?tmux=on").expect("parse b");
-    let b = mgr.add_link(spec_b, addr_b, None, None).await.expect("add b");
-
-    let report = mgr.sync_link(a.link_id, true).await.expect("sync a");
-    assert!(report.stale_windows.is_empty(),
-        "link A sync must not see link B's windows as stale: {report:?}");
-    assert!(report.stale_panes.is_empty(), "{report:?}");
-
-    assert!(mgr.panes.get(b.pane_id).await.is_some(),
-        "link B's pane must survive link A's heal");
-    assert!(mgr.windows.get(b.window_id.unwrap()).await.is_some(),
-        "link B's window must survive link A's heal");
-    assert!(mgr.panes.get(a.pane_id).await.is_some(), "link A's pane stays");
-
-    mgr.del_link(a.link_id).await.expect("del a");
-    mgr.del_link(b.link_id).await.expect("del b");
     cleanup_socket(&sock).await;
 }
 
@@ -464,9 +503,9 @@ async fn tmux_window_add_event_becomes_a_window_row() {
         .find(|w| w.info.name == "extra")
         .expect("the window is named after tmux's");
     assert!(
-        extra.info.tmux_window_handle.as_deref().map(|h| h.starts_with('@')).unwrap_or(false),
+        extra.info.backend.tmux_handle().map(|h| h.starts_with('@')).unwrap_or(false),
         "the row must mirror @N: {:?}",
-        extra.info.tmux_window_handle
+        extra.info.backend
     );
     // ...and tmux's window has a pane row of its own, addressed by `%N`.
     assert_eq!(in_window.len(), 1, "the new window's pane was not adopted");

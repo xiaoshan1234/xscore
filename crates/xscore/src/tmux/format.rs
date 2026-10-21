@@ -206,6 +206,40 @@ pub fn resize_pane_command(handle: &str, cols: u16, rows: u16) -> String {
     format!("resize-pane -t {handle} -x {cols} -y {rows}")
 }
 
+/// `new-window -d -P -F '#{window_id}' [-n <name>]`: create a window in the
+/// client's session and answer with its `@N`.
+///
+/// `-d` keeps the user's current window: creating a window must not move what
+/// someone is looking at. `-P -F` is the only reliable way to learn the handle —
+/// matching on names would confuse two windows that share one.
+pub fn new_window_command(name: Option<&str>) -> String {
+    let mut command = format!(
+        "new-window -d -P -F {}",
+        quote_arg("#{window_id}")
+    );
+    if let Some(name) = name.filter(|n| !n.is_empty()) {
+        command.push_str(" -n ");
+        command.push_str(&quote_arg(name));
+    }
+    command
+}
+
+/// `split-window -d -t @N -P -F '#{pane_id}'`: split one tmux window and answer
+/// with the new pane's `%N` (its `link_key`).
+pub fn split_window_command(window_handle: &str) -> String {
+    format!(
+        "split-window -d -t {} -P -F {}",
+        quote_arg(window_handle),
+        quote_arg("#{pane_id}")
+    )
+}
+
+/// `kill-pane -t %N`: destroy a pane on the server. Used by `pane del`, because
+/// dropping only the row would leave a `%N` that reconciliation adopts back.
+pub fn kill_pane_command(handle: &str) -> String {
+    format!("kill-pane -t {handle}")
+}
+
 /// `capture-pane -p -t %N`: tmux's own scrollback, the fallback a fresh process
 /// reads when it streamed nothing itself (see `ControlBridge::read`).
 pub fn capture_pane_command(handle: &str) -> String {
@@ -301,6 +335,29 @@ mod tests {
         }
         let command = send_keys_literal("%0", "-x --y").unwrap();
         assert_eq!(command, "send-keys -t %0 -l -- '-x --y'");
+    }
+
+    #[test]
+    fn create_and_split_commands_ask_for_the_handle() {
+        // `-P -F` is what makes the answer the handle; without it the row would
+        // have to be guessed from a name or an index.
+        let created = new_window_command(None);
+        assert_eq!(created, "new-window -d -P -F '#{window_id}'");
+        assert!(created.starts_with("new-window "));
+
+        let named = new_window_command(Some("logs"));
+        assert_eq!(
+            named,
+            "new-window -d -P -F '#{window_id}' -n 'logs'"
+        );
+        // An empty name is "no name", not `-n ''`.
+        assert_eq!(new_window_command(Some("")), created);
+
+        assert_eq!(
+            split_window_command("@3"),
+            "split-window -d -t '@3' -P -F '#{pane_id}'"
+        );
+        assert_eq!(kill_pane_command("%7"), "kill-pane -t %7");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // url/connect.rs
 use crate::core::{Error, LinkAddress, Result};
-use crate::model::{ConnectSpec, SinkConfig, TransportConfig};
+use crate::model::{ConnectSpec, TransportConfig};
 use std::collections::HashMap;
 
 pub fn parse(s: &str) -> Result<(ConnectSpec, LinkAddress)> {
@@ -11,7 +11,6 @@ pub fn parse(s: &str) -> Result<(ConnectSpec, LinkAddress)> {
 
     let mut pairs: HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
-    let tmux = pairs.remove("tmux");
     let name = pairs.remove("name").unwrap_or_default();
 
     let (transport, address) = match scheme {
@@ -48,21 +47,11 @@ pub fn parse(s: &str) -> Result<(ConnectSpec, LinkAddress)> {
         other => return Err(Error::Url(format!("unknown scheme: {other}"))),
     };
 
-    // Sink default: direct transport I/O (Raw). Opt in to the tmux
-    // server (TmuxSink) with `?tmux=on` (mode=auto) or `?tmux=auto|local|remote`.
-    // The user requested: "我的本来的目的是支持 tmux 会话的管理，不是所有 link
-    // 都要走 tmux" — tmux is one option, not the default.
-    let session_name = (!name.is_empty()).then(|| name.clone());
-    let sink = match tmux.as_deref() {
-        Some("on") => SinkConfig::Tmux { mode: "auto".into(), session_name },
-        Some("auto") | Some("local") | Some("remote") => {
-            SinkConfig::Tmux { mode: tmux.unwrap(), session_name }
-        }
-        // "off" or absent → RawSink (direct transport I/O)
-        _ => SinkConfig::Raw,
-    };
-
-    Ok((ConnectSpec { name, transport, sink, address: address.clone() }, address))
+    // A URL only says how to connect. "Does this go through tmux?" is a
+    // property of the session (`SessionBackend`), so there is nothing to opt
+    // into here — the old tmux query flag is gone (ADR 0010 §D7) and a
+    // `tmux://` URL never existed.
+    Ok((ConnectSpec { name, transport, address: address.clone() }, address))
 }
 
 #[cfg(test)]
@@ -72,7 +61,7 @@ mod tests {
     use crate::core::LinkAddress;
 
     #[test]
-    fn parse_ssh_url_with_tmux() {
+    fn parse_ssh_url_with_identity() {
         let (spec, addr) = parse("ssh://root@10.0.0.1:22?identity=~/.ssh/id_ed25519").unwrap();
         assert!(matches!(spec.transport, TransportConfig::Ssh { .. }));
         assert_eq!(addr, LinkAddress::Ssh {
@@ -105,52 +94,4 @@ mod tests {
         assert_ne!(a1, a2);
     }
 
-    // ----- 2026-10-19 design pivot: tmux is opt-in, not default -----
-
-    #[test]
-    fn parse_shell_url_default_is_raw_sink() {
-        // No `?tmux=` query → SinkConfig::Raw (no tmux server).
-        let (spec, _) = parse("shell:///bin/bash").unwrap();
-        assert!(matches!(spec.sink, SinkConfig::Raw),
-            "expected raw sink by default, got {:?}", spec.sink);
-    }
-
-    #[test]
-    fn parse_shell_url_tmux_off_is_raw_sink() {
-        let (spec, _) = parse("shell:///bin/bash?tmux=off").unwrap();
-        assert!(matches!(spec.sink, SinkConfig::Raw));
-    }
-
-    #[test]
-    fn parse_shell_url_tmux_on_is_tmux_sink_auto() {
-        let (spec, _) = parse("shell:///bin/bash?tmux=on").unwrap();
-        assert!(matches!(spec.sink,
-            SinkConfig::Tmux { ref mode, .. } if mode == "auto"),
-            "expected tmux/auto, got {:?}", spec.sink);
-    }
-
-    #[test]
-    fn parse_shell_url_tmux_local_is_tmux_sink_local() {
-        let (spec, _) = parse("shell:///bin/bash?tmux=local").unwrap();
-        assert!(matches!(spec.sink,
-            SinkConfig::Tmux { ref mode, .. } if mode == "local"),
-            "expected tmux/local, got {:?}", spec.sink);
-    }
-
-    #[test]
-    fn parse_shell_url_tmux_remote_is_tmux_sink_remote() {
-        let (spec, _) = parse("shell:///bin/bash?tmux=remote").unwrap();
-        assert!(matches!(spec.sink,
-            SinkConfig::Tmux { ref mode, .. } if mode == "remote"),
-            "expected tmux/remote, got {:?}", spec.sink);
-    }
-
-    #[test]
-    fn parse_shell_url_with_name_sets_tmux_session_name() {
-        // `?name=X` only meaningful with `?tmux=...`
-        let (spec, _) = parse("shell:///bin/bash?tmux=on&name=build").unwrap();
-        assert!(matches!(spec.sink,
-            SinkConfig::Tmux { session_name: Some(ref n), .. } if n == "build"),
-            "expected tmux w/ name=build, got {:?}", spec.sink);
-    }
 }

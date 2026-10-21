@@ -6,6 +6,5 @@ pub mod daemon;
 pub mod model;
 pub mod transport;
 pub mod url;
-pub mod sink;
 pub mod tmux;
 pub mod util;

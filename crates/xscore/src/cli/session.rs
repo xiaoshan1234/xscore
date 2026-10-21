@@ -17,8 +17,7 @@
 // IS the backend — so `forget` refuses.
 use crate::core::{Error, SessionId, SessionManager, TmuxCreateOptions};
 use crate::model::{
-    ConnectSpec, SessionBackend, SessionInfo, SinkConfig, TmuxHostConfig, TmuxSocket,
-    TransportConfig,
+    ConnectSpec, SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket, TransportConfig,
 };
 use crate::util::resolve_socket;
 use clap::{Args, Subcommand};
@@ -177,7 +176,6 @@ async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<(
         // Empty name: the manager derives one from the new link id.
         name: String::new(),
         transport: TransportConfig::Shell { command, args: vec![], cwd: args.cwd.clone() },
-        sink: SinkConfig::Raw,
         address: address.clone(),
     };
     let result = mgr.add_link_in(sid, spec, address, None, None).await?;

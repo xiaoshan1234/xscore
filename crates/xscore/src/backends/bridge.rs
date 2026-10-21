@@ -14,27 +14,21 @@
 //     request over the Unix socket, so a pane's history and its link's
 //     transport survive the CLI process that created them.
 //
-//   - `TmuxBridge`: wraps the link's `TmuxSink` (via `Weak<TmuxSink>` to
-//     avoid reference cycles). `read` = `tmux capture-pane` (tmux's own
-//     scrollback IS the buffer), `write` = `send-keys`, `resize` =
-//     `resize-pane`, `close` = `kill-pane` (a real tmux pane dies).
-//     tmux is already resident, so this path never involves the daemon.
-//
 //   - `ControlBridge` (v0.6.0, ADR 0010): the same pane, reached through the
 //     session's control client instead of one exec per operation. `read` is
 //     the pane's `RingBuffer` (filled by `%output %N`), `write` one
 //     `send-keys` line on the control channel (no shell in between), `resize`
-//     `resize-pane`, `close` nothing at all. This is the successor to
-//     `TmuxBridge`; both exist until the old `?tmux=on` path is deleted.
+//     `resize-pane`, `close` nothing at all. It is the only tmux conduit: the
+//     per-command `TmuxBridge` it replaced is gone (PR4).
 //
 // `close()` means "release THIS pane's hold on the resource", never
 // "kill a shared resource" (P0-a):
 //   - DirectBridge::close(): stop the reader task. The link's transport
 //     stays OPEN — other panes (and a later re-attach) still use it.
-//   - TmuxBridge::close(): kill the tmux pane (it is this pane's alone).
+//   - ControlBridge::close(): a no-op; the pane is tmux's.
 //
-// The manager holds the bridges (and, for direct panes, the buffers) in
-// maps keyed by PaneId, so detaching a direct pane keeps its history.
+// The manager holds the bridges (and the pane buffers) in maps keyed by
+// PaneId, so detaching a pane keeps its history.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,14 +36,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
+use crate::core::buffer::{RingBuffer, DIRECT_BUFFER_CAPACITY};
 use crate::core::Result;
-use crate::sink::Sink;
 use crate::transport::Transport;
-
-use super::ring_buffer::RingBuffer;
-
-/// Default capacity of a direct pane's buffer (64 KiB of scrollback).
-pub const DIRECT_BUFFER_CAPACITY: usize = 64 * 1024;
 
 /// How long `DirectBridge::read` waits for the reader task to produce
 /// bytes before reporting "nothing available" (`Ok(0)`).
@@ -364,46 +353,3 @@ impl PaneBridge for ControlBridge {
     }
 }
 
-/// Tmux bridge: routes through the link's `TmuxSink`. We hold a `Weak`
-/// reference to the sink (not `Arc`) so that the bridge doesn't keep
-/// the sink alive after the link is dropped — when the sink's strong
-/// refs are gone, the `Weak::upgrade` fails and the bridge returns
-/// `Error::Sink("tmux sink dropped")` for any subsequent op.
-#[derive(Debug)]
-pub struct TmuxBridge {
-    pub sink: std::sync::Weak<crate::sink::tmux::TmuxSink>,
-    /// tmux pane handle — the "%N" string tmux assigns to a pane. All
-    /// tmux CLI commands are addressed via this handle.
-    pub handle: String,
-}
-
-impl TmuxBridge {
-    fn sink(&self) -> Result<Arc<crate::sink::tmux::TmuxSink>> {
-        self.sink
-            .upgrade()
-            .ok_or_else(|| crate::core::Error::Sink("tmux sink dropped".into()))
-    }
-}
-
-#[async_trait]
-impl PaneBridge for TmuxBridge {
-    fn kind(&self) -> &'static str { "tmux" }
-
-    async fn read(&self, buf: &mut [u8]) -> Result<usize> {
-        self.sink()?.snapshot(&self.handle, buf).await
-    }
-
-    async fn write(&self, data: &[u8]) -> Result<usize> {
-        self.sink()?.write(&self.handle, data).await
-    }
-
-    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.sink()?.resize(&self.handle, cols, rows).await
-    }
-
-    async fn close(&self) -> Result<()> {
-        // A tmux pane belongs to exactly one xscore pane: closing it is
-        // a real `tmux kill-pane`. The link (session) survives.
-        self.sink()?.close_pane(&self.handle).await
-    }
-}

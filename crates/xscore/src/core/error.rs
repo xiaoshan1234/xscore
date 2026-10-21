@@ -84,22 +84,6 @@ pub enum Error {
     Daemon(String),
 
 
-    #[error("`xscore link open` is only valid for tmux sessions, not {0}")]
-    OpenOnlyForTmux(&'static str),
-
-    #[error("`xscore link close` is only valid for tmux sessions, not {0}")]
-    CloseOnlyForTmux(&'static str),
-
-    #[error("link {0} does not use the tmux sink; add `?tmux=on` to the URL to enable window/pane commands")]
-    NotTmuxLink(LinkId),
-
-    /// v0.4.0 (ADR 0008): a tmux-backed link's panes are created by
-    /// tmux itself (the session's initial window/pane, or a new split
-    /// inside a tmux window). Binding a pre-existing hollow pane with
-    /// `link add --pane` makes no sense for them.
-    #[error("tmux-backed links create panes via tmux; `--pane` is not allowed")]
-    TmuxLinkCannotBindPane,
-
     /// v0.4.0 (ADR 0008): the pane is already attached to another link.
     /// We never steal it silently — the user must detach first.
     #[error("pane {0} is already attached to link {1}; detach it first")]
