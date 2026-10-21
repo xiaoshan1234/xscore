@@ -158,6 +158,7 @@ Measured on tmux 3.5a, and the reasons the details matter:
 ## Commands
 
 Full flag-by-flag reference: [`doc/user-guide/commands.md`](doc/user-guide/commands.md).
+A guided tour (build → first session → tmux → recipes): [`doc/user-guide/getting-started.md`](doc/user-guide/getting-started.md).
 Below is the shape of the surface.
 
 ```bash

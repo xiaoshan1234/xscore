@@ -6,6 +6,9 @@ v0.6.0 build.
 
 Conventions used below:
 
+> New to xscore? Read [`getting-started.md`](getting-started.md) first — this
+> file assumes you already know what a session, pane and link are.
+
 - **ids** are UUIDv7 strings. Copy them from `session show`, `link list`,
   `window list`, `pane list`, or from the four lines `session new` prints.
 - **`<NAME>`** is always a *session* name — the handle every other verb
