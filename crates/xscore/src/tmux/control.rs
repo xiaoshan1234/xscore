@@ -399,20 +399,23 @@ fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
                     }
                 }
                 // A `%` line we do not know is a notification from a tmux that
-                // renamed things (ADR 0010 §D4) — drop it, never treat it as a
-                // reply. Anything else is the open block's output.
+                // renamed things (ADR 0010 §D4) — with one exception that cost
+                // a bug: a *reply* can start with `%` too, because a pane id
+                // does (`list-panes -F '#{pane_id}…'` answers `%0<TAB>…`).
+                // The open, claimed block decides: inside it the line is that
+                // command's output; outside it there is nothing it could be
+                // output *of*, so it is a notification and is dropped.
                 Parsed::Unknown(text) => {
-                    if text.starts_with('%') {
-                        continue;
-                    }
-                    // Only collect output for a block someone is waiting on:
-                    // the handshake block's text is not a command's reply.
                     if let Some(num) = open {
                         if claimed.contains_key(&num) {
                             if let Some(output) = blocks.get_mut(&num) {
                                 output.push(text);
+                                continue;
                             }
                         }
+                    }
+                    if text.starts_with('%') {
+                        continue;
                     }
                 }
             }

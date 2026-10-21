@@ -113,6 +113,43 @@ pub enum Error {
     #[error("link id already in use: {0}")]
     LinkIdExists(LinkId),
 
+    // ===== v0.6.0 (ADR 0010 §D2) — tmux-backed sessions =====
+
+    /// `session new --tmux` names the tmux session after the xscore session, so
+    /// an existing tmux session of that name would be adopted by accident.
+    /// `session adopt` is the verb that says "this one already exists".
+    #[error("a tmux session named `{0}` already exists; use `xscore session adopt {0}` to manage it")]
+    TmuxSessionExists(String),
+
+    /// The host was reachable but the session is not there (arch.md §6). Rows
+    /// are pruned for this and only this.
+    #[error("tmux session `{session}` on {host} does not exist")]
+    TmuxTargetGone { host: String, session: String },
+
+    /// The remote end never answered: `ssh` failed to start or exited 255
+    /// (auth, host key, network). Rows are NEVER pruned on this error — a
+    /// laptop on a train would otherwise forget every remote session it
+    /// manages (arch.md §6, "Failure semantics").
+    #[error("tmux host {host} is unreachable: {reason}")]
+    TmuxUnreachable { host: String, reason: String },
+
+    /// A tmux session has exactly one link — its control client (arch.md §4,
+    /// "One tmux session, one link"). A second link would be a second
+    /// mechanism driving the same server session.
+    #[error("session {0} is tmux-backed and already has its control link; add panes/windows, not links")]
+    TmuxSessionHasOneLink(SessionId),
+
+    /// ADR 0010 §D5: deleting a `Control` link would orphan every pane in the
+    /// session into a buffer with no way back. Teardown is `session kill`
+    /// (destroy) or `session forget` (stop managing).
+    #[error("link {0} is a tmux control link; use `session kill` or `session forget` instead")]
+    ControlLinkNotDeletable(LinkId),
+
+    /// A control-mode operation was attempted on a session whose backend is
+    /// not tmux. Internal misuse, not a user state.
+    #[error("session {0} is not tmux-backed")]
+    NotTmuxSession(SessionId),
+
     #[error("url parse error: {0}")]
     Url(String),
 

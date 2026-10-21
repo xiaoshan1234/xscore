@@ -93,6 +93,27 @@ pub struct LinkInfo {
     pub address: LinkAddress,
     pub transport: TransportConfig,
     pub sink: SinkConfig,
+    /// v0.6.0 (ADR 0010 §4): what this connection carries. Not yet a full
+    /// `EndpointRef` — the transport spec still lives in `transport` until the
+    /// old `SinkConfig` path goes away — but the discriminant is what decides
+    /// how many panes a link may serve, so it has to exist now: a `Control`
+    /// link addresses its panes by `link_key` (`%N`) and may not be deleted or
+    /// re-bound.
+    #[serde(default)]
+    pub endpoint: EndpointRef,
+}
+
+/// Which side owns this link's stream (ADR 0010 §4).
+///
+/// `Pipe` is everything the old model called "raw" or "tmux": one byte stream,
+/// at most one reader. `Control` is the tmux control client of a session — one
+/// connection to a server, demultiplexed by `%N`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointRef {
+    #[default]
+    Pipe,
+    Control,
 }
 
 impl LinkInfo {
@@ -103,6 +124,9 @@ impl LinkInfo {
             SinkConfig::Tmux { .. } => "tmux",
         }
     }
+
+    /// True for the per-session control client (ADR 0010 §D2).
+    pub fn is_control(&self) -> bool { self.endpoint == EndpointRef::Control }
 }
 
 /// v0.3.0: Window is a pure UI layout container (ADR 0007 rewrite).
@@ -198,8 +222,18 @@ pub struct PaneInfo {
     /// direct panes (buffered by `DirectBridge`'s ring buffer). When
     /// `Some`, this pane is OWNED by tmux: it cannot be detached, and
     /// it dies with the tmux session.
+    ///
+    /// v0.6.0 (ADR 0010 §D6): a pane on a `Control` link addresses itself with
+    /// `link_key` instead, and leaves this `None` — the sink handle belongs to
+    /// the old per-command tmux path.
     #[serde(default)]
     pub sink_handle: Option<String>,
+    /// v0.6.0 (ADR 0010 §D3/D6): the address inside a shared link — `"%N"` for
+    /// a pane on its session's control link, `None` on a `Pipe` link (one
+    /// reader needs no address). This is what `%output %N` is routed by, so it
+    /// must be unique inside a link.
+    #[serde(default)]
+    pub link_key: Option<String>,
 }
 
 // ===== v0.6.0 — the Session tier (ADR 0010 §1) =====

@@ -125,6 +125,16 @@ async fn list(
     window: Option<String>,
     link: Option<String>,
 ) -> anyhow::Result<()> {
+    // Same reason as `window ls`: a tmux session's panes are tmux's, and with a
+    // process per command the only way to see one created by someone else is to
+    // attach for the duration of the command (ADR 0010 §7).
+    for session in mgr.list_sessions().await? {
+        if session.is_tmux() {
+            if let Err(e) = mgr.refresh_tmux_session(session.id).await {
+                tracing::debug!("pane ls: could not refresh tmux session {}: {e}", session.name);
+            }
+        }
+    }
     let wid_filter = match window.as_deref() {
         Some(s) => Some(WindowId::parse(s)?),
         None => None,

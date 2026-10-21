@@ -74,6 +74,20 @@ async fn control_client_streams_bytes_runs_commands_and_receives_events() {
         "expected an @0 line, got {windows:?}"
     );
 
+    // 2b. A reply line can itself start with `%` — a pane id does. The reader
+    //     used to classify every `%`-prefixed line as an unknown notification
+    //     and drop it, so `list-panes` answered with an empty vec against a
+    //     live server while its one-shot twin worked. This is that bug's
+    //     regression test.
+    let panes = control
+        .send(&xscore::tmux::list_panes_command("%0"))
+        .await
+        .expect("send list-panes");
+    assert!(
+        panes.iter().any(|line| line.starts_with("%0\t")),
+        "a `%`-prefixed reply line was dropped: {panes:?}"
+    );
+
     // 3. Structure arrives without being asked.
     let mut events = control.subscribe();
     std::thread::spawn({

@@ -1,19 +1,28 @@
 // tmux/ — the control-mode client for a managed session (ADR 0010 §D2).
 //
 // This is the protocol layer only: it spawns `tmux -C attach`, parses what
-// comes back and exposes commands and events. Nothing here decides what a
-// session or a pane *is*; wiring the client into the daemon, `core/manager.rs`
-// and the Sink demultiplexer is a separate change (ADR 0010 §D4), so the
-// existing tmux Sink path is untouched by this module.
+// comes back and exposes commands and events, plus the text formats and
+// command lines tmux itself parses. Nothing here decides what a session or a
+// pane *is*; `core/manager.rs` owns the wiring (one control client per
+// tmux-backed session, panes demultiplexed by `%N`).
 //
-//   protocol.rs — pure parsing, no IO. Fixed to a captured tmux 3.5a transcript.
+//   protocol.rs — pure parsing of the control protocol, no IO. Fixed to a
+//                 captured tmux 3.5a transcript.
 //   control.rs  — the process: argv, reader thread, writer thread, correlation.
+//   format.rs   — tmux's text interfaces: `-F` output parsers and the
+//                 `send-keys` command line (both measured, see that file).
 //
 // One client per session, not per pane: it is the session's single link, and
 // `%output %N` is addressed, not raced over (ADR 0010 §D3).
 
 pub mod control;
+pub mod format;
 pub mod protocol;
 
 pub use control::{argv, socket_args, TmuxControl};
+pub use format::{
+    capture_pane_command, host_label, host_prefix, list_panes_command, list_windows_command,
+    one_shot_argv, parse_pane_line, parse_window_line, quote_arg, resize_pane_command,
+    send_keys_literal, PaneLine, WindowLine, LIST_PANES_FORMAT, LIST_WINDOWS_FORMAT,
+};
 pub use protocol::{Parsed, ProtocolParser, TmuxEvent};

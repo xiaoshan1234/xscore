@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **tmux-backed sessions over the control client.** `xscore session new <name>
+  --tmux [--socket S] [--ssh DEST] [--cmd C] [--cwd D] [--cols N --rows N]`
+  creates a real tmux session and takes over `session adopt <name>` for one that
+  already exists. The session's structure is tmux's: a single `tmux -C attach`
+  client (over `ssh` for a remote host, `BatchMode=yes`) is the session's **one
+  link**, `%output %N` fills each pane's `RingBuffer` addressed by `link_key`,
+  `%window-add` / `%layout-change` / `%unlinked-window-close` keep the window and
+  pane rows in step (no polling, no `--heal`), and a write is one
+  `send-keys` line on that channel — so there is no shell between the payload
+  and tmux. A `Control` link may not be deleted or added to (one tmux session,
+  one link), a tmux pane may not be detached, and `session kill` closes the
+  client and takes the server session down while `session forget` only detaches.
+
+  New: `SessionManager::{create_tmux_session, create_tmux_session_with,
+  adopt_tmux_session, ensure_tmux_attached, refresh_tmux_session}`,
+  `ControlBridge`, `EndpointRef::{Pipe, Control}` on `LinkInfo`, `link_key` on
+  `PaneInfo`, `tmux::format` (the `-F` parsers and `send_keys_literal`), and
+  `util::resolve_socket` (`--socket`, then `XSCORE_SOCKET`, then the default
+  server). The old `?tmux=on` path is untouched and still used by migrated v2
+  links; the two cannot collide because an old link names its session
+  `xscore-<link_id>` and a managed session is named by the user.
+
 - **The Session tier: a workspace that owns windows, panes and links.**
   Links, windows and panes used to float with no owner — "which links belong to
   this tmux session" was inferred from a name prefix (`xscore-<link_id>`) that

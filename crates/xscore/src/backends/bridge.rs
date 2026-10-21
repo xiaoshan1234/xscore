@@ -20,6 +20,13 @@
 //     `resize-pane`, `close` = `kill-pane` (a real tmux pane dies).
 //     tmux is already resident, so this path never involves the daemon.
 //
+//   - `ControlBridge` (v0.6.0, ADR 0010): the same pane, reached through the
+//     session's control client instead of one exec per operation. `read` is
+//     the pane's `RingBuffer` (filled by `%output %N`), `write` one
+//     `send-keys` line on the control channel (no shell in between), `resize`
+//     `resize-pane`, `close` nothing at all. This is the successor to
+//     `TmuxBridge`; both exist until the old `?tmux=on` path is deleted.
+//
 // `close()` means "release THIS pane's hold on the resource", never
 // "kill a shared resource" (P0-a):
 //   - DirectBridge::close(): stop the reader task. The link's transport
@@ -243,6 +250,117 @@ impl PaneBridge for DaemonBridge {
         // (other panes / a later re-attach still need it) and keeps the
         // buffer (so the history is still readable when detached).
         self.client.detach(self.pane).await
+    }
+}
+
+/// Control bridge: a tmux pane whose bytes arrive on its session's control
+/// client (ADR 0010 §D2/§D4).
+///
+/// This is the v0.6 path and it differs from `TmuxBridge` in kind, not in
+/// degree: nothing here runs a tmux command per operation except the write
+/// itself. `read` serves the pane's `RingBuffer`, which the session's output
+/// pump fills from `%output %N`; `write` goes through the control channel as a
+/// `send-keys` line (one parser, no shell); `resize` is `resize-pane`.
+pub struct ControlBridge {
+    control: Arc<crate::tmux::TmuxControl>,
+    /// The pane's address on the shared control link: `%N`.
+    handle: String,
+    buffer: Arc<Mutex<RingBuffer>>,
+}
+
+// `TmuxControl` owns a `Child` and two thread handles, none of which has a
+// useful `Debug`; the pane's address and the client's liveness are what a
+// failure message needs.
+impl std::fmt::Debug for ControlBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ControlBridge")
+            .field("handle", &self.handle)
+            .field("closed", &self.control.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ControlBridge {
+    pub fn new(
+        control: Arc<crate::tmux::TmuxControl>,
+        handle: impl Into<String>,
+        buffer: Arc<Mutex<RingBuffer>>,
+    ) -> Self {
+        Self { control, handle: handle.into(), buffer }
+    }
+
+    /// The address this pane reads and writes through.
+    pub fn handle(&self) -> &str { &self.handle }
+}
+
+#[async_trait]
+impl PaneBridge for ControlBridge {
+    fn kind(&self) -> &'static str { "control" }
+
+    async fn read(&self, buf: &mut [u8]) -> Result<usize> {
+        // Same contract as `DirectBridge`: wait briefly for bytes, then report
+        // what is there. The buffer is a scrollback, so the copy is
+        // non-destructive.
+        let deadline = tokio::time::Instant::now() + READ_WAIT;
+        loop {
+            {
+                let ring = self.buffer.lock().await;
+                let n = ring.copy_out(buf);
+                if n > 0 {
+                    return Ok(n);
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(READ_POLL).await;
+        }
+
+        // Nothing streamed into this process. tmux keeps the scrollback even
+        // when no client is attached, so ask it instead of returning silence —
+        // otherwise `data read` in a fresh CLI process could never see output
+        // that a previous process wrote (the buffer that would have held it died
+        // with that process; a daemon holding the client is ADR 0009's job, not
+        // this one). The rendered screen is a different question from "bytes
+        // since I last looked", which is why this is a fallback and not the
+        // read path.
+        let lines = self
+            .control
+            .send(&crate::tmux::capture_pane_command(&self.handle))
+            .await?;
+        let text = lines.join("\n");
+        let bytes = text.as_bytes();
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+
+    async fn write(&self, data: &[u8]) -> Result<usize> {
+        // A write is one protocol line, so the payload must be text: a byte
+        // that is not UTF-8 has no representation in it (`\0` is rejected
+        // inside `send_keys_literal`, along with the newline form).
+        let payload = std::str::from_utf8(data).map_err(|_| {
+            crate::core::Error::Invalid(
+                "a tmux pane takes UTF-8 text; this payload is not valid UTF-8".into(),
+            )
+        })?;
+        let command = crate::tmux::send_keys_literal(&self.handle, payload)?;
+        self.control.send(&command).await?;
+        Ok(data.len())
+    }
+
+    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.control
+            .send(&crate::tmux::resize_pane_command(&self.handle, cols, rows))
+            .await?;
+        Ok(())
+    }
+
+    async fn close(&self) -> Result<()> {
+        // P0-a, restated for a tmux session: detaching a pane releases OUR hold
+        // on it. The pane belongs to tmux and to the session's control link;
+        // killing it here would make `pane detach` mean `kill-pane`.
+        Ok(())
     }
 }
 

@@ -1318,3 +1318,308 @@ fn xscore_link_add_with_session_flag() {
 
     cleanup_daemon(name);
 }
+
+// ----- v0.6.0 (PR3b, ADR 0010 §D2): tmux-backed sessions over control mode -----
+//
+// These drive a real tmux server on the test's own socket (`XSCORE_SOCKET`,
+// set by `xscore_bin`), and assert what TMUX has after the command, not what
+// xscore says it did — the two disagreeing is the bug this layer can hide.
+//
+// Note that every `xscore` call is a separate process: there is no client
+// attached between commands, so a command that needs live structure attaches
+// for its own lifetime. That is the CLI's actual shape in v0.6 (ADR 0009's
+// daemon is what will keep the client instead).
+
+/// This test's tmux server.
+fn tmux_for(test_name: &str) -> Command {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["-L", &format!("xscore-test-{test_name}")]);
+    cmd
+}
+
+/// Run one tmux command against this test's server and return its stdout.
+fn tmux_stdout(test_name: &str, args: &[&str]) -> String {
+    let out = tmux_for(test_name)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run tmux {args:?}: {e}"));
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+#[test]
+fn xscore_session_new_tmux_creates_window_and_pane() {
+    let name = "session_new_tmux";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    let out = xscore()
+        .args(["session", "new", "work", "--tmux", "--cols", "100", "--rows", "30"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let sid = parse_id_from_stdout(&out.stdout, "session");
+    let lid = parse_id_from_stdout(&out.stdout, "link");
+    let wid = parse_id_from_stdout(&out.stdout, "window");
+    let pid = parse_id_from_stdout(&out.stdout, "pane");
+
+    // A real tmux session, named after the xscore session, with one window.
+    let windows = tmux_stdout(name, &["list-windows", "-t", "work", "-F", "#{window_id}"]);
+    assert_eq!(windows.lines().count(), 1, "expected one tmux window: {windows:?}");
+
+    // The pane row is a `%N` on the session's control link — not a sink handle.
+    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    assert_eq!(pane["session_id"], serde_json::json!(sid));
+    assert_eq!(pane["link_id"], serde_json::json!(lid));
+    let key = pane["link_key"].as_str().expect("link_key must hold the %N handle");
+    assert!(key.starts_with('%'), "pane key should be %N, got {key}");
+    assert!(pane["sink_handle"].is_null(), "control panes must not use sink_handle: {pane}");
+    assert!(pane["cols"].as_u64().unwrap_or(0) > 0, "geometry adopted from tmux: {pane}");
+
+    // The window mirrors `@N`.
+    let window = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
+    let handle = window["tmux_window_handle"].as_str().expect("tmux_window_handle present");
+    assert!(handle.starts_with('@'), "window handle should be @N, got {handle}");
+
+    // `session show` names the backend and the tmux session.
+    let show = String::from_utf8_lossy(
+        &xscore().args(["session", "show", "work"]).output().unwrap().stdout,
+    )
+    .to_string();
+    assert!(show.contains("backend: tmux"), "backend line missing: {show}");
+    assert!(
+        show.lines().any(|l| l.starts_with("tmux:") && l.contains("work")),
+        "the tmux session name is missing: {show}"
+    );
+
+    // One tmux session, one link: a second `link add` into it is refused, and a
+    // second `session new` of the same tmux name is refused too.
+    let link = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--session", "work"])
+        .output()
+        .unwrap();
+    assert!(!link.status.success(), "a tmux session must not take a second link");
+    let again = xscore().args(["session", "new", "work", "--tmux"]).output().unwrap();
+    assert!(!again.status.success(), "a duplicate tmux session must be refused");
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}
+
+#[test]
+fn xscore_session_new_tmux_data_roundtrip() {
+    let name = "session_tmux_roundtrip";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    // `cat` echoes what it reads, so a write that reached the pane comes back
+    // as that pane's bytes.
+    let out = xscore()
+        .args(["session", "new", "work", "--tmux", "--cmd", "cat"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    let pid = parse_id_from_stdout(&out.stdout, "pane");
+
+    let payload = home_for(name).join("roundtrip.txt");
+    std::fs::write(&payload, b"hello\n").unwrap();
+
+    let write = xscore()
+        .args(["data", "write", "--pane", &pid, "--from-file", payload.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(ok(&write), "data write failed: {}", String::from_utf8_lossy(&write.stderr));
+
+    // The read is a NEW process: it hydrates state, attaches its own control
+    // client for the length of the command, and must still see the bytes.
+    let mut seen = String::new();
+    for _ in 0..50 {
+        let read = xscore()
+            .args(["data", "read", "--pane", &pid, "--bytes", "4096"])
+            .output()
+            .unwrap();
+        assert!(ok(&read), "data read failed: {}", String::from_utf8_lossy(&read.stderr));
+        seen = String::from_utf8_lossy(&read.stdout).to_string();
+        if seen.contains("hello") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(seen.contains("hello"), "data read did not return what was written: {seen:?}");
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}
+
+#[test]
+fn xscore_session_new_tmux_write_is_literal() {
+    let name = "session_tmux_literal";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    // `stty -echo` keeps the terminal's own echo off the screen, so the screen
+    // shows exactly what the pane's `cat` received. Plain `cat`, not `cat -v`:
+    // `-v` would re-encode the non-ASCII bytes we are checking.
+    let out = xscore()
+        .args([
+            "session", "new", "work", "--tmux",
+            "--cmd", "stty -echo; exec cat",
+            "--cols", "120", "--rows", "10",
+        ])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    let pid = parse_id_from_stdout(&out.stdout, "pane");
+    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    let key = pane["link_key"].as_str().expect("link_key").to_string();
+
+    // Every character that has ever broken a quoting layer: a command
+    // separator, a quote, a double quote, a variable, a backslash, a space, a
+    // percent (tmux switches on it in formats) and multi-byte UTF-8.
+    let payload = "a;b it's \"q\" $X \\ Z 中文 % #";
+    let body = home_for(name).join("payload.txt");
+    let newline = home_for(name).join("newline.txt");
+    std::fs::write(&body, payload).unwrap();
+    std::fs::write(&newline, "\n").unwrap();
+
+    // Two writes on purpose. Without a newline the payload is one `send-keys -l`
+    // line (the quoted form under test) and stays in the pane's line discipline;
+    // the newline then flushes it. The second write is the `-H` hex form.
+    for part in [&body, &newline] {
+        let write = xscore()
+            .args(["data", "write", "--pane", &pid, "--from-file", part.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(ok(&write), "data write failed: {}", String::from_utf8_lossy(&write.stderr));
+    }
+
+    let mut screen = String::new();
+    for _ in 0..50 {
+        screen = tmux_stdout(name, &["capture-pane", "-p", "-t", &key]);
+        if screen.lines().next() == Some(payload) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        screen.lines().next(),
+        Some(payload),
+        "the pane received something other than the exact payload: {screen:?}"
+    );
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}
+
+#[test]
+fn xscore_session_adopt_existing_tmux() {
+    let name = "session_adopt_tmux";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    // Created outside xscore, the way a user's session exists before adoption.
+    let created = tmux_for(name)
+        .args(["new-session", "-d", "-s", "outside", "-x", "90", "-y", "20"])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "tmux new-session failed");
+
+    let out = xscore().args(["session", "adopt", "outside"]).output().unwrap();
+    assert!(ok(&out), "session adopt failed: {}", String::from_utf8_lossy(&out.stderr));
+    let lid = parse_id_from_stdout(&out.stdout, "link");
+
+    // One pane, bound to the control link the adoption created.
+    let ls = xscore().args(["pane", "list", "--link", &lid]).output().unwrap();
+    assert!(ok(&ls), "pane list failed: {}", String::from_utf8_lossy(&ls.stderr));
+    let stdout = String::from_utf8_lossy(&ls.stdout).to_string();
+    let rows = stdout.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(rows, 1, "expected exactly one adopted pane: {stdout}");
+
+    let show = String::from_utf8_lossy(
+        &xscore().args(["session", "show", "outside"]).output().unwrap().stdout,
+    )
+    .to_string();
+    assert!(show.contains("backend: tmux"), "backend line missing: {show}");
+    assert!(show.contains("outside"), "tmux session name missing: {show}");
+
+    // `forget` detaches without touching the server session (arch.md §8).
+    let forget = xscore().args(["session", "forget", "outside"]).output().unwrap();
+    assert!(ok(&forget), "session forget failed: {}", String::from_utf8_lossy(&forget.stderr));
+    let alive = tmux_for(name).args(["has-session", "-t", "outside"]).output().unwrap();
+    assert!(alive.status.success(), "`session forget` must leave tmux running");
+
+    cleanup_tmux(name);
+}
+
+#[test]
+fn xscore_session_kill_tmux_ends_the_server_session() {
+    let name = "session_kill_tmux";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    let out = xscore()
+        .args(["session", "new", "work", "--tmux"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let alive_before = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
+    assert!(alive_before.status.success(), "the tmux session should exist before the kill");
+
+    let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
+    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+
+    let alive_after = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
+    assert!(
+        !alive_after.status.success(),
+        "the tmux session survived `session kill`"
+    );
+
+    // ...and the rows are gone too.
+    let show = xscore().args(["session", "show", "work"]).output().unwrap();
+    assert!(!show.status.success(), "a killed session must not resolve: {show:?}");
+
+    cleanup_tmux(name);
+}
+
+#[test]
+fn xscore_session_tmux_sees_an_externally_created_window() {
+    let name = "session_tmux_external_window";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    let out = xscore()
+        .args(["session", "new", "work", "--tmux"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // The structure change happens outside xscore, in a different process, at a
+    // moment when nothing is attached to the session.
+    let added = tmux_for(name)
+        .args(["new-window", "-d", "-t", "work", "-n", "extra"])
+        .output()
+        .unwrap();
+    assert!(added.status.success(), "tmux new-window failed");
+
+    // `window list` attaches for its own lifetime, so it reports what tmux has
+    // now. Poll: attaching and enumerating is not instantaneous.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut rows = 0;
+    let mut stdout = String::new();
+    while std::time::Instant::now() < deadline {
+        let list = xscore().args(["window", "list"]).output().unwrap();
+        assert!(ok(&list), "window list failed: {}", String::from_utf8_lossy(&list.stderr));
+        stdout = String::from_utf8_lossy(&list.stdout).to_string();
+        rows = stdout.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+        if rows >= 2 && stdout.contains("extra") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(rows, 2, "the externally created window is missing: {stdout}");
+    assert!(stdout.contains("extra"), "the window name was not adopted: {stdout}");
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}

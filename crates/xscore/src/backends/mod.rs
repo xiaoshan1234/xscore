@@ -14,5 +14,5 @@
 pub mod bridge;
 pub mod ring_buffer;
 
-pub use bridge::{DaemonBridge, DirectBridge, PaneBridge, TmuxBridge};
+pub use bridge::{ControlBridge, DaemonBridge, DirectBridge, PaneBridge, TmuxBridge};
 pub use ring_buffer::RingBuffer;

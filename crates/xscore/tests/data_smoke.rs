@@ -22,7 +22,8 @@
 // `Command::env(...)` per Command.
 
 use std::time::Duration;
-use xscore::core::SessionManager;
+use xscore::core::{SessionManager, TmuxCreateOptions};
+use xscore::model::{TmuxHostConfig, TmuxSocket};
 use xscore::url;
 
 fn unique_socket_name(tag: &str) -> String {
@@ -339,4 +340,155 @@ async fn sync_link_does_not_touch_other_links() {
     mgr.del_link(a.link_id).await.expect("del a");
     mgr.del_link(b.link_id).await.expect("del b");
     cleanup_socket(&sock).await;
+}
+
+// ----- v0.6.0 (PR3b, ADR 0010 §D2): a control-managed session -----
+//
+// These have to run in-process: the point is the DAEMON-side machinery (the
+// `%output` pump and the event pump), and a CLI invocation is a different
+// process each time, so it could only ever observe the rendered screen.
+
+/// Kills this test's tmux server on drop, so a failing assertion does not leave
+/// a server (and a pane's shell) running after the suite.
+struct SocketGuard(String);
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", &self.0, "kill-server"])
+            .output();
+    }
+}
+
+/// The pane's buffer is filled by `%output`, not by `capture-pane`. The two are
+/// distinguishable: a 10-row pane renders about ten lines, while the buffer
+/// keeps everything the pane wrote.
+#[tokio::test]
+async fn tmux_control_output_pump_fills_the_pane_buffer() {
+    let sock = setup("tmux-pump").await;
+    let _guard = SocketGuard(sock.clone());
+    let mgr = SessionManager::new();
+    let sid = mgr
+        .create_tmux_session_with(
+            "pump",
+            TmuxHostConfig::Local,
+            TmuxSocket::Named(sock.clone()),
+            80,
+            10,
+            // The delay is for the attach: tmux replays nothing, so the burst
+            // has to start after the client has subscribed.
+            TmuxCreateOptions { command: Some("sleep 0.5; seq 1 200; sleep 30".into()), cwd: None },
+        )
+        .await
+        .expect("create tmux session");
+
+    let pane = mgr
+        .panes
+        .list_all()
+        .await
+        .into_iter()
+        .find(|p| p.session_id == sid)
+        .expect("the session's pane");
+
+    let mut text = String::new();
+    for _ in 0..100 {
+        text = read_all(&mgr, pane.id).await;
+        if text.contains("200\r\n") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // In order, from the first line: the buffer is a stream, so it has what the
+    // screen scrolled away.
+    assert!(text.starts_with("1\r\n"), "buffer should begin at line 1: {:?}", &text[..40.min(text.len())]);
+    assert!(text.contains("200\r\n"), "the pump stopped early: {:?}", &text[text.len().saturating_sub(80)..]);
+    assert!(
+        text.lines().count() > 20,
+        "only {} lines: this looks like a capture-pane snapshot, not the stream",
+        text.lines().count()
+    );
+
+    mgr.del_session(sid).await.expect("kill the session");
+    cleanup_socket(&sock).await;
+}
+
+/// A window created by someone else becomes a row through the EVENT pump: no
+/// refresh pass runs here, which is the whole claim of arch.md §7.
+#[tokio::test]
+async fn tmux_window_add_event_becomes_a_window_row() {
+    let sock = setup("tmux-window-add").await;
+    let _guard = SocketGuard(sock.clone());
+    let mgr = SessionManager::new();
+    let sid = mgr
+        .create_tmux_session("events", TmuxHostConfig::Local, TmuxSocket::Named(sock.clone()), 80, 10)
+        .await
+        .expect("create tmux session");
+    assert_eq!(rows(&mgr, sid).await.len(), 1, "a new tmux session has one window");
+
+    // Outside xscore, from another process.
+    let added = tokio::process::Command::new("tmux")
+        .args(["-L", &sock, "new-window", "-d", "-t", "events", "-n", "extra"])
+        .output()
+        .await
+        .expect("tmux new-window");
+    assert!(added.status.success(), "tmux new-window failed");
+
+    let mut found = Vec::new();
+    let mut in_window = Vec::new();
+    for _ in 0..100 {
+        found = rows(&mgr, sid).await;
+        // The window row is written before its panes are enumerated (they take
+        // one more round trip), so wait for both rather than asserting on the
+        // intermediate state.
+        in_window = match found.iter().find(|w| w.info.name == "extra") {
+            Some(window) => mgr
+                .panes
+                .list_all()
+                .await
+                .iter()
+                .filter(|p| p.window_id == Some(window.info.id))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        if found.len() == 2 && in_window.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert_eq!(found.len(), 2, "expected the new window as a row, got {found:?}");
+    let extra = found
+        .iter()
+        .find(|w| w.info.name == "extra")
+        .expect("the window is named after tmux's");
+    assert!(
+        extra.info.tmux_window_handle.as_deref().map(|h| h.starts_with('@')).unwrap_or(false),
+        "the row must mirror @N: {:?}",
+        extra.info.tmux_window_handle
+    );
+    // ...and tmux's window has a pane row of its own, addressed by `%N`.
+    assert_eq!(in_window.len(), 1, "the new window's pane was not adopted");
+    assert!(
+        in_window[0].link_key.as_deref().map(|k| k.starts_with('%')).unwrap_or(false),
+        "the adopted pane must carry its %N as link_key: {:?}",
+        in_window[0].link_key
+    );
+
+    mgr.del_session(sid).await.expect("kill the session");
+    cleanup_socket(&sock).await;
+}
+
+/// The session's window rows, in a stable order.
+async fn rows(mgr: &SessionManager, sid: xscore::core::SessionId) -> Vec<std::sync::Arc<xscore::core::window::Window>> {
+    let mut windows: Vec<_> = mgr
+        .windows
+        .list_all()
+        .await
+        .into_iter()
+        .filter(|w| w.info.session_id == sid)
+        .collect();
+    windows.sort_by_key(|w| w.info.created_at);
+    windows
 }

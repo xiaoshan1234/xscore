@@ -115,6 +115,18 @@ async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()
 }
 
 async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
+    // ADR 0010 §7: a tmux session's structure is tmux's. This CLI is one
+    // process per command, so between commands nothing is attached and a window
+    // created outside xscore would be invisible; listing re-reads it through
+    // the session's control client. A failure is not fatal: listing must not
+    // start failing because one remote host went away (arch.md §6).
+    for session in mgr.list_sessions().await? {
+        if session.is_tmux() {
+            if let Err(e) = mgr.refresh_tmux_session(session.id).await {
+                tracing::debug!("window ls: could not refresh tmux session {}: {e}", session.name);
+            }
+        }
+    }
     println!(
         "{:<36}  {:<24}  {:<10}  {:<5}  {:<5}  {:<8}",
         "WINDOW ID", "NAME", "LAYOUT", "COLS", "ROWS", "TMUX"

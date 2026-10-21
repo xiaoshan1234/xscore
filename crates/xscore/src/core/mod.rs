@@ -15,6 +15,6 @@ pub mod window_registry;
 pub use address::LinkAddress;
 pub use error::{Error, Result};
 pub use id::{LinkId, PaneId, SessionId, WindowId};
-pub use manager::{LinkAddResult, SessionManager, SyncReport};
+pub use manager::{LinkAddResult, SessionManager, SyncReport, TmuxCreateOptions};
 pub use session::Session;
 pub use session_registry::SessionRegistry;

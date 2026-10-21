@@ -30,6 +30,14 @@
 //
 // State persistence: `save_state` writes `StateSnapshot` (schema v3);
 // see `core::state` for the version gate and `migrate_v2_to_v3`.
+//
+// v0.6.0 PR3b (ADR 0010 §D2) adds tmux-backed sessions: `create_tmux_session` /
+// `adopt_tmux_session` spawn ONE `tmux -C attach` client per session, which is
+// the session's single `Control` link. Pane bytes arrive as `%output %N` and
+// are routed to the pane whose `link_key` is that handle; structure arrives as
+// events. The two mechanisms must never meet: the old `?tmux=on` path names its
+// sessions `xscore-<link_id>`, a managed session is named by the user, and
+// nothing here ever reaches for a `TmuxSink`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -45,14 +53,16 @@ use super::session_registry::SessionRegistry;
 use super::window::Window;
 use super::window_registry::WindowRegistry;
 
-use crate::backends::{DaemonBridge, DirectBridge, PaneBridge, RingBuffer, TmuxBridge};
+use crate::backends::{ControlBridge, DaemonBridge, DirectBridge, PaneBridge, RingBuffer, TmuxBridge};
 use crate::daemon::client::DaemonClient;
 use crate::model::{
-    ConnectSpec, PaneInfo, SessionInfo, SinkConfig, WindowInfo, WindowLayout,
+    ConnectSpec, EndpointRef, PaneInfo, SessionBackend, SessionInfo, SinkConfig, TmuxHostConfig,
+    TmuxSocket, WindowInfo, WindowLayout,
 };
 use crate::sink::factory::sink_for;
 use crate::sink::tmux::TmuxSink;
 use crate::sink::{layout_from_tmux, Sink};
+use crate::tmux::{PaneLine, TmuxControl, TmuxEvent, WindowLine};
 use crate::transport::factory as transport_factory;
 use crate::transport::NoopTransport;
 use crate::util::tmux_arg_socket;
@@ -116,6 +126,33 @@ pub struct SessionManager {
     /// they survive this process. `None` keeps everything in-process
     /// (that is what `data_smoke` exercises).
     daemon: Option<Arc<DaemonClient>>,
+    /// v0.6.0 (ADR 0010 §D2): the live control client of every tmux-backed
+    /// session this manager has attached. One per session, because a tmux
+    /// session is driven by exactly one mechanism: the old `?tmux=on` path
+    /// (`TmuxSink`) must never touch a session listed here, and the two cannot
+    /// collide because old links name their sessions `xscore-<link_id>` while
+    /// a managed session is named by the user.
+    tmux_controls: Arc<Mutex<HashMap<SessionId, Arc<TmuxControl>>>>,
+    /// Serialises structure reconciliation. The event pump and a command can
+    /// both reconcile at once (a `%window-add` arriving during `window ls`),
+    /// and two reconciles racing would insert two rows for one `%N`.
+    tmux_reconcile: Arc<Mutex<()>>,
+    /// Serialises *attaching*. Two clients on one tmux session would mean two
+    /// subscribers for the same `%output %N`, i.e. every byte appended twice —
+    /// the one-mechanism rule, one level down.
+    tmux_attach: Arc<Mutex<()>>,
+}
+
+/// Rest of what `create_tmux_session` needs beyond the five structural
+/// arguments: what the first pane runs, and where.
+#[derive(Debug, Clone, Default)]
+pub struct TmuxCreateOptions {
+    /// A command line, run through `sh -c` (tmux execs its trailing argv
+    /// directly, so `--cmd 'cat -v'` would otherwise look for a program with a
+    /// space in its name).
+    pub command: Option<String>,
+    /// The pane's working directory (`tmux new-session -c`).
+    pub cwd: Option<String>,
 }
 
 impl Default for SessionManager {
@@ -132,6 +169,9 @@ impl SessionManager {
             pane_bridges: Arc::new(Mutex::new(HashMap::new())),
             pane_buffers: Arc::new(Mutex::new(HashMap::new())),
             daemon: None,
+            tmux_controls: Arc::new(Mutex::new(HashMap::new())),
+            tmux_reconcile: Arc::new(Mutex::new(())),
+            tmux_attach: Arc::new(Mutex::new(())),
         }
     }
 
@@ -153,6 +193,27 @@ impl SessionManager {
     /// fall back to the flag recorded at construction/hydration time.
     pub async fn link_is_connected(&self, lid: LinkId) -> bool {
         let Some(link) = self.links.get(lid).await else { return false };
+        // A control link's liveness is the session's: it is the one connection
+        // to the server, so "is the link up" and "is the session streaming" are
+        // the same question (arch.md §4).
+        if link.info.is_control() {
+            let held = { self.tmux_controls.lock().await.get(&link.info.session_id).cloned() };
+            if let Some(control) = held {
+                return !control.is_closed();
+            }
+            // No client in this process. Asking the server (one `has-session`)
+            // is the honest answer; reporting `false` would call a perfectly
+            // healthy session disconnected just because this process did not
+            // attach. This is a `show`, and showing is live (arch.md §6).
+            let Ok(info) = self.get_session(link.info.session_id).await else { return false };
+            return match info.backend {
+                SessionBackend::Tmux { host, socket, session } => self
+                    .tmux_session_exists(&host, &socket, &session)
+                    .await
+                    .unwrap_or(false),
+                SessionBackend::Native => false,
+            };
+        }
         match &link.info.sink {
             SinkConfig::Tmux { .. } => true,
             SinkConfig::Raw => match &self.daemon {
@@ -261,15 +322,42 @@ impl SessionManager {
     /// Destroy a session and everything in it — the only cascade in the model
     /// (arch.md §8).
     ///
-    /// Links go through `del_link` (which kills a tmux session and already
-    /// removes the windows/panes that came from it). Then the registries are
-    /// swept for children that no link could reach: orphan panes (never
-    /// attached) and empty windows. The session row is removed last, so an
-    /// interrupted kill leaves an empty workspace rather than children pointing
-    /// at a missing session.
+    /// For a tmux-backed session the backend dies first: the control client is
+    /// closed, then `kill-session` takes the server session down. After that
+    /// the rows are swept exactly like a native session's (orphan panes and
+    /// empty windows, then the session row last), so an interrupted kill
+    /// leaves an empty workspace rather than children pointing at a missing
+    /// session.
+    ///
+    /// Links go through `del_link` — except a `Control` link, which `del_link`
+    /// refuses on purpose (ADR 0010 §D5) and whose row is simply dropped here.
     pub async fn del_session(&self, id: SessionId) -> Result<()> {
-        if self.sessions.get(id).await.is_none() {
-            return Err(Error::SessionNotFound(id.to_string()));
+        let session = self
+            .sessions
+            .get(id)
+            .await
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
+
+        if let SessionBackend::Tmux { host, socket, session: name } = &session.info.backend {
+            // Only a session we actually manage through a control link is
+            // killed here: a migrated v2 tmux session is still driven by its
+            // old `TmuxSink` link, and killing it twice (or behind its back)
+            // would be the two-mechanisms bug this PR exists to prevent.
+            if self.control_link_id(id).await.is_some() {
+                let control = { self.tmux_controls.lock().await.remove(&id) };
+                if let Some(control) = control {
+                    let _ = control.close().await;
+                }
+                // Best effort: the session may already be gone, and `session
+                // kill` must still drop the rows in that case.
+                let _ = self
+                    .run_tmux(
+                        host,
+                        socket,
+                        &["kill-session".to_string(), "-t".to_string(), name.clone()],
+                    )
+                    .await;
+            }
         }
 
         let link_ids: Vec<LinkId> = self
@@ -281,6 +369,16 @@ impl SessionManager {
             .map(|l| l.id)
             .collect();
         for lid in link_ids {
+            let is_control = match self.links.get(lid).await {
+                Some(link) => link.info.is_control(),
+                None => continue,
+            };
+            if is_control {
+                // Nothing to tear down: the client is closed and its panes are
+                // swept below. `del_link` would refuse it anyway.
+                self.links.remove(lid).await;
+                continue;
+            }
             self.del_link(lid).await?;
         }
 
@@ -339,6 +437,14 @@ impl SessionManager {
             return Err(Error::ForgetNativeSession(id));
         }
 
+        // Detach: the control client is closed, which is what ends the pumps,
+        // and tmux keeps running (arch.md §8, "session forget leaves the
+        // backend running").
+        let control = { self.tmux_controls.lock().await.remove(&id) };
+        if let Some(control) = control {
+            let _ = control.close().await;
+        }
+
         // No `del_link`, no `close()`: both would terminate something that
         // belongs to tmux. Dropping the rows (and the bridges) is the whole
         // operation.
@@ -384,6 +490,681 @@ impl SessionManager {
         Ok(())
     }
 
+    // ===== tmux-backed sessions (v0.6.0, ADR 0010 §D2/§D7) =====
+    //
+    // A tmux-backed session is a real tmux session plus ONE control client,
+    // which is the session's single link. Everything below exists to keep the
+    // three things that can disagree in step:
+    //
+    //   * the server (owner of the structure and of every pane's bytes);
+    //   * the registries (`WindowInfo` mirrors `@N`, `PaneInfo` mirrors `%N`);
+    //   * the pane buffers, filled from `%output %N` and routed by `link_key`.
+    //
+    // Structure arrives as events (`%window-add`, `%layout-change`,
+    // `%unlinked-window-close`), never from polling — but a CLI invocation is
+    // its own process, so a command that has to *see* the structure re-reads it
+    // through `ensure_tmux_attached` (arch.md §7, and ADR 0009's daemon is
+    // where that client will eventually live between commands).
+
+    /// Create a real tmux session and manage it.
+    ///
+    /// The tmux session is named after the xscore session: two names for one
+    /// thing would drift, and `session adopt` is the verb for a session that
+    /// already exists under its own name.
+    pub async fn create_tmux_session(
+        &self,
+        name: &str,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SessionId> {
+        self.create_tmux_session_with(name, host, socket, cols, rows, TmuxCreateOptions::default())
+            .await
+    }
+
+    /// `create_tmux_session` plus the first pane's command and directory.
+    pub async fn create_tmux_session_with(
+        &self,
+        name: &str,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        cols: u16,
+        rows: u16,
+        opts: TmuxCreateOptions,
+    ) -> Result<SessionId> {
+        self.require_free_session_name(name).await?;
+        // `has-session` exits 1 when the session is absent — that is the answer
+        // we want, not an error.
+        if self.tmux_session_exists(&host, &socket, name).await? {
+            return Err(Error::TmuxSessionExists(name.to_string()));
+        }
+
+        let mut args: Vec<String> = vec![
+            "new-session".into(),
+            "-d".into(),
+            "-s".into(),
+            name.into(),
+            "-x".into(),
+            cols.to_string(),
+            "-y".into(),
+            rows.to_string(),
+        ];
+        if let Some(cwd) = opts.cwd.as_deref().filter(|c| !c.is_empty()) {
+            args.push("-c".into());
+            args.push(cwd.to_string());
+        }
+        if let Some(command) = opts.command.as_deref().filter(|c| !c.trim().is_empty()) {
+            args.extend(["--".into(), "/bin/sh".into(), "-c".into(), command.to_string()]);
+        }
+        let out = self.run_tmux(&host, &socket, &args).await?;
+        if !out.status.success() {
+            return Err(self.tmux_failure(&host, name, "new-session", &out));
+        }
+        self.finish_tmux_session(name, host, socket, true).await
+    }
+
+    /// Take over a tmux session that already exists (ADR 0008, now through the
+    /// control client instead of one exec per command).
+    pub async fn adopt_tmux_session(
+        &self,
+        name: &str,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+    ) -> Result<SessionId> {
+        self.require_free_session_name(name).await?;
+        if !self.tmux_session_exists(&host, &socket, name).await? {
+            return Err(Error::TmuxTargetGone {
+                host: crate::tmux::host_label(&host),
+                session: name.to_string(),
+            });
+        }
+        // Adoption never creates and never kills: the session was the user's
+        // before it was ours.
+        self.finish_tmux_session(name, host, socket, false).await
+    }
+
+    /// Re-read a tmux session's structure now.
+    ///
+    /// The event pump keeps a live manager in step, but this CLI is one
+    /// process per command: between commands no client is attached, so a
+    /// window created outside xscore is invisible until something attaches.
+    /// Listings call this for exactly that reason. A session with no control
+    /// link (the old `?tmux=on` shape) is left alone — two mechanisms must
+    /// never drive one tmux session.
+    pub async fn refresh_tmux_session(&self, id: SessionId) -> Result<()> {
+        if self.control_link_id(id).await.is_none() {
+            return Ok(());
+        }
+        self.ensure_tmux_attached(id).await.map(|_| ())
+    }
+
+    /// The session's control client, attached on demand.
+    ///
+    /// Attaching is also the reconnect path: after `%exit` (the client died,
+    /// the ssh channel dropped) the handle is closed, so it is dropped and
+    /// replaced. Output produced while nothing was attached is gone — tmux
+    /// replays nothing (ADR 0010 §D2) — but the session itself keeps running.
+    pub async fn ensure_tmux_attached(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
+        // Held across the check-and-spawn: see `tmux_attach`.
+        let _guard = self.tmux_attach.lock().await;
+        let existing = { self.tmux_controls.lock().await.get(&id).cloned() };
+        if let Some(control) = existing {
+            if !control.is_closed() {
+                return Ok(control);
+            }
+            self.tmux_controls.lock().await.remove(&id);
+        }
+        self.attach_tmux(id).await
+    }
+
+    /// Spawn the control client, enumerate the session, start the pumps.
+    ///
+    /// The caller serialises attaches (`tmux_attach`); this is not reentrant.
+    async fn attach_tmux(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
+        let info = self.get_session(id).await?;
+        let SessionBackend::Tmux { host, socket, session } = info.backend else {
+            return Err(Error::NotTmuxSession(id));
+        };
+        let prefix = crate::tmux::host_prefix(&host);
+        let control = Arc::new(TmuxControl::spawn(&prefix, &socket, &session)?);
+
+        // Subscribe BEFORE enumerating: `%output` is not replayed, so a pane
+        // added between the enumeration and the subscription would stream into
+        // nothing until it next prints.
+        let events = control.subscribe();
+
+        if let Err(e) = self.reconcile_all(id, &control).await {
+            // Do not leave a client attached to a session we could not adopt.
+            let _ = control.close().await;
+            // The client dying during the handshake means one of two things —
+            // the session is gone, or the host never answered — and `attach`
+            // cannot tell them apart (only a one-shot's exit 255 can, arch.md
+            // §6). Say what happened instead of surfacing the raw "closed".
+            return Err(Error::Sink(format!(
+                "could not attach to tmux session `{session}` on {}: {e}",
+                crate::tmux::host_label(&host)
+            )));
+        }
+
+        self.tmux_controls.lock().await.insert(id, Arc::clone(&control));
+        self.start_event_pump(id, Arc::clone(&control), events);
+        Ok(control)
+    }
+
+    /// The session's one link (ADR 0010 §4, "One tmux session, one link").
+    async fn control_link_id(&self, id: SessionId) -> Option<LinkId> {
+        self.links
+            .list()
+            .await
+            .into_iter()
+            .find(|l| l.info.session_id == id && l.info.is_control())
+            .map(|l| l.id)
+    }
+
+    async fn require_free_session_name(&self, name: &str) -> Result<()> {
+        if name.trim().is_empty() {
+            return Err(Error::Invalid("session name must not be empty".into()));
+        }
+        if self.sessions.get_by_name(name).await.is_some() {
+            return Err(Error::SessionExists(name.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Shared tail of create/adopt: session row, control link, attach, save.
+    async fn finish_tmux_session(
+        &self,
+        name: &str,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        created: bool,
+    ) -> Result<SessionId> {
+        let sid = self
+            .add_session(SessionInfo::new_tmux(name, host.clone(), socket.clone(), name))
+            .await?;
+
+        let outcome = async {
+            self.open_control_link(sid).await?;
+            self.save_state().await
+        }
+        .await;
+        if let Err(e) = outcome {
+            // Rows first, so nothing points at a session that is about to go.
+            // An adopted session is left running: the user's tmux was there
+            // before us, and a failed *adoption* must not destroy it.
+            let _ = self.forget_session(sid).await;
+            if created {
+                let _ = self
+                    .run_tmux(
+                        &host,
+                        &socket,
+                        &["kill-session".to_string(), "-t".to_string(), name.to_string()],
+                    )
+                    .await;
+            }
+            return Err(e);
+        }
+        Ok(sid)
+    }
+
+    /// Create the session's single link and attach its control client.
+    async fn open_control_link(&self, id: SessionId) -> Result<LinkId> {
+        let info = self.get_session(id).await?;
+        let SessionBackend::Tmux { host, socket, session } = info.backend else {
+            return Err(Error::NotTmuxSession(id));
+        };
+        let link_id = LinkId::new();
+        // The link is the connection to the *server*, so the process is the
+        // connection: `transport` records the argv that spawned it (readable in
+        // `link show`), while the live client is the `TmuxControl` handle in
+        // `tmux_controls`. Neither a transport nor a sink is ever used to move
+        // these bytes.
+        let argv = crate::tmux::argv(&crate::tmux::host_prefix(&host), &socket, &session);
+        let mut words = argv.into_iter();
+        let command = words.next().unwrap_or_else(|| "tmux".to_string());
+        let args: Vec<String> = words.collect();
+
+        let link = Link {
+            id: link_id,
+            info: crate::model::LinkInfo {
+                id: link_id,
+                session_id: id,
+                name: format!("{session}-ctl"),
+                created_at: chrono::Utc::now(),
+                address: LinkAddress::Shell { command: command.clone(), args: args.clone() },
+                transport: crate::model::TransportConfig::Shell { command, args, cwd: None },
+                sink: SinkConfig::Raw,
+                endpoint: EndpointRef::Control,
+            },
+            transport: Arc::new(NoopTransport),
+            sink: Box::new(crate::sink::raw::RawSink),
+            tmux_sink: None,
+            active_pane: Mutex::new(None),
+            connected: true,
+        };
+        self.links.insert(link).await;
+        self.attach_tmux(id).await?;
+        Ok(link_id)
+    }
+
+    // ----- enumeration -----
+
+    /// Re-read every window and pane of the session.
+    ///
+    /// Idempotent: rows are matched by handle (`@N`/`%N`, never the index), so
+    /// running it twice changes nothing. Rows tmux no longer has are dropped.
+    async fn reconcile_all(&self, id: SessionId, control: &Arc<TmuxControl>) -> Result<bool> {
+        let info = self.get_session(id).await?;
+        let SessionBackend::Tmux { session, .. } = info.backend else {
+            return Err(Error::NotTmuxSession(id));
+        };
+        let _guard = self.tmux_reconcile.lock().await;
+
+        let lines = control
+            .send(&crate::tmux::list_windows_command(&session))
+            .await?;
+        let windows: Vec<WindowLine> = lines
+            .iter()
+            .filter_map(|line| crate::tmux::parse_window_line(line))
+            .collect();
+
+        let mut changed = false;
+        let mut seen: HashSet<String> = HashSet::new();
+        for window in &windows {
+            seen.insert(window.handle.clone());
+            changed |= self.sync_window(id, control, window).await?;
+        }
+
+        let stale: Vec<WindowId> = self
+            .windows
+            .list_all()
+            .await
+            .iter()
+            .filter(|w| w.info.session_id == id)
+            .filter(|w| match &w.info.tmux_window_handle {
+                Some(handle) => !seen.contains(handle),
+                None => false,
+            })
+            .map(|w| w.info.id)
+            .collect();
+        for wid in stale {
+            self.forget_window_row(wid).await;
+            changed = true;
+        }
+
+        if changed {
+            self.save_state().await?;
+        }
+        Ok(changed)
+    }
+
+    /// Re-read one window (an event's answer to "what changed?").
+    async fn reconcile_window(
+        &self,
+        id: SessionId,
+        control: &Arc<TmuxControl>,
+        handle: &str,
+    ) -> Result<bool> {
+        let info = self.get_session(id).await?;
+        let SessionBackend::Tmux { session, .. } = info.backend else {
+            return Err(Error::NotTmuxSession(id));
+        };
+        let _guard = self.tmux_reconcile.lock().await;
+
+        let lines = control
+            .send(&crate::tmux::list_windows_command(&session))
+            .await?;
+        let window = lines
+            .iter()
+            .filter_map(|line| crate::tmux::parse_window_line(line))
+            .find(|w| w.handle == handle);
+        let Some(window) = window else {
+            // Gone between the notification and the query: treat it as the
+            // close it already is.
+            let changed = self.forget_window_by_handle(id, handle).await;
+            if changed {
+                self.save_state().await?;
+            }
+            return Ok(changed);
+        };
+
+        let changed = self.sync_window(id, control, &window).await?;
+        if changed {
+            self.save_state().await?;
+        }
+        Ok(changed)
+    }
+
+    /// Upsert one window and its panes; start an output pump for each pane that
+    /// did not exist before.
+    ///
+    /// The caller holds `tmux_reconcile`.
+    async fn sync_window(
+        &self,
+        id: SessionId,
+        control: &Arc<TmuxControl>,
+        window: &WindowLine,
+    ) -> Result<bool> {
+        let Some(link_id) = self.control_link_id(id).await else {
+            return Err(Error::Sink(format!(
+                "session {id} is tmux-backed but has no control link"
+            )));
+        };
+        let mut changed = false;
+
+        let wid = match self.window_for_handle_in(id, &window.handle).await {
+            Some(wid) => {
+                let Some(arc) = self.windows.get(wid).await else { return Ok(false) };
+                let mut updated = arc.info.clone();
+                let before = updated.clone();
+                updated.name = window.name.clone();
+                updated.cols = window.cols;
+                updated.rows = window.rows;
+                updated.layout = layout_from_tmux(&window.layout);
+                if updated != before {
+                    let w = Window::new(updated);
+                    *w.panes.lock().await = arc.panes.lock().await.clone();
+                    self.windows.insert(w).await;
+                    changed = true;
+                }
+                wid
+            }
+            None => {
+                let wid = WindowId::new();
+                let info = WindowInfo {
+                    id: wid,
+                    session_id: id,
+                    name: window.name.clone(),
+                    created_at: chrono::Utc::now(),
+                    layout: layout_from_tmux(&window.layout),
+                    cols: window.cols,
+                    rows: window.rows,
+                    tmux_window_handle: Some(window.handle.clone()),
+                };
+                self.windows.insert(Window::new(info)).await;
+                changed = true;
+                wid
+            }
+        };
+
+        let lines = control
+            .send(&crate::tmux::list_panes_command(&window.handle))
+            .await?;
+        let panes: Vec<PaneLine> = lines
+            .iter()
+            .filter_map(|line| crate::tmux::parse_pane_line(line))
+            .collect();
+
+        let mut seen: HashSet<String> = HashSet::new();
+        for pane in &panes {
+            seen.insert(pane.handle.clone());
+            match self.pane_by_link_key(id, &pane.handle).await {
+                Some(existing) => {
+                    let mut updated = existing.clone();
+                    let before = updated.clone();
+                    updated.cols = pane.cols;
+                    updated.rows = pane.rows;
+                    updated.x = pane.x;
+                    updated.y = pane.y;
+                    updated.window_id = Some(wid);
+                    if updated.link_id.is_none() {
+                        updated.link_id = Some(link_id);
+                    }
+                    if updated != before {
+                        self.panes.insert(updated).await;
+                        changed = true;
+                    }
+                    if let Some(arc) = self.windows.get(wid).await {
+                        let mut list = arc.panes.lock().await;
+                        if !list.contains(&existing.id) {
+                            list.push(existing.id);
+                            changed = true;
+                        }
+                    }
+                }
+                None => {
+                    let pid = PaneId::new();
+                    let info = PaneInfo {
+                        id: pid,
+                        session_id: id,
+                        name: format!("p-{pid}"),
+                        created_at: chrono::Utc::now(),
+                        cols: pane.cols,
+                        rows: pane.rows,
+                        x: pane.x,
+                        y: pane.y,
+                        link_id: Some(link_id),
+                        window_id: Some(wid),
+                        sink_handle: None,
+                        link_key: Some(pane.handle.clone()),
+                    };
+                    self.panes.insert(info).await;
+                    if let Some(arc) = self.windows.get(wid).await {
+                        arc.panes.lock().await.push(pid);
+                    }
+                    // A pane with no subscriber loses its bytes: tmux replays
+                    // nothing, so the pump starts with the row.
+                    self.start_output_pump(Arc::clone(control), pid, pane.handle.clone())
+                        .await;
+                    changed = true;
+                }
+            }
+        }
+
+        // Panes this window no longer has.
+        let stale: Vec<PaneId> = self
+            .panes
+            .list_all()
+            .await
+            .iter()
+            .filter(|p| p.session_id == id && p.window_id == Some(wid))
+            .filter(|p| match &p.link_key {
+                Some(key) => !seen.contains(key),
+                None => false,
+            })
+            .map(|p| p.id)
+            .collect();
+        for pid in stale {
+            self.forget_pane_row(pid).await;
+            changed = true;
+        }
+
+        Ok(changed)
+    }
+
+    async fn window_for_handle_in(&self, id: SessionId, handle: &str) -> Option<WindowId> {
+        self.windows
+            .list_all()
+            .await
+            .iter()
+            .find(|w| w.info.session_id == id && w.info.tmux_window_handle.as_deref() == Some(handle))
+            .map(|w| w.info.id)
+    }
+
+    async fn pane_by_link_key(&self, id: SessionId, key: &str) -> Option<PaneInfo> {
+        self.panes
+            .list_all()
+            .await
+            .into_iter()
+            .find(|p| p.session_id == id && p.link_key.as_deref() == Some(key))
+    }
+
+    /// Drop a window row and the panes that were displayed in it.
+    async fn forget_window_row(&self, wid: WindowId) {
+        let pane_ids: Vec<PaneId> = match self.windows.get(wid).await {
+            Some(window) => window.panes.lock().await.clone(),
+            None => Vec::new(),
+        };
+        for pid in pane_ids {
+            self.forget_pane_row(pid).await;
+        }
+        self.windows.remove(wid).await;
+    }
+
+    /// Drop a window by its tmux handle. Returns whether anything was removed.
+    async fn forget_window_by_handle(&self, id: SessionId, handle: &str) -> bool {
+        match self.window_for_handle_in(id, handle).await {
+            Some(wid) => {
+                self.forget_window_row(wid).await;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop a pane row, its bridge and its buffer. Used when tmux says the pane
+    /// is gone, so `close()` only ever releases OUR pump (a control bridge's
+    /// `close` is a no-op by design).
+    async fn forget_pane_row(&self, pid: PaneId) {
+        let bridge = self.pane_bridges.lock().await.remove(&pid);
+        if let Some(bridge) = bridge {
+            let _ = bridge.close().await;
+        }
+        self.pane_buffers.lock().await.remove(&pid);
+        self.panes.remove(pid).await;
+    }
+
+    // ----- pumps -----
+
+    /// One task per session: structure changes become registry rows.
+    fn start_event_pump(
+        &self,
+        id: SessionId,
+        control: Arc<TmuxControl>,
+        mut events: tokio::sync::mpsc::UnboundedReceiver<TmuxEvent>,
+    ) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            // Ends when the channel closes — the reader thread drops every
+            // sender on EOF, `close()` and `%exit`.
+            while let Some(event) = events.recv().await {
+                match event {
+                    // A rename and a layout change are the same question as an
+                    // add: "what does this window look like now?"
+                    TmuxEvent::WindowAdd { handle }
+                    | TmuxEvent::WindowRenamed { handle }
+                    | TmuxEvent::LayoutChange { handle, .. } => {
+                        if let Err(e) = manager.reconcile_window(id, &control, &handle).await {
+                            tracing::warn!("tmux: could not reconcile window {handle}: {e}");
+                        }
+                    }
+                    TmuxEvent::WindowClose { handle } => {
+                        if manager.forget_window_by_handle(id, &handle).await {
+                            if let Err(e) = manager.save_state().await {
+                                tracing::warn!("tmux: could not save state after {handle} closed: {e}");
+                            }
+                        }
+                    }
+                    // Nothing in xscore stores "the current window" yet, so
+                    // these are informational (arch.md §7 lists them as state
+                    // to update when a renderer exists).
+                    TmuxEvent::SessionWindowChanged { session, window } => {
+                        tracing::debug!("tmux {id}: current window of {session} is {window}");
+                    }
+                    TmuxEvent::SessionChanged { session } => {
+                        tracing::debug!("tmux {id}: session is {session}");
+                    }
+                    TmuxEvent::SessionsChanged => {
+                        tracing::debug!("tmux {id}: the session set changed");
+                    }
+                    TmuxEvent::Exit { reason } => {
+                        // The client is the session's single connection: with
+                        // it gone the link is disconnected (which
+                        // `link_is_connected` reports from the closed handle)
+                        // and every pane pump ends, because `%exit` shuts the
+                        // subscriber channels down.
+                        tracing::info!("tmux: control client for session {id} exited: {reason}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// One task per pane: `%output %N` appended to that pane's buffer.
+    async fn start_output_pump(&self, control: Arc<TmuxControl>, pid: PaneId, key: String) {
+        let buffer = self.buffer_for(pid).await;
+        let mut rx = match control.output(&key).await {
+            Ok(rx) => rx,
+            Err(e) => {
+                tracing::warn!("tmux: could not subscribe to pane {key}: {e}");
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            while let Some(bytes) = rx.recv().await {
+                buffer.lock().await.push_slice(&bytes);
+            }
+        });
+    }
+
+    // ----- one-shot tmux commands (arch.md §6, "two exec shapes") -----
+
+    async fn tmux_session_exists(
+        &self,
+        host: &TmuxHostConfig,
+        socket: &TmuxSocket,
+        name: &str,
+    ) -> Result<bool> {
+        let out = self
+            .run_tmux(host, socket, &["has-session".to_string(), "-t".to_string(), name.to_string()])
+            .await?;
+        if out.status.success() {
+            return Ok(true);
+        }
+        if out.status.code() == Some(255) {
+            return Err(self.tmux_failure(host, name, "has-session", &out));
+        }
+        // Exit 1 is "no such session": the answer, not a failure.
+        Ok(false)
+    }
+
+    /// Run one `tmux` command and return its output (the other exec shape: no
+    /// state to keep, so no client).
+    async fn run_tmux(
+        &self,
+        host: &TmuxHostConfig,
+        socket: &TmuxSocket,
+        args: &[String],
+    ) -> Result<std::process::Output> {
+        let argv = crate::tmux::one_shot_argv(host, socket, args);
+        let (program, rest) = argv
+            .split_first()
+            .ok_or_else(|| Error::Sink("empty tmux command line".into()))?;
+        tokio::process::Command::new(program)
+            .args(rest)
+            .output()
+            .await
+            .map_err(|e| Error::TmuxUnreachable {
+                host: crate::tmux::host_label(host),
+                reason: format!("spawn `{program}`: {e}"),
+            })
+    }
+
+    /// Turn a failed one-shot into the error the failure semantics table names
+    /// (arch.md §6): exit 255 means the host never answered, everything else
+    /// means tmux answered and refused.
+    fn tmux_failure(
+        &self,
+        host: &TmuxHostConfig,
+        session: &str,
+        what: &str,
+        out: &std::process::Output,
+    ) -> Error {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if out.status.code() == Some(255) {
+            return Error::TmuxUnreachable {
+                host: crate::tmux::host_label(host),
+                reason: if stderr.is_empty() { "exit 255".into() } else { stderr },
+            };
+        }
+        Error::Sink(format!(
+            "tmux {what} -t {session} failed ({}): {stderr}",
+            out.status.code().unwrap_or(-1)
+        ))
+    }
+
     // ===== add_link =====
 
     /// Create a link and give it a usable pane, in the default session.
@@ -411,6 +1192,14 @@ impl SessionManager {
         pane: Option<PaneId>,
     ) -> Result<LinkAddResult> {
         self.require_session(session).await?;
+        // ADR 0010 §4: a tmux session has exactly one link — the control
+        // client. A second one would be a second mechanism driving the same
+        // server session, which is the one thing this PR must never allow.
+        if let Some(existing) = self.sessions.get(session).await {
+            if existing.info.is_tmux() {
+                return Err(Error::TmuxSessionHasOneLink(session));
+            }
+        }
         // --- validate before allocating anything (a rejected call must
         //     not leave a tmux session or a spawned child behind) ---
         let is_tmux = !matches!(spec.sink, SinkConfig::Raw);
@@ -527,6 +1316,7 @@ impl SessionManager {
                         link_id: Some(link_id),
                         window_id: Some(wid),
                         sink_handle: Some(first.handle.clone()),
+                        link_key: None,
                     },
                     Some(Arc::new(TmuxBridge {
                         sink: Arc::downgrade(ts),
@@ -598,6 +1388,7 @@ impl SessionManager {
                         link_id: Some(link_id),
                         window_id: Some(wid),
                         sink_handle: None,
+                        link_key: None,
                     },
                     Some(bridge),
                     Some(w),
@@ -613,6 +1404,10 @@ impl SessionManager {
             address: address.clone(),
             transport: spec.transport.clone(),
             sink: spec.sink.clone(),
+            // The old (`?tmux=on`) and native paths are `Pipe` links: one byte
+            // stream, at most one reader. A `Control` link is created only by
+            // `open_control_link` (ADR 0010 §D2).
+            endpoint: EndpointRef::Pipe,
         };
 
         let link = Link {
@@ -679,6 +1474,12 @@ impl SessionManager {
     ///   transport ONCE, remove the link.
     pub async fn del_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
+
+        // ADR 0010 §D5: every pane in a tmux session routes through its control
+        // link, so deleting it would leave them with buffers and no way back.
+        if arc_link.info.is_control() {
+            return Err(Error::ControlLinkNotDeletable(id));
+        }
 
         if let Some(ts) = arc_link.tmux_sink.clone() {
             let handles: HashSet<String> = ts
@@ -948,6 +1749,7 @@ impl SessionManager {
                     link_id: None,
                     window_id: None,
                     sink_handle: None,
+                    link_key: None,
                 },
                 None,
             ),
@@ -977,6 +1779,7 @@ impl SessionManager {
                             link_id: Some(lid),
                             window_id: Some(wid),
                             sink_handle: Some(snap.handle.clone()),
+                            link_key: None,
                         };
                         let bridge = Arc::new(TmuxBridge {
                             sink: Arc::downgrade(&ts),
@@ -997,6 +1800,7 @@ impl SessionManager {
                             link_id: None,
                             window_id: Some(wid),
                             sink_handle: None,
+                            link_key: None,
                         },
                         None,
                     ),
@@ -1075,6 +1879,11 @@ impl SessionManager {
         if info.sink_handle.is_some() {
             // A tmux-owned pane reads its structure from tmux; re-binding
             // it would fork its identity. Refuse rather than corrupt.
+            return Err(Error::TmuxLinkCannotBindPane);
+        }
+        if info.link_key.is_some() {
+            // A pane on a control link is addressed by `%N` on that link and
+            // nothing else (ADR 0010 §D6).
             return Err(Error::TmuxLinkCannotBindPane);
         }
 
@@ -1176,7 +1985,9 @@ impl SessionManager {
     /// tmux-owned panes cannot be detached at all.
     pub async fn detach_pane(&self, pid: PaneId) -> Result<()> {
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        if info.sink_handle.is_some() {
+        // A tmux pane cannot be detached, only killed: its `%N` is its identity
+        // on the server (arch.md §8).
+        if info.sink_handle.is_some() || info.link_key.is_some() {
             return Err(Error::TmuxPaneNotDetachable(pid));
         }
         let lid = match info.link_id {
@@ -1357,6 +2168,15 @@ impl SessionManager {
         }
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
 
+        // A pane on a control link comes FIRST: the old tmux path keys off
+        // `sink_handle` (which these panes do not have) and the daemon branch
+        // below only looks at `sink_handle` too, so either order would route a
+        // tmux pane into the wrong mechanism.
+        if let Some(b) = self.control_bridge(&info).await? {
+            self.pane_bridges.lock().await.insert(pid, Arc::clone(&b));
+            return Ok(b);
+        }
+
         // tmux-owned panes (sink_handle is Some) are never daemon-backed:
         // tmux is already resident and holds their scrollback.
         if let (Some(client), None) = (&self.daemon, info.sink_handle.as_ref()) {
@@ -1403,8 +2223,26 @@ impl SessionManager {
         }
     }
 
-    // ===== sync (v0.4.0, ADR 0008) =====
+    /// The bridge for a pane that lives on its session's control link, if it
+    /// does.
+    ///
+    /// Attaching here — rather than only at creation — is what makes
+    /// `data read/write` work from a process that did nothing but load
+    /// `state.json` (arch.md §7: the structure is live, not a mirror).
+    async fn control_bridge(&self, info: &PaneInfo) -> Result<Option<Arc<dyn PaneBridge>>> {
+        let (Some(link_id), Some(key)) = (info.link_id, info.link_key.clone()) else {
+            return Ok(None);
+        };
+        let Some(link) = self.links.get(link_id).await else { return Ok(None) };
+        if !link.info.is_control() {
+            return Ok(None);
+        }
+        let control = self.ensure_tmux_attached(info.session_id).await?;
+        let buffer = self.buffer_for(info.id).await;
+        Ok(Some(Arc::new(ControlBridge::new(control, key, buffer))))
+    }
 
+    // ===== sync (v0.4.0, ADR 0008) =====
     /// Compare xscore's registry against tmux's actual structure for a
     /// tmux link. Read-only unless `heal` is set; then registry rows are
     /// corrected to match tmux. Panes tmux has but xscore never adopted
@@ -1733,10 +2571,15 @@ impl SessionManager {
         // arm above, which installs `NoopTransport`). Recording that
         // honestly is what lets data ops report `LinkNotConnected`
         // instead of the misleading `NotAttached`.
-        let connected = matches!(
-            info.sink,
-            crate::model::SinkConfig::Tmux { .. }
-        );
+        //
+        // v0.6.0: a `Control` link is connected only while a client is
+        // attached, and hydration attaches nothing — `link_is_connected` asks
+        // `tmux_controls`, so this flag is not consulted for it.
+        let connected = if info.is_control() {
+            false
+        } else {
+            matches!(info.sink, crate::model::SinkConfig::Tmux { .. })
+        };
         let link = Link {
             id: link_id,
             info,
