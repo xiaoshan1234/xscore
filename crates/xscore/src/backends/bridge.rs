@@ -117,13 +117,14 @@ impl DirectBridge {
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
                 while !s.load(Ordering::Relaxed) {
-                    // The transport's `read` BLOCKS until bytes arrive, and
-                    // transports are allowed to serialize read/write behind
-                    // one lock (ShellTransport does). Holding that lock in a
-                    // blocking read forever would starve `write` — so poll
-                    // with a short timeout: the cancel releases the
-                    // transport lock, giving writers a window, and pipe
-                    // reads are cancel-safe (no bytes are lost).
+                    // `read` blocks until bytes arrive, so a bare `await` would
+                    // never re-check `stop` and a detach could not end the
+                    // pump. The timeout re-arms the read every READ_POLL and is
+                    // the only reason it exists: since ADR 0010 a shell link is
+                    // a pty with independent read/write halves, so the old
+                    // "release the transport lock" reason is gone, and a
+                    // cancelled read loses nothing (the bytes wait in the
+                    // transport's channel).
                     let read = tokio::time::timeout(READ_POLL, t.read(&mut buf)).await;
                     match read {
                         Ok(Ok(0)) => tokio::time::sleep(READ_POLL).await,

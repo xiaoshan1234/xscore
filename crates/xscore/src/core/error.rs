@@ -109,6 +109,14 @@ pub enum Error {
 
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    /// ADR 0010 / arch.md §4: `resize` is only real where something owns a
+    /// window size — a pty (`TIOCSWINSZ`), an ssh channel (`window-change`) or
+    /// a tmux pane (`resize-pane`). A serial link has none, and a hydrated
+    /// `NoopTransport` has no connection at all. Returning `Ok(())` for those
+    /// was a silent lie: the caller saw success and only `PaneInfo` changed.
+    #[error("link kind `{0}` has no window size; resize only applies to a pty, an ssh channel or a tmux pane")]
+    ResizeUnsupported(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

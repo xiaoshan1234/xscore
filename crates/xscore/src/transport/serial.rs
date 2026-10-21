@@ -178,7 +178,9 @@ impl super::Transport for SerialTransport {
         Ok(n)
     }
 
-    async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
+    async fn resize(&self, _: u16, _: u16) -> Result<()> {
+        Err(Error::ResizeUnsupported(self.kind()))
+    }
 
     async fn close(&self) -> Result<()> {
         // Drop the port; `SerialPort`'s `Drop` closes the underlying fd.

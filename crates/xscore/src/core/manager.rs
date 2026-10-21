@@ -924,16 +924,18 @@ impl SessionManager {
     // ===== geometry updates =====
 
     pub async fn resize_pane(&self, pid: PaneId, cols: u16, rows: u16) -> Result<()> {
-        let _ = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        if let Some(mut info) = self.panes.get(pid).await {
-            info.cols = cols;
-            info.rows = rows;
-            self.panes.insert(info).await;
+        let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        // Resize the real thing first. If the transport has no size (serial) or
+        // the call fails, nothing has changed yet — a failed resize must not
+        // leave a modified `PaneInfo` behind, which is the same silent lie as
+        // returning Ok without doing anything.
+        if let Some(bridge) = self.pane_bridges.lock().await.get(&pid).cloned() {
+            bridge.resize(cols, rows).await?;
         }
-        let bridge = self.pane_bridges.lock().await.get(&pid).cloned();
-        if let Some(b) = bridge {
-            b.resize(cols, rows).await?;
-        }
+        let mut updated = info;
+        updated.cols = cols;
+        updated.rows = rows;
+        self.panes.insert(updated).await;
         self.save_state().await?;
         Ok(())
     }

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A shell link is a pty, not a pipe.**
+  `ShellTransport` spawned children with `Stdio::piped()`, so the child
+  block-buffered its stdout, `isatty()` was false, and echo, job control and
+  `SIGWINCH` were all missing: `vim`, `sudo` and `python -i` took their
+  non-interactive path. A shell session manager that cannot run an interactive
+  program is not one. The link now allocates a real pty, sets `TERM`, and gives
+  each direction its own thread — which also removes the old shared lock that
+  let a blocking read starve `data write`.
+
+- **`data resize` no longer succeeds without doing anything.**
+  `ShellTransport`, `SerialTransport` and `NoopTransport` all returned `Ok(())`;
+  only `PaneInfo` changed. A pty now gets `TIOCSWINSZ`, ssh already sent
+  `window-change`, and a link kind with no window size returns
+  `Error::ResizeUnsupported` instead of pretending. `resize_pane` also resizes
+  the transport *before* touching `PaneInfo`, so a failed resize leaves no
+  trace.
+
 ## [0.5.1] - 2026-10-21
 
 ### Fixed

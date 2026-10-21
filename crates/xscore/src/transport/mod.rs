@@ -1,4 +1,4 @@
-use crate::core::{LinkAddress, Result};
+use crate::core::{Error, LinkAddress, Result};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -36,7 +36,9 @@ impl Transport for NoopTransport {
     async fn open(&mut self) -> Result<()> { Ok(()) }
     async fn write(&self, _: &[u8]) -> Result<usize> { Ok(0) }
     async fn read(&self, _: &mut [u8]) -> Result<usize> { Ok(0) }
-    async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
+    async fn resize(&self, _: u16, _: u16) -> Result<()> {
+        Err(Error::ResizeUnsupported(self.kind()))
+    }
     async fn close(&self) -> Result<()> { Ok(()) }
 }
 
