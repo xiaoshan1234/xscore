@@ -104,6 +104,19 @@ impl super::Transport for ShellTransport {
         if cmd.get_env("TERM").is_none() {
             cmd.env("TERM", "xterm-256color");
         }
+        // portable-pty runs the child in `$HOME` when we pass no cwd, so a HOME
+        // that is set but *gone* (a deleted temp dir, a stale container mount)
+        // makes every spawn fail with a bare `No such file or directory` that
+        // points at the program, not at the directory. Fall back to the
+        // process's cwd, which is always a directory we are running in.
+        let home_is_dir = std::env::var("HOME")
+            .map(|home| std::path::Path::new(&home).is_dir())
+            .unwrap_or(false);
+        if !home_is_dir {
+            if let Ok(cwd) = std::env::current_dir() {
+                cmd.cwd(cwd);
+            }
+        }
 
         let child = pair
             .slave

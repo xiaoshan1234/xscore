@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the transport *before* touching `PaneInfo`, so a failed resize leaves no
   trace.
 
+- **A stale `HOME` no longer breaks every shell link.** `portable-pty` runs the
+  child in `$HOME` when no cwd is given, so a HOME that is set but missing (a
+  deleted temp dir, a stale mount) made every spawn fail with a bare
+  `No such file or directory` naming the program, not the directory. The pty
+  now falls back to the process's own cwd when `$HOME` is not a directory.
+
 ## [0.5.1] - 2026-10-21
 
 ### Fixed
