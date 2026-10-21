@@ -10,6 +10,8 @@ Rust session manager for SSH / shell / serial, modeled as three **independent en
 
 > **v0.4.0:** `xscore link add` returns **three ids** (link, window, pane). tmux links *adopt* the session's `@N` window and `%N` pane instead of guessing; `link add --pane <pid>` binds an existing pane; `link sync` diffs xscore against tmux. See [5-minute demo](#5-minute-demo) and [ADR 0008](doc/dev/adr/0008-tmux-adoption.md).
 
+> **v0.5.0 — resident daemon:** direct-link transports (shell child, serial port, ssh channel) and pane buffers now live in `xscore daemon serve` instead of the CLI process, so `link add` in one terminal and `data write` in the next actually work, and a pane's scrollback survives the command that created it. The daemon starts itself, exits after 5 s idle with no links, and `xscore daemon status` / `daemon stop` are the manual handle on it. See [ADR 0009](doc/dev/adr/0009-daemon.md).
+
 This is a **Rust port of the xst/script patterns** (without the xst dependency): a single CLI that orchestrates a `~/.config/xscore/` tree for persistent state. Tmux is one option, not the default.
 
 ## 5-minute demo
@@ -31,6 +33,14 @@ cargo build --release
 echo 'echo hi from xscore' | ./target/release/xscore data write --pane <pid>
 ./target/release/xscore data read --pane <pid>
 # hi from xscore
+#
+# Those are TWO processes, neither of which created the link. It works
+# because `link add` handed the transport and the pane's buffer to the
+# resident daemon (ADR 0009), which keeps pumping bytes while no CLI is
+# running. The daemon auto-starts on demand — nothing to configure:
+./target/release/xscore daemon status
+# {"ok":true,"status":{"pid":1234,"links":["<lid>"],
+#   "panes":[{"pane":"<pid>","link":"<lid>","buffered":17}]}}
 
 # 4. tmux link: the window and pane are ADOPTED from tmux, so
 #    `sink_handle` is a real %N and `tmux_window_handle` a real @N.
@@ -81,6 +91,14 @@ echo 'echo hi from xscore' | ./target/release/xscore data write --pane <pid>
 ./target/release/xscore pane del --id <pid>
 ./target/release/xscore window del --id <wid>
 ./target/release/xscore link del --id <lid>
+
+# 11. The daemon is inspectable plumbing, never a prerequisite.
+./target/release/xscore daemon status     # pid + links + panes + buffered bytes
+./target/release/xscore daemon stop       # closes transports, removes the socket
+./target/release/xscore link show --id <lid>   # "connected": false
+# Metadata is untouched by `daemon stop`: `pane show` still reports the
+# binding, and `pane attach` (or `link add`) re-creates the transport.
+# A daemon with no links also exits by itself after 5s, so nothing lingers.
 ```
 
 ## The 3-entity model
@@ -113,6 +131,26 @@ Panes can move freely:
 - `pane detach --pane <pid>` — unbind (buffer preserved)
 - `pane add-to-window --pane <pid> --window <wid>` — put in a window
 - `pane remove-from-window --pane <pid> --window <wid>` — remove from window
+
+## Where the bytes live (v0.5.0)
+
+The model above is the **metadata**, and it belongs to the CLI: ids,
+bindings and geometry are in `state.json` and never depend on a running
+process. The **byte-level** objects have a different owner (ADR 0009):
+
+| object | owner | dies when |
+|---|---|---|
+| `Link` / `Window` / `Pane` records, bindings | CLI → `state.json` | never (explicit `del`) |
+| raw-link `Transport` (child / serial fd / ssh channel) | daemon | `link del`, `daemon stop`, daemon restart |
+| direct pane `RingBuffer` (64 KiB) | daemon | `pane del`, `daemon stop` |
+| tmux session + panes | tmux server | `link del` (kills session), tmux itself |
+
+So `xscore link add shell:///bin/cat` in one terminal followed by
+`xscore data write --pane <pid>` in another does what you'd expect: the
+daemon is holding the child process and the buffer, and the second CLI
+only needs the pane id. With the daemon stopped the metadata stays
+intact and the link simply reports `connected: false` until something
+re-attaches (`pane attach`, or `link add` again).
 
 ## Q1: Direct link 1-active-pane rule
 
@@ -209,6 +247,10 @@ xscore data read --pane <pid> [--bytes N]            # errors with NotAttached f
 xscore data write --pane <pid> [< file | --from-file F]
 xscore data resize --pane <pid> --cols C --rows R
 
+xscore daemon status                                 # pid + links + panes + buffered bytes (JSON)
+xscore daemon stop                                   # close transports, remove the socket
+xscore daemon serve                                  # foreground daemon (auto-start uses this)
+
 xscore config show                                   # stub for v0.4.0
 xscore config path
 xscore config set <key> <value>
@@ -265,22 +307,27 @@ Error: link id already in use: 11111111-2222-7333-8444-555555555555
 ## Architecture
 
 ```
-CLI -> SessionManager
+CLI -> SessionManager                                        (metadata; state.json)
        +-- LinkRegistry     (link_id → Arc<Link>)
        +-- WindowRegistry   (window_id → Arc<Window>)         — virtual or tmux @N
        +-- PaneRegistry     (pane_id → PaneInfo)              — virtual or tmux %N
        +-- pane_bridges     (pane_id → Arc<dyn PaneBridge>)   — built on attach/adopt
                                   ▲ wraps:
-                                   ├─ DirectBridge { Arc<dyn Transport>, RingBuffer }  (raw)
+                                   ├─ DaemonBridge { DaemonClient, PaneId }            (raw, v0.5.0)
+                                   ├─ DirectBridge { Arc<dyn Transport>, RingBuffer }  (raw, in-process)
                                    └─ TmuxBridge { Weak<TmuxSink>, "%N" }              (tmux)
-       +-- pane_buffers     (pane_id → Arc<Mutex<RingBuffer>>) — survives detach
+       +-- pane_buffers     (pane_id → Arc<Mutex<RingBuffer>>) — in-process only
+
+xscore daemon serve                                         (bytes; owns the live I/O)
+       +-- links  (link_id  → Arc<dyn Transport>)            — shell / serial / ssh
+       +-- panes  (pane_id  → { link, RingBuffer, pump })    — pump feeds the buffer
 ```
 
-Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). Each Pane has its own bridge (the runtime I/O channel) and its own geometry (cols/rows/x/y). Each Window owns its pane list (UI container).
+Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op) — for **raw** links the Transport object itself lives in the daemon and the CLI holds only a `DaemonTransport` handle to it (ADR 0009). Each Pane has its own bridge (the runtime I/O channel) and its own geometry (cols/rows/x/y). Each Window owns its pane list (UI container). For raw panes the bridge is a socket proxy (`DaemonBridge`); for tmux panes it drives tmux directly, because tmux is already resident.
 
 **Lifecycle:**
 - `link add` creates the link AND its first window/pane (ADR 0008): a virtual window + buffered pane for raw links, or tmux's own `@N`/`%N` for tmux links.
-- `link del` on a **direct** link: every attached pane's `link_id` is cleared and its bridge released, but the transport and the pane buffers stay alive until the link itself is removed. Panes survive as orphans.
+- `link del` on a **direct** link: every attached pane's `link_id` is cleared and its bridge released; the daemon closes the transport once and **keeps the pane buffers**, so the history is still readable and a later re-attach resumes it. Panes survive as orphans.
 - `link del` on a **tmux** link: `kill-session` takes every adopted window/pane with it; they are removed from the registry too.
 - `window del` cascades: every pane in the window has its `window_id` cleared. Panes survive as orphans.
 - `pane del` fully tears down: also detaches from link + removes from window, and kills the tmux pane if it has a `%N`.
@@ -291,19 +338,21 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). 
 - `open` attaches to an existing tmux session (tmux only — shell/serial/ssh return `OpenOnlyForTmux`).
 - `close` is a no-op for v0.4.0 (tmux sessions are inherently persistent across xscore invocations).
 
-## Status (v0.4.1)
+## Status (v0.5.0)
 
 **Working end-to-end:**
 - 3-entity decoupled model with dynamic associations (ADR 0007 v2)
+- **Resident daemon (ADR 0009): direct-link transports and pane buffers survive the CLI process.** `link add` in one process → `data write` / `data read` in another works; a pane's 64 KiB scrollback survives `pane detach` and a re-attach appends to it
+- `daemon` verb tree: `serve` (foreground; auto-start uses it), `status` (JSON: pid, links, panes, buffered bytes), `stop`. Auto-start on demand, 5 s idle exit with no links, stale-socket + single-instance lock handling
 - `link add` auto-creates a usable window + pane (ADR 0008), three ids out
 - tmux adoption: `@N` windows / `%N` panes, geometry read from tmux, never guessed
 - `link sync [--heal]`: registry ↔ tmux drift report and repair
 - `link add --pane`, `window add --link`, `pane add --window`
 - Pane buffer: `DirectBridge` + 64 KiB `RingBuffer`, snapshot reads, survives detach
-- Q1: direct-link 1-active-pane auto-detach (user-confirmed 2026-10-19)
+- Q1: direct-link 1-active-pane auto-detach (user-confirmed 2026-10-19), enforced in the daemon too
 - Q1 corollary: tmux-backed multi-pane (each `pane add --window` = tmux split)
 - Q2: pane geometry (cols/rows/x/y) (user-confirmed 2026-10-19)
-- Bridge model: `DirectBridge` (raw) + `TmuxBridge` (tmux) via `PaneBridge` trait
+- Bridge model: `DaemonBridge` (raw, daemon-backed) / `DirectBridge` (raw, in-process) / `TmuxBridge` (tmux) via `PaneBridge` trait
 - Local tmux sink: `new-session / new-window / split-window / kill-pane / kill-window / capture-pane / send-keys / resize-pane` over the shared `-L xscore` server (ADR 0003)
 - `shell://` transport (local child, real `tokio::process::Command`)
 - URL parser: `shell://` / `ssh://` / `serial://` with `?key=value` query
@@ -317,16 +366,18 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). 
 - `serial://` transport (real `serialport = "4.10"` impl) — needs real hardware
 - `ssh://` transport (real `russh = "0.43"` impl) — needs a real SSH server; key auth only (no `known_hosts`, no password)
 
-**Stubbed / pending (deferred to v0.5.0+):**
+**Stubbed / pending (deferred to v0.6.0+):**
 - `link open` for the local-tmux case is a `todo!()` stub
 - `xscore config {show, path, set, unset}` for AppConfig
 - `link config edit` for in-place template editing
 - Pre-built binaries (currently install via `cargo install --path .`)
 
 **Known limitations (deferred):**
-- Direct panes cannot keep live I/O across a process restart: the transport is owned by the process that spawned it. The *binding* still survives — `pane show` reports the pane's `link_id`, and `link show` reports `connected: false` — but data ops fail with `LinkNotConnected` (not `NotAttached`, which would wrongly claim the pane was never bound). Re-add the link to reconnect. tmux panes DO rebuild their bridge on hydration from `%N` and stay `connected: true`. A long-lived daemon would lift this limitation; it is not in scope yet.
+- A direct link's live I/O does not survive a **daemon** restart. The daemon owns the transports and the pane buffers, so stopping it (or crashing it) drops the connections — metadata, bindings and `state.json` are untouched, `link show` reports `connected: false`, and `pane attach` (or `link add`) re-creates the transport from the persisted `TransportConfig`. Pane scrollback is in-memory only: it survives CLI processes, not the daemon.
+- `daemon stop` is a hard stop: every direct link dies at once (tmux links are unaffected — tmux owns them). There is no per-link daemon, by design: a pane may switch links, and its buffer has to follow it (ADR 0009 § 1).
+- Two concurrent CLI mutating calls do not serialise their `state.json` writes (last writer wins) — they do now share one daemon, and the temp-file name is per-process so the write itself no longer races.
 - `link sync` never adopts panes it did not create — that is deliberate (ADR 0008). Create them through `pane add --window`.
-- `xscore link open` for tmux is `todo!()` — will land in v0.5.0.
+- `xscore link open` for tmux is `todo!()` — still deferred.
 - SSH `check_server_key` accepts any host key. Real users want `StrictHostKeyChecking=yes` with `~/.ssh/known_hosts`.
 - SSH auth is key-only (no password field in `ConnectSpec::Ssh` yet).
 - Serial `default-features = false` (no `libudev`); open by explicit path.
@@ -334,16 +385,21 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op). 
 ## Tests
 
 ```bash
-# Unit tests (29 tests, in-process, <1s)
+# Unit tests (54 tests, in-process, <1s) — includes the daemon's own
+# state machine (attach/detach/delete/Q1, buffer retention) against a
+# scripted transport, plus the protocol's framing and hex codec.
 cargo test -p xscore --lib
 
-# CLI integration tests (24 tests, ~2s)
+# CLI integration tests (29 tests, ~3s) — one real process per step, so
+# the daemon tests are genuine cross-process tests
+# (create in A → write in B → read in C).
 cargo test -p xscore --test cli_smoke
 
-# Data-path integration tests (10 tests, single-process, real tmux round-trip)
+# Data-path integration tests (10 tests, single-process, real tmux round-trip;
+# these deliberately run WITHOUT the daemon, exercising DirectBridge)
 cargo test -p xscore --test data_smoke
 
-# Everything (62 tests total; --test-threads=1 required — data_smoke sets env vars)
+# Everything (93 tests total; --test-threads=1 required — data_smoke sets env vars)
 cargo test -p xscore -- --test-threads=1
 ```
 
@@ -363,9 +419,14 @@ crates/xscore/src/
     link_registry.rs, pane_registry.rs, window_registry.rs
     manager.rs                   # SessionManager (add_link branches, sync_link)
     state.rs                     # save / load (schema_version 2 gate)
-  backends/                     # PaneBridge trait + DirectBridge + TmuxBridge
+  backends/                     # PaneBridge trait + DaemonBridge/DirectBridge/TmuxBridge
     bridge.rs
     ring_buffer.rs               # per-pane buffer (64 KiB, snapshot reads)
+  daemon/                        # v0.5.0: resident process (ADR 0009)
+    mod.rs
+    protocol.rs                  # length-prefixed JSON + hex codec + Request/Response
+    server.rs                    # socket bind, startup lock, pumps, Q1, status
+    client.rs                    # auto-start, requests, DaemonTransport
   model/                        # ConnectSpec, TransportConfig, SinkConfig,
                                 #   LinkInfo, WindowInfo, WindowLayout, PaneInfo
     session.rs
@@ -384,12 +445,13 @@ crates/xscore/src/
   cli/                          # clap 4-level subcommand tree
     mod.rs
     link.rs, window.rs, pane.rs, data.rs
+    daemon.rs                    # v0.5.0: daemon serve / status / stop
   config/                       # link templates on disk
     mod.rs, paths.rs, loader.rs
 
 crates/xscore/tests/
-  cli_smoke.rs                  # 23 CLI integration tests
-  data_smoke.rs                 # 10 in-process data-path tests
+  cli_smoke.rs                  # 29 CLI integration tests (cross-process daemon tests)
+  data_smoke.rs                 # 10 in-process data-path tests (no daemon)
 ```
 
 ## Release process

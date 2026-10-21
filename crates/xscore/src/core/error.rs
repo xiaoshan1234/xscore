@@ -43,8 +43,22 @@ pub enum Error {
     /// the link is re-established. Distinct from `NotAttached` (no
     /// binding at all) on purpose: one is "connection lost", the other
     /// is "never connected".
+    ///
+    /// v0.5.0 (ADR 0009): with the resident daemon this now means "the
+    /// daemon is not holding this link" — i.e. it was stopped or
+    /// restarted since the link was created. Re-adding the link (or
+    /// `pane attach`) re-creates the transport and clears this.
     #[error("link {0} is not connected (its transport died with the previous process); re-add the link to reconnect")]
     LinkNotConnected(LinkId),
+
+    /// v0.5.0 (ADR 0009): the resident daemon could not be reached, could
+    /// not be started, or refused a request. Carries the daemon's own
+    /// message so a failure inside the daemon (a transport that won't
+    /// open, a pane that is not attached) reads the same as it did when
+    /// the work happened in-process.
+    #[error("daemon error: {0}")]
+    Daemon(String),
+
 
     #[error("`xscore link open` is only valid for tmux sessions, not {0}")]
     OpenOnlyForTmux(&'static str),

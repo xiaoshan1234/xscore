@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-20
+
+A resident daemon, so direct links stop dying with the CLI process. See
+[ADR 0009](doc/dev/adr/0009-daemon.md).
+
+### Added
+
+- **`xscore daemon serve` / `status` / `stop`** — a resident process that
+  owns every direct-link `Transport` (shell child, serial port, ssh
+  channel) and every direct pane's `RingBuffer`. This is what makes
+  `link add` in one process and `data write` in another work at all.
+- **Auto-start**: the first command that needs a transport (`link add`,
+  `pane attach`) spawns the daemon detached and polls the socket for up
+  to 2 s. Nothing to configure, no systemd unit, no shell daemon.
+- **`daemon status`** prints JSON: the daemon's pid, the link ids it
+  holds, and per-pane `{pane, link, buffered}`.
+- `daemon/protocol.rs` — length-prefixed JSON framing
+  (`[u32 LE length][JSON]`), hex payload encoding, a dozen ops
+  (`ping`, `status`, `create_link`, `delete_link`, `create_pane`,
+  `delete_pane`, `attach`, `detach`, `read`, `write`, `resize`, `stop`).
+  The transport payload is `model::TransportConfig`'s own serde shape, so
+  there is no second transport vocabulary.
+- `backends::DaemonBridge` — a `PaneBridge` whose `read`/`write`/
+  `resize`/`close` are socket requests. `DirectBridge` stays for
+  in-process use (`data_smoke` exercises it).
+- `daemon::DaemonTransport` — the `Transport`-shaped handle a daemon-backed
+  `Link` holds; the real transport lives in the daemon.
+- `SessionManager::enable_daemon`, `SessionManager::link_is_connected`.
+- New error: `Error::Daemon(String)`.
+- 25 new unit tests (protocol framing/hex/`op` shapes, the daemon's
+  attach/detach/delete/Q1 state machine against a scripted transport) and
+  5 new cross-process CLI tests, including
+  `xscore_daemon_direct_link_survives_process` — create in process A,
+  write in B, read in C.
+
+### Changed
+
+- **Direct links are daemon-backed in the CLI.** `link add` (raw sink)
+  now: ensure daemon → `create_link` → `create_pane` → write metadata →
+  `attach` → `save_state`. `link del` sends `delete_link` (the daemon
+  closes the transport once and unbinds its panes, keeping their
+  buffers). `pane attach`/`pane detach`/`pane del` keep the daemon in
+  sync — and `attach` doubles as a **reconnect**, re-creating the
+  transport from the persisted `TransportConfig` if the daemon lost it.
+- **`link show`'s `connected` is now a live probe** of the daemon
+  (`{"op":"status"}`) instead of a flag recorded at hydration, so
+  `daemon stop` → `connected: false` and a re-attach → `connected: true`.
+- **`data read` on a detached direct pane** now serves the daemon-held
+  buffer instead of failing: a pane's core is its buffer (ADR 0008), and
+  the buffer outlives the binding. `data write`/`resize` still require an
+  attached link and still fail with "not attached".
+- tmux links are untouched: `TmuxBridge`/`TmuxSink` still drive tmux
+  directly, because tmux is already resident.
+- The Q1 rule (one active pane per direct link) is now enforced on both
+  sides: the manager for metadata, the daemon for pumps.
+
+### Fixed
+
+- **`state.json` temp-file race.** Two concurrent CLI invocations both
+  wrote `state.json.tmp`; the loser's `rename` then failed with ENOENT
+  because the winner had already consumed the file. The temp name is now
+  per-process (`state.json.<pid>.tmp`).
+- **Single-instance startup.** Two processes auto-starting the daemon at
+  the same moment could each unlink-and-bind the socket, leaving two
+  daemons on one path (each holding some of the links, forever). Startup
+  now takes a `daemon.lock` with `create_new` before binding, and a lock
+  whose socket no longer answers is reclaimed.
+- A failed `link add` (attach or state-save error) no longer leaves a
+  daemon holding a transport nothing references — and therefore a daemon
+  that could never idle-exit.
+
+### Note on v0.4.1
+
+v0.4.1's `xscore_direct_link_reports_not_connected_after_restart` was the
+honest description of the old limitation. It is now
+`xscore_direct_link_stays_connected_after_restart`, asserting
+`connected: true` and a successful cross-process write: the same scenario,
+fixed.
+
 ## [0.4.1] - 2026-10-20
 
 ### Fixed

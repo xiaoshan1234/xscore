@@ -1,15 +1,18 @@
 // cli/mod.rs
 //
-// Top-level CLI dispatch. The 5 verb groups are:
+// Top-level CLI dispatch. The verb groups are:
 //   - link    (4-verb + config subgroup, ADR 0005)
 //   - window  (4-verb, ADR 0006)
 //   - pane    (4-verb with --window, ADR 0006)
-//   - data    (stub for task-11)
+//   - data    (per-pane read / write / resize)
+//   - daemon  (v0.5.0: the resident process that owns direct-link
+//             transports and pane buffers — ADR 0009)
 //   - config  (stub — `xscore config {show, path, set, unset}` deferred to
 //             a later task; for this slice the `xscore config` shell
 //             shows a TODO and exits non-zero so users get a clear
 //             message)
 
+pub mod daemon;
 pub mod data;
 pub mod link;
 pub mod pane;
@@ -35,9 +38,12 @@ pub enum Commands {
     /// Inspect / create / close / open / remove panes (views into windows)
     #[command(subcommand)]
     Pane(pane::PaneCmd),
-    /// Read / write / resize data on a pane (task-11 — stub for now)
+    /// Read / write / resize data on a pane
     #[command(subcommand)]
     Data(data::DataCmd),
+    /// Inspect / stop the resident daemon that keeps direct links alive
+    #[command(subcommand)]
+    Daemon(daemon::DaemonCmd),
     /// Show / edit AppConfig values (deferred — not yet implemented)
     Config,
 }

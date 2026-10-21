@@ -168,13 +168,14 @@ async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     let lid = LinkId::parse(id)?;
     let link = mgr.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
     // v0.4.1 (P0-3): surface `connected` alongside the persisted
-    // LinkInfo. A direct link hydrated from disk keeps its binding and
-    // metadata but reports `connected: false` — its transport died with
-    // the process that created it. Without this field `link show` made a
-    // dead link look identical to a live one.
+    // LinkInfo. Since v0.5.0 (ADR 0009) a direct link's connection lives
+    // in the resident daemon, so this is a LIVE probe, not a flag baked
+    // in at hydration: `daemon stop` makes it false, re-attaching makes
+    // it true again.
+    let connected = mgr.link_is_connected(lid).await;
     let mut v = serde_json::to_value(&link.info)?;
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("connected".into(), serde_json::Value::Bool(link.connected));
+        obj.insert("connected".into(), serde_json::Value::Bool(connected));
     }
     println!("{}", serde_json::to_string_pretty(&v)?);
     Ok(())

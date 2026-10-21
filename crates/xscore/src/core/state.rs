@@ -69,7 +69,12 @@ pub fn save(snapshot: &StateSnapshot) -> Result<()> {
             .map_err(|e| Error::Config(format!("mkdir {}: {e}", parent.display())))?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot)?;
-    let tmp = path.with_extension("json.tmp");
+    // Per-process temp name: two concurrent CLI invocations both saving
+    // used to race on a single `state.json.tmp`, and the loser's rename
+    // failed with ENOENT *after* the winner had consumed the file (v0.5.0
+    // makes concurrent invocations normal — the daemon can be auto-started
+    // by several processes at once).
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &bytes)
         .map_err(|e| Error::Config(format!("write {}: {e}", tmp.display())))?;
     std::fs::rename(&tmp, &path)

@@ -36,7 +36,8 @@ use super::pane_registry::PaneRegistry;
 use super::window::Window;
 use super::window_registry::WindowRegistry;
 
-use crate::backends::{DirectBridge, PaneBridge, RingBuffer, TmuxBridge};
+use crate::backends::{DaemonBridge, DirectBridge, PaneBridge, RingBuffer, TmuxBridge};
+use crate::daemon::client::DaemonClient;
 use crate::model::{
     ConnectSpec, PaneInfo, SinkConfig, WindowInfo, WindowLayout,
 };
@@ -95,7 +96,14 @@ pub struct SessionManager {
     pane_bridges: Arc<Mutex<HashMap<PaneId, Arc<dyn PaneBridge>>>>,
     /// Per-pane direct-pane buffers. They OUTLIVE the bridge: detaching a
     /// direct pane drops the bridge but keeps the history (ADR 0008).
+    /// Only used in in-process mode — with a daemon, the buffer belongs
+    /// to the daemon (ADR 0009).
     pane_buffers: Arc<Mutex<HashMap<PaneId, Arc<Mutex<RingBuffer>>>>>,
+    /// v0.5.0 (ADR 0009): when set, direct links are daemon-backed —
+    /// their transport and pane buffers live in the resident daemon, so
+    /// they survive this process. `None` keeps everything in-process
+    /// (that is what `data_smoke` exercises).
+    daemon: Option<Arc<DaemonClient>>,
 }
 
 impl Default for SessionManager {
@@ -110,6 +118,34 @@ impl SessionManager {
             panes: Arc::new(PaneRegistry::new()),
             pane_bridges: Arc::new(Mutex::new(HashMap::new())),
             pane_buffers: Arc::new(Mutex::new(HashMap::new())),
+            daemon: None,
+        }
+    }
+
+    /// v0.5.0 (ADR 0009): back direct links with the resident daemon.
+    ///
+    /// The CLI turns this on; the in-process tests do not. With it on,
+    /// `add_link` / `attach_pane` send the transport to the daemon and
+    /// install a `DaemonBridge`, so the link keeps working after this
+    /// process exits — which is the whole reason v0.5.0 exists.
+    pub fn enable_daemon(&mut self, client: Arc<DaemonClient>) {
+        self.daemon = Some(client);
+    }
+
+    /// v0.5.0: is this link's transport alive right now?
+    ///
+    /// tmux links: yes — tmux is its own resident server (and hydration
+    /// already refused to load a link whose session is gone).
+    /// direct links: ask the daemon. Without a daemon (in-process mode)
+    /// fall back to the flag recorded at construction/hydration time.
+    pub async fn link_is_connected(&self, lid: LinkId) -> bool {
+        let Some(link) = self.links.get(lid).await else { return false };
+        match &link.info.sink {
+            SinkConfig::Tmux { .. } => true,
+            SinkConfig::Raw => match &self.daemon {
+                Some(_) => crate::daemon::client::probe_link(lid).await.unwrap_or(false),
+                None => link.connected,
+            },
         }
     }
 
@@ -150,10 +186,24 @@ impl SessionManager {
             None => LinkId::new(),
         };
 
-        let transport = transport_factory::transport_for(spec.transport.clone()).await?;
-        let transport_kind: &'static str = transport.kind();
-        let mut transport_arc: Arc<dyn crate::transport::Transport> = Arc::from(transport);
+        // v0.5.0 (ADR 0009): with the daemon enabled, a direct link's REAL
+        // transport is created inside the daemon and the CLI only keeps a
+        // handle to it. That is what makes the link outlive this process.
+        // tmux links never take this path — tmux is already resident.
+        let daemon = match (&spec.sink, &self.daemon) {
+            (SinkConfig::Raw, Some(client)) => Some(Arc::clone(client)),
+            _ => None,
+        };
+        if let Some(client) = &daemon {
+            client.ensure().await?;
+            client.create_link(link_id, spec.transport.clone()).await?;
+        }
 
+        let mut transport_arc: Arc<dyn crate::transport::Transport> = match &daemon {
+            Some(_) => Arc::new(crate::daemon::DaemonTransport::new(link_id)),
+            None => Arc::from(transport_factory::transport_for(spec.transport.clone()).await?),
+        };
+        let transport_kind: &'static str = transport_arc.kind();
         let transport_mut: &mut dyn crate::transport::Transport =
             Arc::get_mut(&mut transport_arc)
                 .ok_or_else(|| Error::Config(
@@ -228,18 +278,21 @@ impl SessionManager {
             // (b) direct link bound to an existing pane: no window is
             //     created — the pane keeps whatever window it had.
             (SinkConfig::Raw, Some(pid)) => {
-                let buf = self.buffer_for(pid).await;
+                let bridge: Arc<dyn PaneBridge> = match &daemon {
+                    Some(client) => {
+                        client.create_pane(pid).await?;
+                        Arc::new(DaemonBridge::new(Arc::clone(client), pid))
+                    }
+                    None => {
+                        let buf = self.buffer_for(pid).await;
+                        Arc::new(DirectBridge::new_with_buffer(
+                            Arc::clone(&transport_arc), buf,
+                        ))
+                    }
+                };
                 let mut info = self.panes.get(pid).await.expect("checked above");
                 info.link_id = Some(link_id);
-                (
-                    None,
-                    pid,
-                    info,
-                    Some(Arc::new(DirectBridge::new_with_buffer(
-                        Arc::clone(&transport_arc), buf,
-                    )) as Arc<dyn PaneBridge>),
-                    None,
-                )
+                (None, pid, info, Some(bridge), None)
             }
 
             // (c) direct link with no pane: virtual window + first pane.
@@ -256,7 +309,18 @@ impl SessionManager {
                     tmux_window_handle: None,
                 });
                 let _ = w.add_pane(pid).await;
-                let buf = self.buffer_for(pid).await;
+                let bridge: Arc<dyn PaneBridge> = match &daemon {
+                    Some(client) => {
+                        client.create_pane(pid).await?;
+                        Arc::new(DaemonBridge::new(Arc::clone(client), pid))
+                    }
+                    None => {
+                        let buf = self.buffer_for(pid).await;
+                        Arc::new(DirectBridge::new_with_buffer(
+                            Arc::clone(&transport_arc), buf,
+                        ))
+                    }
+                };
                 (
                     Some(wid),
                     pid,
@@ -272,9 +336,7 @@ impl SessionManager {
                         window_id: Some(wid),
                         sink_handle: None,
                     },
-                    Some(Arc::new(DirectBridge::new_with_buffer(
-                        Arc::clone(&transport_arc), buf,
-                    )) as Arc<dyn PaneBridge>),
+                    Some(bridge),
                     Some(w),
                 )
             }
@@ -307,7 +369,26 @@ impl SessionManager {
             self.pane_bridges.lock().await.insert(pane_id, b);
         }
 
-        self.save_state().await?;
+        // ADR 0009: the binding only becomes LIVE at Attach — the daemon
+        // starts the pane's pump here, and keeps it running after this
+        // process exits. A failure here must not leave an orphaned
+        // transport behind, so tear the daemon link back down.
+        if let Some(client) = &daemon {
+            if let Err(e) = client.attach(pane_id, link_id).await {
+                let _ = client.delete_link(link_id).await;
+                return Err(e);
+            }
+        }
+
+        if let Err(e) = self.save_state().await {
+            // A failed save means the CLI exits with an error, so nothing
+            // will ever reference this link. Do not leave its transport
+            // (and a daemon that can therefore never idle-exit) behind.
+            if let Some(client) = &daemon {
+                let _ = client.delete_link(link_id).await;
+            }
+            return Err(e);
+        }
         Ok(LinkAddResult { link_id, window_id, pane_id })
     }
 
@@ -399,8 +480,9 @@ impl SessionManager {
             for pid in attached {
                 let bridge = self.pane_bridges.lock().await.remove(&pid);
                 if let Some(b) = bridge {
-                    // DirectBridge::close() stops the pump only — the
-                    // transport below is closed exactly once, on purpose.
+                    // DirectBridge::close() stops the pump only (in daemon
+                    // mode: Detach), so the transport below is closed
+                    // exactly once, on purpose.
                     let _ = b.close().await;
                 }
                 if let Some(mut info) = self.panes.get(pid).await {
@@ -408,7 +490,20 @@ impl SessionManager {
                     self.panes.insert(info).await;
                 }
             }
-            arc_link.transport.close().await?;
+            match &self.daemon {
+                // ADR 0009: the daemon owns the transport. DeleteLink
+                // closes it once and unbinds its panes — but keeps their
+                // slots and buffers, so the history is still readable and
+                // a later re-attach resumes where it left off.
+                Some(client) => {
+                    // Best effort: if the daemon is down the transport is
+                    // already gone, which is the state we wanted anyway.
+                    let _ = client.delete_link(id).await;
+                }
+                None => {
+                    arc_link.transport.close().await?;
+                }
+            }
         }
 
         self.links.remove(id).await;
@@ -607,6 +702,11 @@ impl SessionManager {
             let _ = b.close().await;
         }
         self.pane_buffers.lock().await.remove(&id);
+        // ADR 0009: drop the daemon's slot (and its buffer) too — `pane
+        // del` is a full teardown, unlike `pane detach`.
+        if let Some(client) = &self.daemon {
+            let _ = client.delete_pane(id).await;
+        }
         if let Some(lid) = info.link_id {
             if let Some(arc_link) = self.links.get(lid).await {
                 let mut active = arc_link.active_pane.lock().await;
@@ -670,10 +770,35 @@ impl SessionManager {
 
         // Build the bridge.
         let bridge: Arc<dyn PaneBridge> = match &arc_link.info.sink {
-            SinkConfig::Raw => {
-                let buf = self.buffer_for(pid).await;
-                Arc::new(DirectBridge::new_with_buffer(Arc::clone(&arc_link.transport), buf))
-            }
+            SinkConfig::Raw => match &self.daemon {
+                // ADR 0009: the daemon owns the pump and the buffer. It
+                // enforces the same Q1 rule locally (it must — two pumps
+                // on one transport would duplicate every byte into two
+                // buffers), so the metadata loop above and the daemon
+                // agree on which pane is active.
+                Some(client) => {
+                    if client.attach(pid, lid).await.is_err() {
+                        // The daemon may have restarted since this link
+                        // was created. Heal it from the persisted
+                        // transport spec, then bind again — this is what
+                        // makes `pane attach` a reconnect, not just a
+                        // metadata edit.
+                        client.ensure().await?;
+                        client
+                            .create_link(lid, arc_link.info.transport.clone())
+                            .await?;
+                        client.attach(pid, lid).await?;
+                    }
+                    Arc::new(DaemonBridge::new(Arc::clone(client), pid))
+                }
+                None => {
+                    let buf = self.buffer_for(pid).await;
+                    Arc::new(DirectBridge::new_with_buffer(
+                        Arc::clone(&arc_link.transport),
+                        buf,
+                    ))
+                }
+            },
             SinkConfig::Tmux { .. } => {
                 let tmux_arc = arc_link.tmux_sink.as_ref()
                     .ok_or_else(|| Error::Sink("tmux-backed link has no TmuxSink".into()))?
@@ -727,6 +852,11 @@ impl SessionManager {
         if let Some(b) = bridge {
             // P0-a: releases this pane's pump; the link's transport lives.
             let _ = b.close().await;
+        }
+        // ADR 0009: also tell the daemon directly — a hydrated pane has no
+        // cached bridge, but its pump in the daemon may still be running.
+        if let Some(client) = &self.daemon {
+            let _ = client.detach(pid).await;
         }
         if let Some(arc_link) = self.links.get(lid).await {
             let mut active = arc_link.active_pane.lock().await;
@@ -859,11 +989,43 @@ impl SessionManager {
     /// v0.4.1 (P0-3): before this split, both cases surfaced as
     /// `NotAttached`, which told the user their still-bound pane had
     /// never been attached — persisted state and runtime disagreed.
+    ///
+    /// v0.5.0 (ADR 0009): with the daemon enabled, direct panes get a
+    /// `DaemonBridge` **on demand** instead of only right after an
+    /// `attach`. That is what makes `data read/write` work from a process
+    /// that only loaded `state.json` — the transport and the buffer were
+    /// never in this process to begin with.
     async fn bridge_for(&self, pid: PaneId) -> Result<Arc<dyn PaneBridge>> {
         if let Some(b) = self.pane_bridges.lock().await.get(&pid).cloned() {
             return Ok(b);
         }
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+
+        // tmux-owned panes (sink_handle is Some) are never daemon-backed:
+        // tmux is already resident and holds their scrollback.
+        if let (Some(client), None) = (&self.daemon, info.sink_handle.as_ref()) {
+            return match info.link_id {
+                Some(lid) => {
+                    if crate::daemon::client::probe_link(lid).await.unwrap_or(false) {
+                        Ok(Arc::new(DaemonBridge::new(Arc::clone(client), pid)))
+                    } else {
+                        Err(Error::LinkNotConnected(lid))
+                    }
+                }
+                None => {
+                    // Detached direct pane: the daemon keeps its buffer so
+                    // the scrollback stays READABLE (a pane's core is its
+                    // buffer), while writes are refused there for want of
+                    // an attached link.
+                    if crate::daemon::client::probe_pane(pid).await.unwrap_or(false) {
+                        Ok(Arc::new(DaemonBridge::new(Arc::clone(client), pid)))
+                    } else {
+                        Err(Error::NotAttached(pid))
+                    }
+                }
+            };
+        }
+
         match info.link_id {
             Some(lid) => {
                 let connected = self

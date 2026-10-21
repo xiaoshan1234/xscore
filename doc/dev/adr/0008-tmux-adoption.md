@@ -1,5 +1,7 @@
 # ADR 0008: tmux adoption, real pane buffers, and `link add` auto-create
 
+> **Extended by [ADR 0009](./0009-daemon.md) (2026-10-20)** — direct-link transports and pane buffers now live in a resident daemon; the binding model is unchanged.
+
 - **Status:** Accepted
 - **Date:** 2026-10-20
 - **Deciders:** dev

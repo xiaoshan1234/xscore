@@ -1,16 +1,22 @@
-// crates/xscore/tests/cli_smoke.rs (v0.4.0)
+// crates/xscore/tests/cli_smoke.rs (v0.5.0)
 //
 // CLI smoke tests — run the actual `xscore` binary and verify its
 // stdout / stderr / exit code. `env!("CARGO_BIN_EXE_xscore")` is
 // provided by Cargo for integration tests.
 //
-// Isolation: every test gets its own HOME (state.json) AND its own
-// `XSCORE_SOCKET` (so tmux sessions never touch the user's `xscore`
-// server or another test's sessions). The HOME is wiped once per test
-// name per process, then left alone — multi-invocation tests rely on
-// state.json persisting between calls.
+// Isolation: every test gets its own HOME (state.json + the daemon
+// socket) AND its own `XSCORE_SOCKET` (so tmux sessions never touch the
+// user's `xscore` server or another test's sessions). The HOME is wiped
+// once per test name per process, then left alone — multi-invocation
+// tests rely on state.json persisting between calls.
 //
-// v0.4.0 semantics under test (ADR 0008):
+// v0.5.0 (ADR 0009) semantics under test:
+//   - a direct link's transport and pane buffer live in a resident
+//     daemon, so they survive the CLI process that created them
+//   - `daemon status` / `daemon stop` are the handle on that process
+//   - `link show` reports `connected` by probing the daemon live
+//
+// v0.4.0 semantics still under test (ADR 0008):
 //   - `link add` always yields link + (usually) window + pane
 //   - tmux links ADOPT the session's window/pane (`@N` / `%N` handles)
 //   - `link add --pane` binds a hollow pane, refuses tmux links, and
@@ -22,8 +28,24 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
+/// Base directory for per-test HOMEs.
+///
+/// Unix socket paths are capped at ~104 bytes (`sun_path`), and the
+/// daemon socket lives at `$HOME/.config/xscore/run/daemon.sock` (~31
+/// bytes of suffix). A long TMPDIR (a cache dir, say) would push the
+/// socket path past that limit, so fall back to the short system temp
+/// directory. The per-test HOME isolation itself is unchanged.
+fn temp_base() -> PathBuf {
+    let t = std::env::temp_dir();
+    if t.as_os_str().len() > 24 {
+        PathBuf::from("/tmp")
+    } else {
+        t
+    }
+}
+
 fn home_for(test_name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("xscore-test-{test_name}"))
+    temp_base().join(format!("xscore-test-{test_name}"))
 }
 
 /// Per-process record of HOMEs already wiped, so repeated calls within
@@ -41,11 +63,26 @@ fn xscore_for(test_name: &str) -> Command {
         g.insert(home.clone())
     };
     if first_touch {
+        // A daemon from an earlier run may still be holding this test's
+        // socket (a daemon with links never idle-exits, by design). Stop
+        // it BEFORE its HOME is wiped, so every run starts from a clean
+        // slate and no stray daemon outlives the suite.
+        let _ = xscore_bin(test_name).args(["daemon", "stop"]).output();
         let _ = std::fs::remove_dir_all(home.join(".config").join("xscore"));
     }
+    xscore_bin(test_name)
+}
+
+/// The raw command for a test's HOME/socket, with no wipe side effects.
+fn xscore_bin(test_name: &str) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_xscore"));
-    cmd.env("HOME", &home);
+    cmd.env("HOME", home_for(test_name));
     cmd.env("XSCORE_SOCKET", format!("xscore-test-{test_name}"));
+    // The daemon socket must live under this test's HOME. A developer
+    // shell (or WSL) often exports XDG_RUNTIME_DIR, which would move the
+    // socket somewhere every test shares — drop it so the documented
+    // HOME fallback applies.
+    cmd.env_remove("XDG_RUNTIME_DIR");
     cmd
 }
 
@@ -54,6 +91,16 @@ fn cleanup_tmux(test_name: &str) {
     let _ = Command::new("tmux")
         .args(["-L", &format!("xscore-test-{test_name}"), "kill-server"])
         .output();
+}
+
+/// Kill this test's daemon (best effort).
+///
+/// Called at the START of daemon tests (so no daemon from an earlier run
+/// can answer) and at the END (so a daemon holding a link — which never
+/// idle-exits, by design — doesn't outlive the test). Errors are ignored:
+/// "no daemon" is the state we're asking for.
+fn cleanup_daemon(test_name: &str) {
+    let _ = xscore_bin(test_name).args(["daemon", "stop"]).output();
 }
 
 /// Extract the value after a leading "key:" prefix on a single line.
@@ -166,6 +213,7 @@ fn xscore_link_add_default_creates_two_links_for_same_url() {
         .unwrap();
     let id2 = parse_id_from_stdout(&out2.stdout, "link");
     assert_ne!(id1, id2, "two add() calls should produce distinct link_ids");
+    cleanup_daemon("link_add_two_same_url");
 }
 
 // ----- v0.4.0 #1: direct link auto-creates window + pane -----
@@ -210,6 +258,7 @@ fn xscore_link_add_direct_creates_window_and_pane() {
     assert_eq!(link["sink"]["sink"], serde_json::json!("raw"));
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_daemon("link_add_direct_auto");
 }
 
 // ----- v0.4.0 #2: `link add --pane` binds an existing orphan pane -----
@@ -242,6 +291,7 @@ fn xscore_link_add_direct_with_pane() {
     assert_eq!(pane["link_id"], serde_json::json!(link_id));
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_daemon("link_add_direct_with_pane");
 }
 
 // ----- v0.4.0 #3: a pane already attached elsewhere is never stolen -----
@@ -281,6 +331,7 @@ fn xscore_link_add_direct_with_attached_pane_errors() {
 
     let _ = xscore().args(["link", "del", "--id", &link_a]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon("link_add_attached_pane");
 }
 
 // ----- v0.4.0 #4: tmux link adopts the session's window and pane -----
@@ -443,6 +494,7 @@ fn xscore_window_add_direct_link_errors() {
         "expected NotTmuxLink, got: {err}"
     );
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    cleanup_daemon("window_add_direct_errors");
 }
 
 // ----- v0.4.0 #9: `pane add --window` splits a real tmux window -----
@@ -521,6 +573,7 @@ fn xscore_link_del_direct_orphans_panes() {
         .stdout);
     assert!(pane["link_id"].is_null(), "pane should be orphaned: {pane}");
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon("link_del_direct_orphans");
 }
 
 // ----- v0.4.0 #12: link del removes tmux panes with the session -----
@@ -693,6 +746,7 @@ fn xscore_full_flow_create_pane_attach_data() {
     let _ = xscore().args(["window", "del", "--id", &window_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &auto_pane]).output();
+    cleanup_daemon("full_flow");
 }
 
 // ----- Q1: direct link 1-active-pane auto-detach -----
@@ -725,6 +779,7 @@ fn xscore_q1_direct_link_auto_detaches_old_active_pane() {
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &p1]).output();
     let _ = xscore().args(["pane", "del", "--id", &p2]).output();
+    cleanup_daemon("q1_auto_detach");
 }
 
 // ----- window add/list/del without a link -----
@@ -771,52 +826,293 @@ fn xscore_link_del_detaches_pane_keeps_pane_alive() {
     );
 
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon("link_del_detaches");
 }
 
-// ----- v0.4.1 (P0-3): binding survives a restart, connection does not -----
+// ----- v0.5.0 (ADR 0009): binding AND connection survive a restart -----
+//
+// v0.4.1 asserted the opposite (`connected: false`, write fails): the
+// transport lived in the process that created it, so every later
+// invocation saw a dead link. v0.5.0 moves the transport into the
+// resident daemon, so a *later process* must now find the link alive and
+// writable. This test is the inverse of the old one on purpose.
 
 #[test]
-fn xscore_direct_link_reports_not_connected_after_restart() {
-    let xscore = || xscore_for("direct_not_connected");
+fn xscore_direct_link_stays_connected_after_restart() {
+    let xscore = || xscore_for("direct_stays_connected");
+    cleanup_daemon("direct_stays_connected");
 
-    // Process 1: create a direct link. It auto-creates a window + pane,
-    // and the pane is genuinely attached *in this process*.
+    // Process 1: create a direct link. It auto-creates a window + pane.
     let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
-    // Process 2: the transport died with process 1. `link show` must
-    // say so instead of presenting a dead link as a live one.
+    // Process 2: the transport did NOT die with process 1 — the daemon
+    // holds it, so `link show` must report a live connection.
     let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
     assert!(ok(&show));
     let link = json(&show.stdout);
-    assert_eq!(link["connected"], serde_json::json!(false),
-        "hydrated direct link must report connected=false: {link}");
+    assert_eq!(link["connected"], serde_json::json!(true),
+        "direct link must stay connected across processes: {link}");
 
-    // The pane's *binding* is still real — that part must not be erased.
+    // The pane's binding is still real.
     let pane = json(&xscore()
         .args(["pane", "show", "--id", &pane_id])
         .output().unwrap().stdout);
     assert_eq!(pane["link_id"], serde_json::json!(link_id),
         "binding must survive the restart: {pane}");
 
-    // And data ops must explain the real problem (connection lost), not
-    // claim the pane was never attached.
+    // Process 3: and I/O actually works from a process that never had the
+    // transport. This is the whole point of v0.5.0.
+    let mut child = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(b"still-here\n").unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(),
+        "write on a daemon-backed link must succeed: {}",
+        String::from_utf8_lossy(&out.stderr));
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon("direct_stays_connected");
+}
+
+// ===== v0.5.0: the resident daemon (ADR 0009) =====
+
+/// Test 1 — the reason the daemon exists.
+///
+/// Three separate processes: one creates the link, one writes, one reads.
+/// Before v0.5.0 step 2 was impossible by construction (the transport died
+/// with the creating process), so this test is the real acceptance test
+/// for the feature.
+#[test]
+fn xscore_daemon_direct_link_survives_process() {
+    let name = "daemon_survives";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    // Process A: create the link.
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add), "link add failed: {}", String::from_utf8_lossy(&add.stderr));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    // Process B: write into the link the daemon is holding.
+    let mut child = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(b"hello\n").unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(),
+        "cross-process write failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    // `/bin/cat` echoes; give the daemon's pump time to drain it.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Process C: read it back.
+    let read = xscore().args(["data", "read", "--pane", &pane_id]).output().unwrap();
+    assert!(ok(&read), "cross-process read failed: {}", String::from_utf8_lossy(&read.stderr));
+    let s = String::from_utf8_lossy(&read.stdout);
+    assert!(s.contains("hello"),
+        "read from a third process must see the daemon's buffer, got: {s:?}");
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
+}
+
+/// Test 2 — `daemon status` names the link (and its pane) it is holding.
+#[test]
+fn xscore_daemon_status_lists_link() {
+    let name = "daemon_status";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    let status = xscore().args(["daemon", "status"]).output().unwrap();
+    assert!(ok(&status), "daemon status failed: {}", String::from_utf8_lossy(&status.stderr));
+    let v = json(&status.stdout);
+    assert_eq!(v["ok"], serde_json::json!(true), "{v}");
+    let links = v["status"]["links"].as_array().expect("links array");
+    assert!(links.iter().any(|l| l == &serde_json::json!(link_id)),
+        "status must list {link_id}: {v}");
+    let panes = v["status"]["panes"].as_array().expect("panes array");
+    let pane = panes.iter().find(|p| p["pane"] == serde_json::json!(pane_id))
+        .unwrap_or_else(|| panic!("status must list pane {pane_id}: {v}"));
+    assert_eq!(pane["link"], serde_json::json!(link_id),
+        "pane must be reported as attached: {pane}");
+    assert!(v["status"]["pid"].as_u64().unwrap() > 0, "pid missing: {v}");
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
+}
+
+/// Test 3 — `link show`'s `connected` is a live daemon probe.
+#[test]
+fn xscore_daemon_link_show_connected_true() {
+    let name = "daemon_connected";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
+    assert!(ok(&show));
+    let link = json(&show.stdout);
+    assert_eq!(link["connected"], serde_json::json!(true),
+        "a daemon-held link is connected: {link}");
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
+}
+
+/// Test 4 — stopping the daemon really does disconnect the link, and data
+/// ops say `LinkNotConnected` (not "you never attached anything").
+#[test]
+fn xscore_daemon_stopped_link_not_connected() {
+    let name = "daemon_stopped";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    let stop = xscore().args(["daemon", "stop"]).output().unwrap();
+    assert!(ok(&stop), "daemon stop failed: {}", String::from_utf8_lossy(&stop.stderr));
+
+    // The metadata is untouched; only the connection went away.
+    let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
+    assert!(ok(&show));
+    let link = json(&show.stdout);
+    assert_eq!(link["connected"], serde_json::json!(false),
+        "stopped daemon ⇒ connected=false: {link}");
+
+    let pane = json(&xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output().unwrap().stdout);
+    assert_eq!(pane["link_id"], serde_json::json!(link_id),
+        "the binding must survive `daemon stop`: {pane}");
+
     let write = xscore()
         .args(["data", "write", "--pane", &pane_id])
         .output().unwrap();
-    assert!(!write.status.success(), "write on a disconnected link must fail");
+    assert!(!write.status.success(), "write to a stopped daemon must fail");
     let err = String::from_utf8_lossy(&write.stderr);
     assert!(
         err.contains("not connected") || err.contains("LinkNotConnected"),
         "expected LinkNotConnected, got: {err}"
     );
-    assert!(
-        !err.contains("not attached"),
-        "must not report NotAttached for a bound pane: {err}"
-    );
+    assert!(!err.contains("not attached"),
+        "must not report NotAttached for a bound pane: {err}");
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
+}
+
+/// Test 5 — a pane's buffer belongs to the daemon, so detaching in one
+/// process leaves the history readable in the next, and a re-attach picks
+/// up where it left off.
+#[test]
+fn xscore_daemon_buffer_survives_detach_across_processes() {
+    let name = "daemon_detach";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    // Process A: link + write.
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    let mut child = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(b"kept\n").unwrap();
+    }
+    assert!(child.wait_with_output().unwrap().status.success());
+
+    // Let the pump drain cat's echo BEFORE we stop the pump.
+    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    // Process B: detach.
+    let detach = xscore().args(["pane", "detach", "--pane", &pane_id]).output().unwrap();
+    assert!(ok(&detach), "detach failed: {}", String::from_utf8_lossy(&detach.stderr));
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Process C: the buffer is still there (a pane is its buffer), even
+    // though the pane is orphaned.
+    let read = xscore().args(["data", "read", "--pane", &pane_id]).output().unwrap();
+    assert!(ok(&read), "read after detach failed: {}", String::from_utf8_lossy(&read.stderr));
+    let s = String::from_utf8_lossy(&read.stdout);
+    assert!(s.contains("kept"),
+        "detached pane must keep its buffer across processes, got: {s:?}");
+
+    // Writing is refused while detached (no link to write to) ...
+    let refused = xscore().args(["data", "write", "--pane", &pane_id]).output().unwrap();
+    assert!(!refused.status.success(), "write on a detached pane must fail");
+
+    // ... and re-attaching makes the pane writable again, into the SAME
+    // buffer: the old bytes are still ahead of the new ones.
+    let attach = xscore()
+        .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
+        .output().unwrap();
+    assert!(ok(&attach), "re-attach failed: {}", String::from_utf8_lossy(&attach.stderr));
+
+    let mut child = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        use std::io::Write;
+        child.stdin.as_mut().unwrap().write_all(b"more\n").unwrap();
+    }
+    assert!(child.wait_with_output().unwrap().status.success());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let read = xscore().args(["data", "read", "--pane", &pane_id]).output().unwrap();
+    assert!(ok(&read));
+    let s = String::from_utf8_lossy(&read.stdout);
+    assert!(s.contains("kept") && s.contains("more"),
+        "re-attach must append to the same buffer, got: {s:?}");
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
 }

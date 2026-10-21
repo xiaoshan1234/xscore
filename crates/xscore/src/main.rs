@@ -1,10 +1,13 @@
 // main.rs — the binary entry point.
 //
 // All command parsing is done via clap (in `cli::Cli`); this file is just
-// the bootstrap that wires the parser output to the manager methods. The
-// manager holds the in-memory registry; in a future task it'll be hydrated
-// from `~/.config/xscore/state/` on startup and persisted on shutdown
-// (deferred to a persistence slice — task-15+ territory).
+// the bootstrap that wires the parser output to the manager methods.
+//
+// v0.5.0 (ADR 0009): the manager is built with the resident daemon
+// enabled, so direct links (shell/serial/ssh) hand their transport and
+// their pane buffers to `xscore daemon serve` instead of holding them
+// here. Without that, every `data write` in a new process was impossible
+// by construction: the transport died with the process that created it.
 
 use std::sync::Arc;
 use clap::Parser;
@@ -18,10 +21,23 @@ async fn main() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let cli = Cli::parse();
 
+    // `daemon serve` must NOT hydrate state: it owns no metadata, and a
+    // stale/incompatible state.json must not stop the daemon from coming
+    // up (that would take every direct link down with it).
+    if matches!(&cli.command, Commands::Daemon(_)) {
+        if let Commands::Daemon(cmd) = cli.command {
+            return xscore::cli::daemon::run(cmd).await;
+        }
+        unreachable!("checked by matches! above");
+    }
+
     // Hydrate the manager from disk (task-15). On first run, this returns
     // an empty manager. After `xscore link add`, state is saved and the
     // next invocation sees the link.
-    let mgr = Arc::new(SessionManager::load_from_state().await?);
+    let mut mgr = SessionManager::load_from_state().await?;
+    // v0.5.0: direct links outlive this process — the daemon owns them.
+    mgr.enable_daemon(Arc::new(xscore::daemon::DaemonClient::new()));
+    let mgr = Arc::new(mgr);
     match cli.command {
         Commands::Link(c) => link::run(mgr, c).await?,
         Commands::Window(c) => window::run(mgr, c).await?,
@@ -30,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
             // Per-pane data ops (read / write / resize) — task-11.
             xscore::cli::data::run(mgr, c).await?;
         }
+        Commands::Daemon(_) => unreachable!("handled before hydration"),
         Commands::Config => {
             // AppConfig is a separate concern; deferred to a later task.
             // Without this stub, clap would reject `xscore config` as an

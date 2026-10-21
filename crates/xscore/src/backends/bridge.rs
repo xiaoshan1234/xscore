@@ -1,17 +1,24 @@
-// backends/bridge.rs (v0.4.0 — pane buffers + detach that doesn't kill, ADR 0008)
+// backends/bridge.rs (v0.5.0 — pane buffers + daemon bridge, ADR 0008/0009)
 //
 // The bridge is the per-pane runtime that exposes `read` / `write` /
-// `resize` / `close`. Two concrete kinds:
+// `resize` / `close`. Three concrete kinds:
 //
-//   - `DirectBridge`: the pane's BUFFER. A background task continuously
-//     drains the link's `Arc<dyn Transport>` into a `RingBuffer`; `read`
-//     serves a snapshot of that buffer. This is what makes "the pane's
-//     core is its buffer" true for raw links (P0-b in v0.4.0).
+//   - `DirectBridge`: the pane's BUFFER, in-process. A background task
+//     continuously drains the link's `Arc<dyn Transport>` into a
+//     `RingBuffer`; `read` serves a snapshot of that buffer. Used by
+//     in-process callers (the data_smoke tests, and any embedding) where
+//     the transport and the pane live in the same process.
+//
+//   - `DaemonBridge` (v0.5.0): the SAME design, but the pump and the
+//     buffer live in the resident daemon (ADR 0009). Every method is a
+//     request over the Unix socket, so a pane's history and its link's
+//     transport survive the CLI process that created them.
 //
 //   - `TmuxBridge`: wraps the link's `TmuxSink` (via `Weak<TmuxSink>` to
 //     avoid reference cycles). `read` = `tmux capture-pane` (tmux's own
 //     scrollback IS the buffer), `write` = `send-keys`, `resize` =
 //     `resize-pane`, `close` = `kill-pane` (a real tmux pane dies).
+//     tmux is already resident, so this path never involves the daemon.
 //
 // `close()` means "release THIS pane's hold on the resource", never
 // "kill a shared resource" (P0-a):
@@ -184,6 +191,57 @@ impl PaneBridge for DirectBridge {
             handle.abort();
         }
         Ok(())
+    }
+}
+
+/// Bridge over the resident daemon (v0.5.0, ADR 0009).
+///
+/// Same contract as `DirectBridge` from the outside — `read` is a
+/// non-destructive snapshot of the pane's scrollback, `write` pushes
+/// bytes at the link — but both the buffer and the transport belong to
+/// the daemon, so they outlive this process. `close()` releases only
+/// this pane's binding (`Detach`); the link's transport keeps running.
+#[derive(Debug)]
+pub struct DaemonBridge {
+    client: Arc<crate::daemon::client::DaemonClient>,
+    pane: crate::core::PaneId,
+}
+
+impl DaemonBridge {
+    pub fn new(
+        client: Arc<crate::daemon::client::DaemonClient>,
+        pane: crate::core::PaneId,
+    ) -> Self {
+        Self { client, pane }
+    }
+}
+
+#[async_trait]
+impl PaneBridge for DaemonBridge {
+    fn kind(&self) -> &'static str { "daemon" }
+
+    async fn read(&self, buf: &mut [u8]) -> Result<usize> {
+        // The daemon already applied the "wait up to 200 ms, then report
+        // nothing" rule, so this is a plain copy-out.
+        let bytes = self.client.read(self.pane, buf.len()).await?;
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+
+    async fn write(&self, data: &[u8]) -> Result<usize> {
+        self.client.write(self.pane, data).await
+    }
+
+    async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.client.resize(self.pane, cols, rows).await
+    }
+
+    async fn close(&self) -> Result<()> {
+        // P0-a: detach stops OUR pump. The daemon keeps the transport
+        // (other panes / a later re-attach still need it) and keeps the
+        // buffer (so the history is still readable when detached).
+        self.client.detach(self.pane).await
     }
 }
 
