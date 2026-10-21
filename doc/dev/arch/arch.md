@@ -1,14 +1,6 @@
 # Architecture Diagrams
 
-Inline Mermaid diagrams for the xscore architecture. Each block below renders
-in any Markdown preview that supports Mermaid (GitHub, GitLab, IDE preview,
-Obsidian, etc.), or paste into https://mermaid.live for an instant check.
 
-If you need a standalone SVG (e.g. for a slide deck), paste a diagram into
-https://mermaid.live and use its export panel, or run any Mermaid CLI
-(e.g. `npm i -g @mermaid-js/mermaid-cli`) against the diagram body. The
-`mermaid` fenced blocks here are the source of truth — there are no
-separate source files to keep in sync.
 
 ## 1. Link × Window × Pane topology
 
@@ -279,22 +271,3 @@ graph LR
     URL -->|FORBIDDEN| CORE
     URL -->|FORBIDDEN| TRANSPORT
 ```
-
-## Cross-references
-
-- [`overview.md`](../../roadmap/overview.md) — text version of the architecture
-- [ADR 0001](../../adr/0001-link-pane-model.md) — Link × Pane model rationale
-- [ADR 0002](../../adr/0002-transport-sink-split.md) — Transport × Sink split rationale
-- [ADR 0003](../../adr/0003-external-tmux-server.md) — External tmux server rationale
-- [ADR 0005](../../adr/0005-add-open-close-del-verbs.md) — four-verb `link` tree (replaces the archived ADR 0004)
-
-## Updating
-
-When the architecture changes:
-
-1. Edit the `mermaid` block directly in this file.
-2. If the change is structural (new trait, new registry, new module), update
-   both `overview.md` and the relevant ADR **before** touching the diagram.
-3. Don't let a diagram drift from `overview.md`. The text and the diagram
-   are a pair — they describe the same architecture, and drift between them
-   is a bug, not a stylistic difference.
