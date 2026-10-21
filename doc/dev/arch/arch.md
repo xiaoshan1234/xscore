@@ -103,10 +103,11 @@ pub enum SessionBackend {
     /// This session IS a tmux session. Windows and panes are read from tmux;
     /// xscore stores only the handles it adopted.
     Tmux {
-        /// This machine, or an ssh host. See §6.
+        /// This machine, or an ssh host. Defined in §6.
         host: TmuxHostConfig,
-        /// None = tmux's default socket, Some("xscore") = `tmux -L xscore`.
-        socket: Option<String>,
+        /// Which tmux server on that host. Resolved *on that host*, so a named
+        /// socket is a different file on a different machine. Defined in §6.
+        socket: TmuxSocket,
         /// tmux session name. Deliberately NOT derived from SessionId:
         /// tmux sessions are user-visible and user-nameable.
         session: String,
@@ -311,26 +312,31 @@ graph TB
         TS["session + 2 windows + 3 panes + 3 links<br/>handles: @N and %N only"]
     end
 
-    subgraph TM["tmux server"]
-        TMS["session work<br/>windows, panes, layout<br/>THE source of truth"]
-    end
+    H["ssh client → sshd → login shell<br/>present only when host is Ssh"]
+    C["tmux client<br/>one exec per command"]
+    TMS["tmux server on that host<br/>session work: windows, panes, layout<br/>THE source of truth"]
 
     SESS --> ST
-    M0 --> TMS
-    M1 --> TMS
-    M2 --> TMS
+    M0 --> C
+    M1 --> C
+    M2 --> C
+    H -.-> C
+    C -->|"unix socket: -L name, -S path, or default"| TMS
 
     classDef sess fill:#f3e5f5,stroke:#7b1fa2
     classDef st fill:#fff3e0,stroke:#f57c00
+    classDef hop fill:#e8f5e9,stroke:#2e7d32
     classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
     class W0,W1,Q0,Q1,Q2,M0,M1,M2 sess
     class TS st
+    class H,C hop
     class TMS ext
 ```
 
 The difference between the two pictures is the whole design: **native keeps
 bytes, tmux keeps structure.** xscore keeps handles in both cases, and bytes
-only in the native case.
+only in the native case. The tmux picture holds whether its server is on this
+machine or across ssh: the hop changes the path, not the model (§6).
 
 ## 6. tmux over SSH
 
@@ -343,7 +349,7 @@ pub enum SessionBackend {
     Native,
     Tmux {
         host: TmuxHostConfig,
-        socket: Option<String>,
+        socket: TmuxSocket,
         session: String,
     },
 }
@@ -354,7 +360,53 @@ pub enum TmuxHostConfig {
     /// (`-p 2222`, `-i ~/.ssh/work`). Persisted; never a secret.
     Ssh { destination: String, args: Vec<String> },
 }
+
+pub enum TmuxSocket {
+    /// No flag: whatever the host calls its default socket.
+    Default,
+    /// `-L <name>`: resolved on the host, under its own `TMUX_TMPDIR`.
+    Named(String),
+    /// `-S <path>`: absolute on the host. Used when the socket had to be
+    /// resolved rather than guessed — see "Sockets are per host" below.
+    Path(String),
+}
 ```
+
+### Same protocol, different path
+
+A local tmux server and a remote one speak the same commands, hold the same
+`@N` / `%N` handles, and are refreshed the same way. What differs is the path to
+them:
+
+| | `TmuxHostConfig::Local` | `TmuxHostConfig::Ssh` |
+|---|---|---|
+| process chain | `xscore → tmux` | `xscore → ssh → sshd → login shell → tmux` |
+| who authenticates | nobody | the user's ssh identity and config |
+| cost per command | fork + exec, ~1 ms | + one round trip (5 ms shared, 50–300 ms cold) |
+| socket namespace | this machine's | **that machine's** — `-L work` is a different file there |
+| host is down | tmux starts a server, or fails fast | `TmuxUnreachable`; no rows pruned |
+| attach | `tmux attach -t work` | `ssh -t <dest> tmux attach -t work` |
+| tmux version | known | whatever the remote runs |
+
+Everything else is identical: the same command set, the same handle formats, the
+same capture/paste path, the same refresh. So the rule is:
+
+> **Nothing above `TmuxHost` may branch on local vs ssh.** If a caller needs to
+> know which one it has, the abstraction has leaked.
+
+### Sockets are per host
+
+`-L work` resolves to `$TMUX_TMPDIR` (usually `/tmp`) `/tmux-<uid>/work` **on
+the host that runs the command**. `TmuxSocket::Named("work")` is therefore not a
+location but a name to be resolved on the target: local `-L work` and remote
+`-L work` are two unrelated servers.
+
+`TmuxSocket::Path` exists for the one case where "the default" would be silently
+wrong: when xscore is itself launched from inside tmux, `$TMUX` is set and a bare
+`tmux` targets *that* server rather than the default one. Inheriting the variable
+would make `session new` depend on where the user happened to run it, so the
+socket is resolved once at session creation and stored as a path. A row never
+depends on the environment of the process that later reads it.
 
 ### Control is request/response, not a byte stream
 
@@ -732,6 +784,7 @@ Notes:
 | `Link.active_pane` (Q1 ledger) | exclusivity follows from "one link, one pane" |
 | `SinkConfig::{Raw, Tmux}` | replaced by `SessionBackend`; a link no longer knows about tmux |
 | `?tmux=on\|auto\|local\|remote` | tmux-ness is a session property |
+| `socket: Option<String>` | replaced by `TmuxSocket { Default, Named, Path }`: a named socket resolves on the *host*, so a name is not a location |
 | `WindowInfo.tmux_window_handle`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux` / `PaneBackend::Tmux` |
 | `WindowLayout` (5 variants) | no consumer; tmux owns layout, native has no renderer |
 | `link open` / `link close` | `session attach` / `session kill` / `session forget` |
