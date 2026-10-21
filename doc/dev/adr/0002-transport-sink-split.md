@@ -1,5 +1,7 @@
 # ADR 0002: Split Transport and Sink (vs flat SessionBackend)
 
+> **Revised by [ADR 0010](./0010-session-layer-and-control-mode.md) (2026-10-21)** — `Sink` is no longer an optional per-link policy object; it is a per-link demultiplexer present on every link (`dispatch -> Data{key}/Event`). `capacity`/`grant`/`revoke` are gone.
+
 - **Status:** Accepted (Revised 2026-10-20 — see [ADR 0007 v2](./0007-raw-default-tmux-opt-in.md); Sink is still optional; `RawSink` is the no-sink marker for raw links, `TmuxSink` for tmux-backed links. The `Box<dyn Sink>` on Link is unchanged.)
 - **Date:** 2026-10-16 (revised 2026-10-19, again 2026-10-20)
 - **Deciders:** dev

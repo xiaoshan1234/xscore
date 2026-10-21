@@ -21,7 +21,8 @@ This file is the shape, not the argument. Rationale lives in the ADRs:
 | [0006](../adr/0006-window-concept.md) | Window tier |
 | [0007 v2](../adr/0007-raw-default-tmux-opt-in.md) | Decoupled entities, buffer-per-pane, Q1/Q2 |
 | [0008](../adr/0008-tmux-adoption.md) | tmux is the source of truth; `@N` / `%N` anchors |
-| [0009](../adr/0009-daemon.md) | Resident daemon owns native transports and buffers |
+| [0009](../adr/0009-daemon.md) | Resident daemon owns every live connection (native transports and control clients) |
+| [0010](../adr/0010-session-layer-and-control-mode.md) | Session owns the backend; tmux via control mode, one link per session |
 
 ## 0. The model in one screen
 

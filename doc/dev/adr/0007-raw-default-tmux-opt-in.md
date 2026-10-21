@@ -2,6 +2,8 @@
 
 > **Superseded in part by [ADR 0008](./0008-tmux-adoption.md) (2026-10-20)** — creation semantics changed from "no auto window/pane" to "auto-create + tmux adoption".
 
+> **Revised by [ADR 0010](./0010-session-layer-and-control-mode.md) (2026-10-21)** — the raw/tmux split on `Link` is gone: `SessionBackend` decides, and a tmux session owns exactly one `Control` link.
+
 - **Status:** Accepted (rewrite — this ADR supersedes the previous
   ADR 0007 from 2026-10-19 which only narrowed raw vs tmux)
 - **Date:** 2026-10-20 (first version: 2026-10-19)

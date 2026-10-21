@@ -1,5 +1,7 @@
 # ADR 0001: Model sessions as Link × Window × Pane (not flat Session)
 
+> **Revised by [ADR 0010](./0010-session-layer-and-control-mode.md) (2026-10-21)** — the 3-tier hierarchy is scoped by backend: a `Pipe` link serves at most one pane, a `Control` link serves every pane of its session via `link_key = %N`.
+
 - **Status:** Accepted (Revised 2026-10-20 — see [ADR 0007 v2](./0007-raw-default-tmux-opt-in.md); the 3-tier Link × Window × Pane hierarchy is REPLACED by a flat 3-entity decoupled model — Link, Pane, and Window are now independent entities with Option<> associations on Pane)
 - **Date:** 2026-10-16 (revised 2026-10-19, again 2026-10-20)
 - **Deciders:** dev

@@ -1,5 +1,7 @@
 # ADR 0006: Window — a 3rd-tier logical concept between Link and Pane
 
+> **Revised by [ADR 0010](./0010-session-layer-and-control-mode.md) (2026-10-21)** — for tmux-backed sessions `Window` mirrors a tmux window (`@N`) and layout belongs to tmux; the pure-UI reading applies to native sessions only.
+
 - **Status:** Accepted (Revised 2026-10-20 — see [ADR 0007 v2](./0007-raw-default-tmux-opt-in.md); Window is now a pure UI layout container — INDEPENDENT of links. No `WindowInfo.link_id`, no `tmux_window_index`. Panes are orphan-creatable; window assignment is via `PaneInfo.window_id: Option<WindowId>`)
 - **Date:** 2026-10-16 (revised 2026-10-19, again 2026-10-20)
 - **Deciders:** dev
