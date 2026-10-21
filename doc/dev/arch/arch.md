@@ -41,7 +41,8 @@ Session ── workspace; 1:1 with a tmux session, or standalone
 | where it runs | this machine | this machine, or an ssh host (§6) |
 | Window | xscore grouping; no layout engine | mirrors a tmux window (`@N`) |
 | Pane | xscore buffer + geometry | is a tmux pane (`%N`) |
-| Link endpoint | `Pipe` — a byte stream | `Screen` — capture / send-keys |
+| Link endpoint | `Pipe` — xscore owns the pty/device/channel | `TmuxPane` — a control client feeds it |
+| who feeds the pane buffer | the daemon's pump | `%output` from the control client |
 | survives CLI exit | yes (daemon) | yes (tmux) |
 | attach a human | n/a | `exec tmux attach` |
 | multi-client | no | yes |
@@ -117,8 +118,8 @@ pub enum SessionBackend {
 
 `Backend::Tmux` is the 1:1 correspondence held as a **pointer, not a mirror**.
 xscore does not keep a second copy of tmux's structure that could drift; when a
-command touches a tmux-backed session it **refreshes that one session** from
-tmux (see §7) and acts on what tmux reports.
+command touches a tmux-backed session it reads that session's **live** state
+from its control client (see §7), which pushes changes as they happen.
 
 ## 2. Window
 
@@ -178,8 +179,8 @@ the channel:
 
 - native pane → `RingBuffer` (64 KiB) in the daemon (or in-process in tests).
   Survives `detach`; read is a non-destructive snapshot.
-- tmux pane → no local buffer. tmux *is* the scrollback; each read is a
-  `capture-pane`.
+- tmux pane → the same `RingBuffer`, fed by `%output` from the control client.
+  tmux additionally keeps its own scrollback, reachable with `capture-pane`.
 
 ## 4. Link and Endpoint
 
@@ -191,31 +192,49 @@ pub struct LinkInfo {
     pub session_id: SessionId,
     pub name: String,
     pub created_at: DateTime<Utc>,
-    /// What this link is attached to. The tmux session is NOT repeated here:
-    /// it is implied by `session_id` (`SessionInfo::backend`). Only the pane
-    /// handle is local to the link, so a session rename can never leave a
-    /// stale name behind in a link.
+    /// The tmux session is implied by `session_id` (`SessionInfo::backend`),
+    /// so a session rename can never leave a stale name here.
     pub endpoint: EndpointRef,
 }
 
 pub enum EndpointRef {
-    /// shell / serial / ssh — a byte stream, owned by the daemon.
+    /// shell / serial / ssh: xscore owns the pty, the device or the channel.
     Pipe(TransportConfig),
-    /// A tmux pane in this session's tmux session.
-    Screen { pane: String },   // "%N"
+    /// A pane in this session's tmux server. xscore owns nothing: it holds a
+    /// control-mode client and receives the pane's bytes from it.
+    TmuxPane { pane: String },   // "%N"
 }
 
 // Runtime, never serialized:
 pub enum Endpoint {
     Pipe(Arc<dyn Transport>),
-    Screen { tmux: Arc<TmuxSession>, pane: String },
+    TmuxPane { control: Arc<TmuxControl>, pane: String },
 }
 ```
 
-`Endpoint` is the honest split. A tmux pane cannot pretend to be a byte stream:
-reads are non-destructive screen snapshots, writes are key injection, and
-binary output is not recoverable. Stating that once here is better than
-discovering it per call site.
+### A tmux pane is a stream, not a screen
+
+Earlier drafts called this endpoint `Screen`, on the grounds that `capture-pane`
+returns a rendered grid and there is no byte stream. That is true of
+`capture-pane` and **false of tmux**. Control mode streams every byte the pane's
+pty produces (measured on tmux 3.5a):
+
+```
+%output %0 TICK\015\012
+%output %1 \033[?2004hloner@WinLite \033[0;36mxscore\033[0m $ 
+%output %0 \015\033[K\015HELLO\015\012
+```
+
+`\ooo` is an octal byte, `\\` a literal backslash. So a tmux pane carries
+**terminal bytes**, the same shape as reading a pty. What differs:
+
+- **who owns the pty** — tmux, not xscore;
+- **the framing** — one `%output` notification per write, escaped;
+- **no replay** — output produced before the client attached is not re-sent.
+  History exists only as scrollback, reachable with `capture-pane -S -`.
+
+That last point makes `capture-pane` a *different verb*, not the read path:
+"show me the rendered screen" rather than "give me the bytes".
 
 ### Every link is exclusive
 
@@ -224,32 +243,35 @@ becomes the only rule: **a link is handed to at most one pane**. Multi-pane is a
 *backend* capability — `Backend::Tmux` gives you N panes by giving you N links,
 one per tmux pane.
 
-That is also why `Sink` is retired (§10): `capacity` / `grant` / `revoke` only
+That is also why `Sink` is retired (§11): `capacity` / `grant` / `revoke` only
 existed to express "this link may be shared", and after this change nothing may.
 
 ### Who owns the stream
 
-`Pipe` is not one mechanism. Three families sit behind it, and they do not
-behave alike:
+Four mechanisms, one shape:
 
-| link | who owns the stream | what `read` returns | `resize` means |
+| link | who owns the stream | `read` returns | `resize` means |
 |---|---|---|---|
-| `serial://` | xscore, a device fd | raw device bytes | nothing (no size) |
-| `shell://` | xscore, a **pty** | terminal output, escapes included | `TIOCSWINSZ` |
+| `serial://` | xscore, a device fd | device bytes | nothing (no size) |
+| `shell://` | xscore, a **pty** | terminal bytes | `TIOCSWINSZ` |
 | `ssh://` | xscore, a TCP socket + SSH channel | channel bytes | channel `window-change` |
-| `tmux://` (any host) | **tmux** | a rendered screen (`Screen`, not `Pipe`) | `resize-pane` |
+| tmux pane | **tmux** | terminal bytes via `%output` | `resize-pane` |
 
-Two rules follow, and they belong in the design rather than in a bug report:
+The uniform shape is the point: every endpoint produces bytes into the pane's
+`RingBuffer`, so `data read` has one implementation. What varies is only who
+owns the underlying stream and how a write is encoded (`pty write` vs
+`send-keys`).
+
+Two rules follow:
 
 1. **A shell link must allocate a pty.** With a plain pipe the child
-   block-buffers stdout (output appears only at 4 KiB or exit), `isatty` is
-   false, echo and job control are gone, and `vim`, `sudo`, `python -i` and every
-   TUI take their non-interactive path. A "shell session manager" that cannot
-   run an interactive program is not one.
-2. **`resize` must not lie.** It is real only where someone owns the size:
-   `TIOCSWINSZ` for a pty, `window-change` for SSH, `resize-pane` for tmux. For a
-   serial link there is no size, so the call must fail explicitly instead of
-   returning ok and storing the numbers in `PaneInfo`.
+   block-buffers stdout, `isatty` is false, and echo, job control and
+   `SIGWINCH` are gone: `vim`, `sudo`, `python -i` all take their
+   non-interactive path. A session manager for shells that cannot run an
+   interactive program is not one.
+2. **`resize` must not lie.** It is real only where someone owns a size. A
+   serial link has none, so the call must fail explicitly instead of returning
+   ok and storing numbers in `PaneInfo`.
 
 ### What a link is not
 
@@ -314,292 +336,197 @@ graph TB
 ### tmux-backed session
 
 ```mermaid
-graph TB
-    subgraph SESS["session work — Backend::Tmux"]
-        W0["window @0"]
-        W1["window @1"]
-        Q0["pane %0"]
-        Q1["pane %1"]
-        Q2["pane %2"]
-        M0["link m0<br/>Screen %0"]
-        M1["link m1<br/>Screen %1"]
-        M2["link m2<br/>Screen %2"]
-        W0 --> Q0
-        W0 --> Q1
-        W1 --> Q2
-        Q0 --> M0
-        Q1 --> M1
-        Q2 --> M2
-    end
+graph LR
+    SRV["tmux server<br/>session work<br/>structure + one pty per pane"]
+    CTL["TmuxControl<br/>one client per (host, socket, session)<br/>held by the daemon"]
+    BUF["pane buffers<br/>one RingBuffer per %N"]
+    CLI["CLI<br/>data read/write, pane ls, show"]
 
-    subgraph ST["state.json"]
-        TS["session + 2 windows + 3 panes + 3 links<br/>handles: @N and %N only"]
-    end
+    SRV -->|"%output %N<br/>the pane's bytes"| CTL
+    SRV -->|"%window-add, %layout-change, %exit"| CTL
+    CTL -->|"send-keys, split-window, kill-pane"| SRV
+    CTL --> BUF
+    BUF --> CLI
+    CTL -->|"structure events"| CLI
 
-    H["ssh client → sshd → login shell<br/>present only when host is Ssh"]
-    C["tmux client<br/>one exec per command"]
-    TMS["tmux server on that host<br/>session work: windows, panes, layout<br/>THE source of truth"]
-
-    SESS --> ST
-    M0 --> C
-    M1 --> C
-    M2 --> C
-    H -.-> C
-    C -->|"unix socket: -L name, -S path, or default"| TMS
-
-    classDef sess fill:#f3e5f5,stroke:#7b1fa2
-    classDef st fill:#fff3e0,stroke:#f57c00
-    classDef hop fill:#e8f5e9,stroke:#2e7d32
     classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
-    class W0,W1,Q0,Q1,Q2,M0,M1,M2 sess
-    class TS st
-    class H,C hop
-    class TMS ext
+    classDef ctl fill:#e8f5e9,stroke:#2e7d32
+    class SRV ext
+    class CTL ctl
 ```
 
-The difference between the two pictures is the whole design: **native keeps
-bytes, tmux keeps structure.** xscore keeps handles in both cases, and bytes
-only in the native case. The tmux picture holds whether its server is on this
-machine or across ssh: the hop changes the path, not the model (§6).
+When the server is across ssh (§6) there is one extra segment on the same
+bidirectional edge — `ssh <dest>` — and nothing else changes.
+
+The difference between the two pictures is the whole design: **both backends end
+in a pane buffer**, so `data read` is one implementation. Native differs only in
+that xscore owns the pty; tmux differs only in that a control client feeds the
+buffer and pushes structure events instead of us polling for them.
 
 ## 6. tmux over SSH
 
-A tmux server may be reachable only from another machine — that is where the
-sessions people most want xscore to manage usually live. So the host is part of
-the backend, not an afterthought:
+A tmux server may be reachable only from another machine. Since §4 established
+that a session is fed by **one long-lived control client**, remote is one extra
+segment in that client's command, not a second mechanism:
 
-```rust
-pub enum SessionBackend {
-    Native,
-    Tmux {
-        host: TmuxHostConfig,
-        socket: TmuxSocket,
-        session: String,
-    },
-}
-
-pub enum TmuxHostConfig {
-    Local,
-    /// `user@box`, plus the ssh flags that are part of "which server is this"
-    /// (`-p 2222`, `-i ~/.ssh/work`). Persisted; never a secret.
-    Ssh { destination: String, args: Vec<String> },
-}
-
-pub enum TmuxSocket {
-    /// No flag: whatever the host calls its default socket.
-    Default,
-    /// `-L <name>`: resolved on the host, under its own `TMUX_TMPDIR`.
-    Named(String),
-    /// `-S <path>`: absolute on the host. Used when the socket had to be
-    /// resolved rather than guessed — see "Sockets are per host" below.
-    Path(String),
-}
+```
+ssh -o BatchMode=yes <args...> <destination> tmux -L <sock> -C attach -t work
 ```
 
-### Same protocol, different path
+stdin and stdout of that `ssh` process are the control channel. Control
+commands go in as lines; `%output`, `%begin/%end` and every notification come
+back on the same channel. One connection per managed session, in both
+directions.
 
-A local tmux server and a remote one speak the same commands, hold the same
-`@N` / `%N` handles, and are refreshed the same way. What differs is the path to
-them:
+`-C` rather than `-CC`: `-CC` additionally disables the terminal echo that only
+exists when the client has a tty, and a pipe-based client has none. (Verified on
+3.5a: `tmux -C attach` works with stdin/stdout as pipes.)
 
-| | `TmuxHostConfig::Local` | `TmuxHostConfig::Ssh` |
+### Why this is not the `ThroughTransport` mistake
+
+An earlier draft rejected running tmux commands through a `Transport`, because a
+raw stream carries prompts, banners and partial writes, and carving one command's
+output out of it requires a parser we would have to invent and then keep
+correct.
+
+Control mode is the opposite case. The framing already exists and is part of
+tmux's interface: `%begin <ts> <num> <flags>` opens a command's reply, `%end` /
+`%error` closes it, and `%output`/`%layout-change`/… live in a separate
+namespace. We parse a protocol tmux defines rather than guessing where output
+stops. The rule that survives is narrower and still true: **do not multiplex
+command control over a stream that has no framing of its own.**
+
+### Two exec shapes, on purpose
+
+| what | how | why |
 |---|---|---|
-| process chain | `xscore → tmux` | `xscore → ssh → sshd → login shell → tmux` |
-| who authenticates | nobody | the user's ssh identity and config |
-| cost per command | fork + exec, ~1 ms | + one round trip (5 ms shared, 50–300 ms cold) |
-| socket namespace | this machine's | **that machine's** — `-L work` is a different file there |
-| host is down | tmux starts a server, or fails fast | `TmuxUnreachable`; no rows pruned |
-| attach | `tmux attach -t work` | `ssh -t <dest> tmux attach -t work` |
-| tmux version | known | whatever the remote runs |
+| a **managed** session (we hold its control client) | one persistent `tmux -C attach` (locally, or through one `ssh`) | streams bytes and pushes events |
+| **enumeration and one-shot** (`session ls` across hosts, probing, `adopt`, `kill` of a session we are not attached to) | one `tmux <cmd>` exec per call (`ssh <dest> tmux ...`) | request/response, no state to keep |
 
-Everything else is identical: the same command set, the same handle formats, the
-same capture/paste path, the same refresh. So the rule is:
+Mixing them up is the bug to avoid: data must never go through a one-shot exec
+(nothing to stream from), and enumeration must never require attaching (that
+would leave a client per session just to list names).
 
-> **Nothing above `TmuxHost` may branch on local vs ssh.** If a caller needs to
-> know which one it has, the abstraction has leaked.
+### Escaping has one layer here, not two
 
-### Sockets are per host
-
-`-L work` resolves to `$TMUX_TMPDIR` (usually `/tmp`) `/tmux-<uid>/work` **on
-the host that runs the command**. `TmuxSocket::Named("work")` is therefore not a
-location but a name to be resolved on the target: local `-L work` and remote
-`-L work` are two unrelated servers.
-
-`TmuxSocket::Path` exists for the one case where "the default" would be silently
-wrong: when xscore is itself launched from inside tmux, `$TMUX` is set and a bare
-`tmux` targets *that* server rather than the default one. Inheriting the variable
-would make `session new` depend on where the user happened to run it, so the
-socket is resolved once at session creation and stored as a path. A row never
-depends on the environment of the process that later reads it.
-
-### Control is request/response, not a byte stream
-
-An earlier draft called this seam `TmuxHost::ThroughTransport`: run `tmux`
-commands through an existing `Transport`. **That is wrong and is dropped.** A
-`Transport` is a bidirectional byte stream that may also carry login banners,
-shell prompts, escape sequences and partial writes. Recovering "the output of
-this one command" from it needs delimiters and a parser, and that parser breaks
-on the first remote that prints something unexpected.
-
-tmux control is one command in, one exit code and some bytes out. So it is one
-`ssh` invocation per command:
+With a one-shot `ssh <dest> tmux send-keys ...`, `ssh` joins its argv and hands
+the string to the **remote shell**, so a payload is parsed twice and large
+payloads hit `ARG_MAX`. On the control channel there is no shell: the line goes
+straight to tmux's own command parser, so a write is
 
 ```
-ssh -o BatchMode=yes <args...> <destination> tmux -L <sock> list-windows -t work -F '#{window_id}\t#{window_active}'
+send-keys -t %0 -l '<text escaped for tmux>'
 ```
 
-What that buys:
+Measured: `;`, `"`, `$` and backticks all arrive literally inside `-l` quotes.
 
-- **the exit code is tmux's**, so "no such session" is distinguishable from
-  "the network died" (see the failure table below);
-- **stdout is only the command's stdout**, not a session's screen;
-- **nothing to invent** — no framing, no demultiplexing, no keepalive.
+Two limits remain and are not fixable at this layer:
 
-Two operational details that are not optional:
-
-- **`-o BatchMode=yes` always.** Without it a password prompt or an unknown
-  host key blocks a non-interactive CLI forever. Failing fast is correct: a
-  first-time host must be trusted once, by the user, in a real terminal.
-  `-o ConnectTimeout=5` bounds the other hang.
-- **do not assume stdout is pure.** A `Banner`/`PrintMotd` misconfiguration, a
-  `ForceCommand`, or a startup file that echoes can put extra text on the wire.
-  Parse only lines that match the `-F` format and drop everything else — a line
-  that does not look like `@N` / `%N` is never guessed at.
-
-### Connection reuse, not a connection pool
-
-One `ssh` per command costs a TCP handshake and an auth round trip. The fix is
-the one OpenSSH already has, not a pool we write:
-
-```
--o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=60
-```
-
-Users who do remote work usually have this on already; xscore passes it as
-defaults (overridable) so a burst of `pane new` calls rides one connection. Cold
-round trips are 50–300 ms, shared ones ~5 ms — which is why §7 forbids any
-background polling of remote sessions.
+- **NUL cannot be sent.** The protocol is line-oriented; a byte stream carrying
+  `\0` has no representation. Anything needing it is not a tmux link.
+- **tmux escaping is still real.** A payload with `'`, `\` or a newline must be
+  quoted for tmux's parser, and getting it wrong is a silent mis-type rather
+  than an error. This is the one place where "escape once, exactly" has to be
+  written and tested rather than assumed.
 
 ### Credentials
 
-xscore stores **no SSH credentials** for tmux. It execs the system `ssh`, so
-`~/.ssh/config`, `ProxyJump`, agent forwarding, `Include` and `Match` blocks all
-apply — none of which the `russh`-based `ssh://` link path reads, because that
-client is driven by a `TransportConfig`, not by the user's ssh config. Two
-different jobs, two different mechanisms:
+xscore stores **no** SSH credentials. It execs the system `ssh`, so
+`~/.ssh/config`, `ProxyJump`, agent forwarding and `Match` blocks all apply —
+none of which the `russh`-based `ssh://` link path reads, because that client is
+driven by a `TransportConfig`. Two jobs, two mechanisms:
 
 | | how it connects | why |
 |---|---|---|
-| `ssh://` link (`Pipe`) | `russh`, password auth from `TransportConfig` | xscore needs the *bytes* of a shell, not an exec channel |
-| tmux over ssh (`Screen`) | system `ssh`, one exec per command | xscore needs the user's ssh identity and config, and never the stream |
+| `ssh://` link | `russh`, from `TransportConfig` | xscore needs the shell's *bytes* |
+| tmux session over ssh | system `ssh`, one control channel | xscore needs the user's identity and config |
 
-Anything interactive fails instead of prompting. Storing a password would put a
-secret in `state.json`; that is not on the table.
-
-### Reading and writing a remote pane
-
-`capture-pane -p` is fine over ssh: stdout is the screen text.
-
-Writing is where naive `send-keys` breaks. `ssh` joins its argv with spaces and
-hands the result to the **remote shell**, so a payload containing quotes,
-`$`, backticks or newlines is parsed twice, and large payloads hit `ARG_MAX`.
-So a write never puts the payload on a command line:
-
-```
-printf '%s' "$payload" | ssh <dest> 'tmux -L S load-buffer -b xscore - \
-                                  && tmux -L S paste-buffer -b xscore -d -t %3'
-```
-
-The remote command line is constant; the bytes arrive on stdin. The **same path
-is used for local panes**, so there is one write implementation rather than two
-with different quoting rules.
+`BatchMode=yes` is mandatory: a password or host-key prompt would block a
+non-interactive CLI forever. Failing fast is correct — a first-time host is
+trusted once, by the user, in a real terminal. `ConnectTimeout=5` bounds the
+other hang. Connection reuse is not needed the way it was for per-command execs;
+there is one connection per session by construction.
 
 ### Failure semantics
 
-| what happened | exit / signal | error | what refresh does |
+| what happened | signal | error | rows |
 |---|---|---|---|
-| tmux says the target is gone | remote 1–254 | `TmuxTargetGone` | prune that row |
-| ssh cannot reach or authenticate | **255** (ssh's own) | `TmuxUnreachable { host }` | **prune nothing** |
-| ssh hangs | `ConnectTimeout` / call timeout | `TmuxUnreachable { host }` | **prune nothing** |
+| session killed | `%exit` on the control channel | `TmuxTargetGone` | prune that session |
+| ssh dies, times out, or auth fails | channel EOF / exit 255 on a one-shot | `TmuxUnreachable { host }` | **prune nothing** |
+| one-shot tmux error | exit 1–254 | `TmuxTargetGone` | prune that row |
 
-The third column is load-bearing: **a refresh that cannot reach the host must
-never delete rows.** Otherwise a laptop on a train silently forgets every remote
-session it manages, and the next `ls` reports a workspace that still exists.
+The second row is load-bearing: **an unreachable host must never delete rows.**
+A laptop on a train would otherwise forget every remote session it manages, and
+the next `ls` would report a workspace that still exists.
 
 ### Listing is local, showing is live
 
 `session ls` never touches the network: it prints what `state.json` knows plus a
 `HOST` column, so listing ten sessions across three hosts is instant and works
-offline. Only `session show`, `session attach`, `data`, and window/pane
-mutations contact the host. `ls --refresh` opts into a network pass explicitly.
+offline. `session show`, `attach`, `data` and window/pane mutations use the live
+control client (or a one-shot exec when the session is not managed). `ls
+--refresh` opts into a network pass.
 
-### Naming: session names are not globally unique
+### Naming
 
 Two machines can each have `work`. The key is `(host, socket, session)`;
 `SessionId` is the stable identity. The CLI reference is `name` when
-unambiguous, `<host>/<name>` otherwise:
-
-```
-xscore session show work              # ok if only one host has "work"
-xscore session show devbox/work       # disambiguated
-xscore session attach devbox/work     # ssh -t devbox tmux attach -t work
-```
-
-`local/<name>` is accepted for the local host, so a script can always be
-explicit.
+unambiguous, `<host>/<name>` otherwise (`devbox/work`, `local/work`).
 
 ### Attach
 
 ```
-ssh -t <dest> tmux -L <sock> attach -t <session>
+ssh -t <dest> tmux -L <sock> attach -t work
 ```
 
-exec'd in place of `xscore`. The remote TTY, resize and `Ctrl-b` then belong to
-tmux exactly as if the user had typed that command; xscore is out of the loop
-and holds no connection.
+exec'd in place of `xscore`. The remote TTY, resize and `Ctrl-b` belong to tmux
+exactly as if the user had typed that command; xscore is out of the loop and
+holds no connection.
 
 ### Testing without a network
 
-`TmuxHost` is built from an **argv prefix**: `[]` locally,
-`["ssh", "-o", "BatchMode=yes", ...]` remotely. Tests therefore exercise the
-same code path by substituting the prefix — a script that `exec`s locally, a
-`tmux` shim on `PATH`, and a fake `ssh` that fails with 255 to test
-`TmuxUnreachable`. No test needs a real remote.
+`TmuxHost` is an argv prefix: `[]` locally, `["ssh", "-o", "BatchMode=yes", ...]`
+remotely. Tests substitute the prefix, so a fake `ssh` (exits 255) and a fake
+`tmux` cover the remote paths. A real control-mode transcript captured from
+tmux 3.5a is the parser's fixture.
 
-## 7. Refresh, not sync
+## 7. Events, not polling
 
-A tmux-backed session has rows in `state.json` (windows, panes, links) but tmux
-owns their truth. The rule, applied **per session** and only when a session is
-touched:
+There is no refresh pass and no sync command. A managed tmux session has a
+control client attached, and that client pushes everything:
 
-```
-touch(session) →
-  tmux list-windows + list-panes -t <tmux session>
-  for each adopted row whose handle is gone   → remove the row; its pane's
-                                                 link_id becomes None
-  for each adopted row whose geometry changed → update cols/rows/x/y
-  panes that tmux reports but xscore never adopted → REPORTED, not adopted
-```
+| notification | meaning | what xscore does |
+|---|---|---|
+| `%output %N <escaped>` | pane bytes | append to `%N`'s RingBuffer |
+| `%window-add @N` | window appeared | insert `WindowInfo` |
+| `%window-close` / `%unlinked-window-close @N` | window gone | delete it and its panes |
+| `%window-renamed @N` | rename | update `name` |
+| `%layout-change @N <old> <new> <flags>` | geometry | update pane sizes |
+| `%session-window-changed $N @M` | current window | update a `active` flag |
+| `%session-changed`, `%sessions-changed` | session set | update `SessionInfo` |
+| `%exit [reason]` | client detached / session over | detach; prune if the session is gone |
 
-Notes that make this different from v0.5.1's `link sync --heal`:
+Parser rules, both learned from real output rather than documentation:
 
-- **Scoped to one session.** A refresh can never touch another session's rows
-  (v0.4.0 shipped that bug once and fixed it).
-- **No adoption by default.** Panes the user created by hand in tmux stay
-  invisible to xscore until `xscore session adopt <name>`.
-- **No `--heal` flag.** Healing is the only behaviour; there is no mode where a
-  known-stale row is kept.
-- **No global pass.** Nothing walks all sessions; a session is refreshed because
-  a command mentioned it.
-- **Refresh is in-memory.** Removed rows and changed geometry are applied to the
-  in-memory registries only; persistence rides on the normal save at the end of
-  a *mutating* command. A read-only command (`ls`, `show`, `data read`) must not
-  write `state.json` — otherwise every read would contend for the file and every
-  user would see a mutation they did not ask for.
+- **Route by prefix, not by position.** `%begin <ts> <num> <flags>`, the
+  command's output lines, then `%end` (or `%error`) form one block; events may
+  arrive *inside* a block. A parser that assumes "anything between begin and end
+  is output" breaks the first time a window appears while a command runs.
+- **Ignore unknown `%` lines.** tmux renames notifications across versions —
+  3.5a emits `%unlinked-window-close` where older releases emitted
+  `%window-close`. Unknown notifications are skipped, never fatal.
 
-`session adopt <name>` is the explicit "take the current tmux structure as
-xscore rows" operation — the way to start managing a session you created outside
-xscore.
+Consequences of this being event-driven:
+
+- no `refresh`, no `--heal`, no global pass, no geometry polling;
+- `%exit` distinguishes "session gone" from "host unreachable" without exit-code
+  guesswork;
+- a detached pane keeps its buffer (§3) and `data read` still returns what
+  arrived before the detach, but nothing new arrives until a client re-attaches.
+
+`capture-pane` remains available as an explicit screen query (`pane screen`),
+because "the last 200 lines as rendered" and "the bytes since I last looked" are
+different questions and both are legitimate.
 
 ## 8. Lifecycle and invariants
 
@@ -656,12 +583,13 @@ Invariants and what enforces each:
 ```
 crates/xscore/src/
   core/        ids, error, address, session, link, pane, window, registries,
-               manager, state, buffer (RingBuffer), refresh
+               manager, state, buffer (RingBuffer), events
   model/       SessionInfo, LinkInfo, WindowInfo, PaneInfo,
                SessionBackend, WindowBackend, PaneBackend, TransportConfig
-  channel/     Channel trait, PipeChannel, ScreenChannel, DaemonChannel
+  channel/     Channel trait, PipeChannel, TmuxPaneChannel, DaemonChannel
   transport/   Transport trait, shell, serial, ssh, NoopTransport, DaemonTransport
-  tmux/        TmuxHost (Local / Ssh), structure queries, session runtime
+  tmux/        TmuxHost (Local / Ssh), TmuxControl (control-mode client),
+               event decoding, session runtime
   daemon/      protocol, server, client
   url/         URL parser
   config/      link templates
@@ -760,6 +688,7 @@ xscore pane kill <p>
 xscore pane attach --pane <p> --link <l>     # native only
 xscore pane detach --pane <p>                # native only
 xscore pane move   --pane <p> --window <w>   # within the session
+xscore pane screen <p> [--history N]         # rendered grid via capture-pane, not bytes
 
 # Link — native sessions
 xscore link add <url> --session <s>
@@ -813,7 +742,7 @@ Notes:
 | `WindowInfo.tmux_window_handle`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux` / `PaneBackend::Tmux` |
 | `WindowLayout` (5 variants) | no consumer; tmux owns layout, native has no renderer |
 | `link open` / `link close` | `session attach` / `session kill` / `session forget` |
-| `link sync [--heal]` | replaced by per-session refresh (§7): same data, no mode flag, no global pass |
+| `link sync [--heal]` | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
 | `backends/` module | split into `channel/` (the conduit) and `core/buffer.rs` |
 
 ### Added
@@ -821,8 +750,8 @@ Notes:
 | New | Role |
 |---|---|
 | `Session` + `SessionId` + `SessionBackend` | the workspace, and who keeps it alive |
-| `Endpoint::{Pipe, Screen}` | the honest split between byte streams and tmux screens |
-| `channel/{Pipe,Screen,Daemon}Channel` | what a pane reads and writes through |
+| `Endpoint::{Pipe, TmuxPane}` | who owns the stream: xscore, or tmux through a control client |
+| `channel/{Pipe,TmuxPane,Daemon}Channel` | what a pane reads and writes through |
 | `tmux::TmuxHost` (`Local`, `Ssh`) | argv-prefix runner: local `tmux`, or `ssh <dest> tmux` once per command (§6) |
 | `session adopt` / `session forget` | manage sessions xscore did not create; stop managing without destroying |
 | `pane new --window` on a tmux session | creates tmux pane + link + pane atomically |
@@ -834,7 +763,7 @@ Notes:
 | state schema | v2: flat `links`/`windows`/`panes` | **v3**: adds `sessions`; every child carries `session_id`; backends replace `sink` / `sink_handle` / `tmux_window_handle` |
 | `link add` | no session | requires `--session` (a native session) |
 | Q1 | special case in `attach_pane` | universal: one link → one pane |
-| tmux control | `Sink` methods + `link sync` | `session` / `window` / `pane` verbs; tmux queried per session |
+| tmux control | `Sink` methods + `link sync` + one exec per call | one control client per session; notifications update state (§7) |
 | remote tmux | `?tmux=remote`, never read — always local | `SessionBackend::Tmux { host: Ssh { .. } }`; one `ssh` exec per tmux command |
 | `Window.layout` | stored enum | gone; `#{window_layout}` read from tmux when needed |
 
@@ -860,27 +789,34 @@ silently converted (same policy as v0.4.0). The one-time migration:
    the link; its pane keeps the binding.
 3. windows and panes are re-parented to the session they came from.
 4. `link sync` output is discarded — it described cached structure that is now
-   refreshed per query.
+   event-driven.
 
 ## 12. Open decisions
 
 | # | Question | Lean |
 |---|---|---|
-| D1 | Does a tmux-backed session have explicit `Link`s (1:1 with panes), or do panes hold a `Screen` endpoint directly? | **Explicit links.** One binding rule ("a pane uses a link") beats two, and it is where exclusivity lives. Cost: a 1:1 link that can never be re-bound. |
+| D1 | Does a tmux-backed session have explicit `Link`s (1:1 with panes), or do panes hold a `TmuxPane` endpoint directly? | **Explicit links.** One binding rule ("a pane uses a link") beats two, and it is where exclusivity lives. Cost: a 1:1 link that can never be re-bound. |
 | D2 | Window mirroring for tmux sessions: mirror `@N`, or keep one tmux window and treat xscore windows as private? | **Mirror `@N`.** `tmux attach` must show what xscore shows, or the product premise breaks. |
 | D3 | `WindowLayout`: delete for good, or keep a hint for native windows? | **Delete.** No consumer; reintroduce with the renderer. |
 | D4 | tmux socket: private `-L xscore`, or the user's default socket? | **Default socket**, `--socket` to override. Sessions invisible in `tmux ls` are not "managed". Tests pass `--socket` explicitly. |
 | D5 | `link del` on a tmux-backed link | **Forget the handle only.** A link is a view, not an owner. |
 | D6 | Can a pane move between sessions? | **No implicit moves.** `pane move --session` is explicit and native-only. |
 | D7 | `session forget` — needed, or is `kill` enough? | **Keep it.** Mirrors v0.5.1's `del` vs `close`: destroy vs stop managing. |
-| D8 | Alternative to mirroring: address tmux directly (`data --tmux work:1`) and have no xscore rows for tmux at all | **Rejected for now**, because it gives two addressing modes for `data`. Revisit if per-session refresh proves troublesome. |
+| D8 | Alternative to mirroring: address tmux directly (`data --tmux work:1`) and have no xscore rows for tmux at all | **Rejected for now**, because it gives two addressing modes for `data`. Revisit if the control-client model proves troublesome. |
 | D9 | Does xscore pass `ControlMaster=auto` by default, or only when the user asks? | **Pass it**, overridable via `--ssh-arg`. Without it a burst of commands pays a full handshake each time; with it xscore writes no pooling code. |
 | D10 | Should `ssh://` links move to the system `ssh` too, leaving one SSH mechanism? | **Not in this change.** `russh` gives a byte stream and in-process control; a link is not an exec client. Revisit only if storing password auth becomes a liability. |
+| D11 | Is control mode the only tmux integration, or do one-shot execs stay? | **Both, split by job** (§6): a control client for a managed session, one exec for enumeration. |
+| D12 | `-C` or `-CC`? | **`-C`.** `-CC` only disables terminal echo, which a pipe client does not have. |
 
 ## 13. What this does not solve
 
-- **tmux has no byte stream.** `Screen` endpoints cannot carry binary, exact byte
-  order, or exit codes. Anything needing that must be a native session.
+- **tmux output is line-framed.** `%output` is escaped text on a line protocol,
+  so `\0` cannot be sent and arbitrary binary is unsafe. It is terminal bytes,
+  not any bytes.
+- **No replay.** Attaching a control client does not re-send earlier output;
+  history exists only as scrollback (`capture-pane -S -`).
+- **No exit status from a pane.** Liveness arrives as a pane-dead flag, not as a
+  `waitpid` status.
 - **No renderer.** Native windows have no layout model and no drawing code;
   `pane.cols/rows/x/y` are recorded but unenforced. The tmux backend is the only
   one that can display anything to a human today.
