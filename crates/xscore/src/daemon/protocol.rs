@@ -16,8 +16,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::core::{Error, LinkId, PaneId, Result};
-use crate::model::TransportConfig;
+use crate::core::{Error, LinkId, PaneId, Result, SessionId};
+use crate::model::{TmuxHostConfig, TmuxSocket, TransportConfig};
 
 /// Hard cap on a single frame body. A pane buffer is 64 KiB and the
 /// largest legitimate request is a `write` of that size (128 KiB as hex),
@@ -40,8 +40,49 @@ pub enum Request {
     CreatePane { pane: PaneId },
     /// Drop a pane slot and its buffer. Idempotent.
     DeletePane { pane: PaneId },
+    /// Open (or reuse) the control client of a tmux session and answer with
+    /// its structure. The daemon — not the CLI — owns the `tmux -C attach`
+    /// process from here on, which is what makes `%output %N` a stream that
+    /// outlives the CLI (ADR 0009 §1, ADR 0010 §D2).
+    ///
+    /// `cols`/`rows` are the size the caller saw; `-C attach` takes no size,
+    /// so they are informational (a fresh client adopts the session's own).
+    OpenTmux {
+        session: SessionId,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        name: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// Enumerate a tmux session's windows and panes **through its control
+    /// client** (one round trip per listing, no per-command process). Takes
+    /// the slot's stored config, so it re-opens a client that died.
+    Structure { session: SessionId },
+    /// Run one command on the session's control client and return the lines
+    /// of its `%begin…%end` block. Used for the mutations that must still go
+    /// through the one client (`new-window`, `split-window`, `kill-pane`) —
+    /// never for data or structure.
+    TmuxCommand { session: SessionId, command: String },
+    /// Close the session's control client and drop its pane buffers.
+    CloseTmux { session: SessionId },
+    /// Is the session's control client alive? (`link show`'s `connected`.)
+    ProbeTmux { session: SessionId },
     /// Bind a pane to a link and start its pump.
-    Attach { pane: PaneId, link: LinkId },
+    ///
+    /// `key: Some("%N")` means "this pane is `%N` on `session`'s control
+    /// client": subscribe `%output %N` into that pane's buffer. It is a no-op
+    /// when the pane is already attached — a second subscriber would append
+    /// every byte twice. `key: None` is the native pipe path below.
+    Attach {
+        pane: PaneId,
+        #[serde(default)]
+        link: Option<LinkId>,
+        #[serde(default)]
+        key: Option<String>,
+        #[serde(default)]
+        session: Option<SessionId>,
+    },
     /// Stop a pane's pump. The buffer (and the link) survive.
     Detach { pane: PaneId },
     /// Non-destructive snapshot read of the pane's buffer.
@@ -67,12 +108,63 @@ pub struct PaneStatus {
     pub buffered: usize,
 }
 
+/// One tmux window in a `Structure` answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TmuxWindowRow {
+    /// `@N` — identity, never the index.
+    pub handle: String,
+    pub name: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// One tmux pane in a `Structure` answer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TmuxPaneRow {
+    /// `%N` — the pane's `link_key`.
+    pub handle: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub x: u16,
+    pub y: u16,
+    /// The `@N` this pane lives in.
+    pub window_handle: String,
+}
+
+/// A tmux session's structure, enumerated through the control client.
+///
+/// Panes carry their window explicitly because the CLI builds one view from
+/// this and must not run a second listing per window to find out.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TmuxStructure {
+    pub windows: Vec<TmuxWindowRow>,
+    pub panes: Vec<TmuxPaneRow>,
+}
+
+/// One tmux control slot, as `daemon status` reports it: enough to see that
+/// the daemon is holding a client and buffering bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TmuxStatus {
+    pub session: SessionId,
+    /// The tmux session name on its host.
+    pub name: String,
+    /// The client is up and tmux has not sent `%exit`.
+    pub alive: bool,
+    /// Panes with a `%output` subscriber (their buffers are being filled).
+    pub panes: usize,
+    /// Total bytes held in those panes' buffers.
+    pub buffered: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Status {
     /// The daemon's PID — handy for `kill -TERM` when debugging.
     pub pid: u32,
     pub links: Vec<LinkId>,
     pub panes: Vec<PaneStatus>,
+    /// One entry per tmux session the daemon holds a control client for.
+    #[serde(default)]
+    pub tmux: Vec<TmuxStatus>,
 }
 
 /// One response shape for every op. Unused fields are omitted so the
@@ -87,12 +179,29 @@ pub struct Response {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structure: Option<TmuxStructure>,
+    /// The answer to `ProbeTmux`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alive: Option<bool>,
+    /// The answer to `TmuxCommand` — the block's own lines, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 impl Response {
     pub fn ok() -> Self {
-        Self { ok: true, data: None, n: None, status: None, error: None }
+        Self {
+            ok: true,
+            data: None,
+            n: None,
+            status: None,
+            structure: None,
+            alive: None,
+            lines: None,
+            error: None,
+        }
     }
 
     pub fn bytes(bytes: &[u8]) -> Self {
@@ -105,6 +214,20 @@ impl Response {
 
     pub fn status(status: Status) -> Self {
         Self { status: Some(status), ..Self::ok() }
+    }
+
+    pub fn structure(structure: TmuxStructure) -> Self {
+        Self { structure: Some(structure), ..Self::ok() }
+    }
+
+    /// The `ProbeTmux` answer.
+    pub fn bool(alive: bool) -> Self {
+        Self { alive: Some(alive), ..Self::ok() }
+    }
+
+    /// The `TmuxCommand` answer.
+    pub fn lines(lines: Vec<String>) -> Self {
+        Self { lines: Some(lines), ..Self::ok() }
     }
 
     pub fn err(message: impl Into<String>) -> Self {
@@ -252,17 +375,115 @@ mod tests {
             (Request::DeleteLink { link: lid }, "delete_link"),
             (Request::CreatePane { pane: pid }, "create_pane"),
             (Request::DeletePane { pane: pid }, "delete_pane"),
-            (Request::Attach { pane: pid, link: lid }, "attach"),
+            (
+                Request::Attach { pane: pid, link: Some(lid), key: None, session: None },
+                "attach",
+            ),
             (Request::Detach { pane: pid }, "detach"),
             (Request::Read { pane: pid, max: 10 }, "read"),
             (Request::Write { pane: pid, data: "00".into() }, "write"),
             (Request::Resize { pane: pid, cols: 80, rows: 24 }, "resize"),
+            (Request::CloseTmux { session: SessionId::new() }, "close_tmux"),
+            (Request::Structure { session: SessionId::new() }, "structure"),
+            (Request::ProbeTmux { session: SessionId::new() }, "probe_tmux"),
             (Request::Stop, "stop"),
         ];
         for (req, op) in cases {
             let v = serde_json::to_value(&req).unwrap();
             assert_eq!(v["op"], serde_json::json!(op), "wrong op for {req:?}");
         }
+    }
+
+    #[test]
+    fn open_tmux_and_command_carry_their_fields() {
+        let sid = SessionId::new();
+        let open = Request::OpenTmux {
+            session: sid,
+            host: TmuxHostConfig::Local,
+            socket: TmuxSocket::Named("x".into()),
+            name: "work".into(),
+            cols: 100,
+            rows: 30,
+        };
+        let v = serde_json::to_value(&open).unwrap();
+        assert_eq!(v["op"], serde_json::json!("open_tmux"));
+        assert_eq!(v["name"], serde_json::json!("work"));
+        assert_eq!(v["socket"]["kind"], serde_json::json!("named"));
+        assert_eq!(v["session"], serde_json::json!(sid.to_string()));
+
+        let cmd = Request::TmuxCommand { session: sid, command: "new-window".into() };
+        let v = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(v["op"], serde_json::json!("tmux_command"));
+        assert_eq!(v["command"], serde_json::json!("new-window"));
+
+        // The pane-addressing fields are optional on the wire: a native
+        // attach never grew them, and neither does an older caller.
+        let native: Request = serde_json::from_value(serde_json::json!({
+            "op": "attach",
+            "pane": PaneId::new().to_string(),
+            "link": LinkId::new().to_string(),
+        }))
+        .unwrap();
+        match native {
+            Request::Attach { link, key, session, .. } => {
+                assert!(link.is_some());
+                assert!(key.is_none() && session.is_none());
+            }
+            other => panic!("expected attach, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structure_and_probe_answers_roundtrip() {
+        let sid = SessionId::new();
+        let structure = TmuxStructure {
+            windows: vec![TmuxWindowRow {
+                handle: "@1".into(),
+                name: "sh".into(),
+                cols: 100,
+                rows: 30,
+            }],
+            panes: vec![TmuxPaneRow {
+                handle: "%0".into(),
+                cols: 100,
+                rows: 30,
+                x: 0,
+                y: 0,
+                window_handle: "@1".into(),
+            }],
+        };
+        let resp = Response::structure(structure.clone());
+        let back: Response = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(back.structure, Some(structure));
+        assert!(back.alive.is_none() && back.lines.is_none());
+
+        let probe = Response::bool(false);
+        let back: Response = serde_json::from_str(&serde_json::to_string(&probe).unwrap()).unwrap();
+        assert_eq!(back.alive, Some(false));
+        assert!(back.ok);
+
+        // A status with no tmux slots still deserializes (older daemons).
+        let old: Status = serde_json::from_str(
+            r#"{"pid":1,"links":[],"panes":[]}"#,
+        )
+        .unwrap();
+        assert!(old.tmux.is_empty());
+
+        let with_tmux = Status {
+            pid: 1,
+            links: vec![],
+            panes: vec![],
+            tmux: vec![TmuxStatus {
+                session: sid,
+                name: "work".into(),
+                alive: true,
+                panes: 1,
+                buffered: 3,
+            }],
+        };
+        let back: Status =
+            serde_json::from_str(&serde_json::to_string(&with_tmux).unwrap()).unwrap();
+        assert_eq!(back, with_tmux);
     }
 
     #[test]

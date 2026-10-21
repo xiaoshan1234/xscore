@@ -18,8 +18,9 @@
 //     session's control client instead of one exec per operation. `read` is
 //     the pane's `RingBuffer` (filled by `%output %N`), `write` one
 //     `send-keys` line on the control channel (no shell in between), `resize`
-//     `resize-pane`, `close` nothing at all. It is the only tmux conduit: the
-//     per-command `TmuxBridge` it replaced is gone (PR4).
+//     `resize-pane`, `close` nothing at all. It is the in-process conduit: in
+//     daemon mode the manager hands out `DaemonBridge` for a tmux pane instead
+//     and the daemon runs the pump (v0.6.0, PR5).
 //
 // `close()` means "release THIS pane's hold on the resource", never
 // "kill a shared resource" (P0-a):
@@ -245,11 +246,18 @@ impl PaneBridge for DaemonBridge {
 /// Control bridge: a tmux pane whose bytes arrive on its session's control
 /// client (ADR 0010 §D2/§D4).
 ///
-/// This is the v0.6 path and it differs from `TmuxBridge` in kind, not in
-/// degree: nothing here runs a tmux command per operation except the write
-/// itself. `read` serves the pane's `RingBuffer`, which the session's output
-/// pump fills from `%output %N`; `write` goes through the control channel as a
-/// `send-keys` line (one parser, no shell); `resize` is `resize-pane`.
+/// This is the in-process path (no daemon: `data_smoke` and anything
+/// embedding the manager). `read` serves the pane's `RingBuffer`, which the
+/// session's output pump fills from `%output %N`; `write` goes through the
+/// control channel as a `send-keys` line (one parser, no shell); `resize` is
+/// `resize-pane`.
+///
+/// There is deliberately **no** `capture-pane` fallback: a screen snapshot is
+/// not a byte stream, and offering one made `data read` mean two different
+/// things depending on which process asked. The buffer is filled by the daemon
+/// in daemon mode and by this process's own pump otherwise; an empty buffer
+/// therefore means "nothing arrived while we were listening", which is the
+/// truth tmux's no-replay rule implies (arch.md §13).
 pub struct ControlBridge {
     control: Arc<crate::tmux::TmuxControl>,
     /// The pane's address on the shared control link: `%N`.
@@ -289,7 +297,8 @@ impl PaneBridge for ControlBridge {
     async fn read(&self, buf: &mut [u8]) -> Result<usize> {
         // Same contract as `DirectBridge`: wait briefly for bytes, then report
         // what is there. The buffer is a scrollback, so the copy is
-        // non-destructive.
+        // non-destructive. Empty means empty — see the type's comment for why
+        // there is no screen fallback.
         let deadline = tokio::time::Instant::now() + READ_WAIT;
         loop {
             {
@@ -300,28 +309,10 @@ impl PaneBridge for ControlBridge {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                break;
+                return Ok(0);
             }
             tokio::time::sleep(READ_POLL).await;
         }
-
-        // Nothing streamed into this process. tmux keeps the scrollback even
-        // when no client is attached, so ask it instead of returning silence —
-        // otherwise `data read` in a fresh CLI process could never see output
-        // that a previous process wrote (the buffer that would have held it died
-        // with that process; a daemon holding the client is ADR 0009's job, not
-        // this one). The rendered screen is a different question from "bytes
-        // since I last looked", which is why this is a fallback and not the
-        // read path.
-        let lines = self
-            .control
-            .send(&crate::tmux::capture_pane_command(&self.handle))
-            .await?;
-        let text = lines.join("\n");
-        let bytes = text.as_bytes();
-        let n = bytes.len().min(buf.len());
-        buf[..n].copy_from_slice(&bytes[..n]);
-        Ok(n)
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize> {

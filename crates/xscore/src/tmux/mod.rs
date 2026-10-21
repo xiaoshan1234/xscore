@@ -21,9 +21,9 @@ pub mod protocol;
 
 pub use control::{argv, socket_args, TmuxControl};
 pub use format::{
-    capture_pane_command, host_label, host_prefix, kill_pane_command, list_panes_command,
-    list_windows_command, new_window_command, one_shot_argv, parse_pane_line, parse_window_line,
-    quote_arg, resize_pane_command, send_keys_literal, split_window_command, PaneLine, WindowLine,
+    host_label, host_prefix, kill_pane_command, list_panes_command, list_windows_command,
+    new_window_command, one_shot_argv, parse_pane_line, parse_window_line, quote_arg,
+    resize_pane_command, send_keys_literal, split_window_command, PaneLine, WindowLine,
     LIST_PANES_FORMAT, LIST_WINDOWS_FORMAT,
 };
 pub use protocol::{Parsed, ProtocolParser, TmuxEvent};

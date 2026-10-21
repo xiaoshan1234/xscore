@@ -67,7 +67,8 @@ persisted metadata, and nothing in `state.json` is damaged.
 |---|---|---|---|
 | Link / Window / Pane records, ids, bindings | CLI (`state.json`) | yes | yes |
 | live `Transport` objects | daemon | yes | no |
-| pane `RingBuffer`s | daemon | yes | no |
+| live tmux control clients (v0.6.0) | daemon | yes | no |
+| pane `RingBuffer`s (native and tmux) | daemon | yes | no |
 
 The CLI stays the authority for *what exists and what is bound to what*.
 The daemon is a byte-level cache with a lifetime. Consequences:
@@ -82,10 +83,27 @@ The daemon is a byte-level cache with a lifetime. Consequences:
 
 ### 3. tmux links do not go through the daemon
 
-`?tmux=on` links keep using `TmuxBridge` → `tmux` commands. tmux is
-already the resident server for those links, and adding a second hop
-would put an extra process in the failure path for zero gain. The daemon
-is only involved when `SinkConfig::Raw`.
+> **Superseded in v0.6.0 (ADR 0010 §D2, PR5).** This section used to say a
+> managed tmux session was driven by `TmuxBridge` → one `tmux` command per
+> operation, and that the daemon was involved only for `SinkConfig::Raw` links.
+> Both objects are gone (ADR 0010 §D7 removed the sink; PR4 removed the
+> per-command path), and the daemon now holds the control client itself. The
+> rule the old text encoded still holds where it matters — the daemon is not a
+> hop that re-marshals bytes — and the corrected statement is:
+
+The daemon **now owns tmux control clients as well as native transports.** A
+managed session's single `tmux -C attach` client, its `%output %N`
+subscriptions and every pane buffer live in `ControlSlot`s — one per session,
+never one per pane or per link — so `data read` in a later CLI process returns
+bytes rather than a screen snapshot, and the client is not re-spawned for every
+command. Consequences: **idle exit is gated on both** (no links *and* no control
+slots, 5 s of quiet), `daemon stop` closes the clients and therefore drops the
+buffers (they are memory, like a native pane's), and `session kill` /
+`session forget` send `CloseTmux` first — the one-shot `kill-session` still
+runs outside the daemon for `kill`. The reason for the old rule is unchanged:
+tmux is already a resident server, so the daemon is not a hop in the byte path
+that re-marshals or copies anything — it is a second resident *holder* of the
+same single connection.
 
 ### 4. Protocol: length-prefixed JSON over a Unix socket
 
@@ -130,6 +148,12 @@ is only involved when `SinkConfig::Raw`.
   state to recover after a daemon restart. The server loops on a
   connection until EOF, so a future long-lived client (a TUI) can reuse
   one.
+- **v0.6.0 adds five ops for tmux** (`open_tmux`, `structure`,
+  `tmux_command`, `close_tmux`, `probe_tmux`), and `attach` grew optional
+  `key`/`session` fields so one request covers both "pane on a pipe link" and
+  "pane `%N` on a session's control client". `structure` and `probe_tmux` exist
+  because the client is resident: a listing is one query, not a spawned process,
+  and liveness is a flag the daemon already keeps.
 
 ### 5. Lifecycle: auto-start, idle exit, explicit stop
 
@@ -149,10 +173,12 @@ is only involved when `SinkConfig::Raw`.
   A lock whose socket no longer answers is treated as stale and taken
   over (same for a stale socket file: connect, and if it fails, unlink
   and rebind).
-- **Idle exit:** with **no links** and 5 s without a request, the daemon
-  exits and removes its socket and lock. A daemon holding a link stays
-  up — that transport is the entire reason it exists. This is what keeps
-  test suites and one-off commands from leaving processes behind.
+- **Idle exit:** with **no links and no tmux control slots** and 5 s without a
+  request, the daemon exits and removes its socket and lock. A daemon holding a
+  link or a control client stays up — that connection is the entire reason it
+  exists. This is what keeps test suites and one-off commands from leaving
+  processes behind. (A managed tmux session therefore keeps the daemon alive by
+  design; `daemon stop` is the way out, and it closes those clients.)
 - **Explicit stop:** `xscore daemon stop` → `{"op":"stop"}`, answered
   before exit so the client's request is not a broken pipe.
 

@@ -1,15 +1,22 @@
-// daemon/server.rs (v0.5.0 — resident daemon, ADR 0009)
+// daemon/server.rs (v0.6.0 — resident daemon, ADR 0009/0010)
 //
 // `xscore daemon serve` — the process that owns what a CLI process
-// cannot: live direct-link transports and pane ring buffers.
+// cannot: live transports, tmux control clients and pane ring buffers.
 //
 // Why a single daemon for every link (ADR 0009 § 1): a pane may switch
 // links at any time, and its buffer has to follow it. Buffers can only
 // follow panes inside one process, so there is exactly one daemon and it
-// holds both maps:
+// holds all three maps:
 //
 //     links: HashMap<LinkId, Arc<dyn Transport>>
 //     panes: HashMap<PaneId, PaneSlot { link, buffer, pump }>
+//     tmux:  HashMap<SessionId, ControlSlot { control, panes, alive }>
+//
+// `tmux` is the v0.6.0 addition (ADR 0010 §D2): a managed tmux session is
+// driven by ONE `tmux -C attach` client, and every pane's bytes arrive as
+// `%output %N` on it. Holding that client here — instead of in whichever
+// CLI invocation happened to attach — is what makes `data read` a *stream*
+// (bytes since the daemon subscribed) rather than a screen snapshot.
 //
 // The CLI keeps the authoritative *metadata* (`state.json`: which pane is
 // bound to which link). This process only owns *bytes*. That split is why
@@ -19,11 +26,12 @@
 //
 // Lifecycle: bind (handling a stale socket file), accept, and exit on
 //   * `Stop` (explicit `xscore daemon stop`),
-//   * 5 s of idleness **with no links** (so tests and one-off sessions
-//     never leave a daemon behind; a daemon holding a link stays up,
-//     because that link's transport is the whole point).
+//   * 5 s of idleness **with no links and no control slots** (so tests and
+//     one-off sessions never leave a daemon behind; a daemon holding
+//     either must stay up, because that connection is the whole point).
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,11 +40,16 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::core::buffer::{RingBuffer, DIRECT_BUFFER_CAPACITY};
-use crate::core::{Error, LinkId, PaneId, Result};
+use crate::core::{Error, LinkId, PaneId, Result, SessionId};
+use crate::model::{TmuxHostConfig, TmuxSocket};
+use crate::tmux::{self, TmuxControl, TmuxEvent};
 use crate::transport::{factory as transport_factory, Transport};
 
 use super::client::socket_path;
-use super::protocol::{self, PaneStatus, Request, Response, Status};
+use super::protocol::{
+    self, PaneStatus, Request, Response, Status, TmuxPaneRow, TmuxStatus, TmuxStructure,
+    TmuxWindowRow,
+};
 
 /// Same polling strategy as `DirectBridge` (v0.4.1): transport `read`
 /// blocks until bytes arrive and transports may serialize read/write
@@ -48,7 +61,7 @@ const READ_POLL: Duration = Duration::from_millis(10);
 /// reporting "nothing available" — identical to `DirectBridge::read`.
 const READ_WAIT: Duration = Duration::from_millis(200);
 
-/// Idle exit: no links + no requests for this long ⇒ exit.
+/// Idle exit: no links, no control slots + no requests for this long ⇒ exit.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TICK: Duration = Duration::from_millis(100);
 
@@ -79,9 +92,78 @@ impl PaneSlot {
     }
 }
 
+/// Everything that had to be true to spawn a session's control client, so the
+/// daemon can re-spawn it after `%exit` (the ssh channel dropped, the server
+/// was restarted) without the CLI having to say it again.
+///
+/// The daemon never reads `state.json` (ADR 0009 §2); these are the parameters
+/// the CLI sent with `OpenTmux`, kept only for as long as the slot exists.
+#[derive(Clone)]
+struct ControlConfig {
+    host: TmuxHostConfig,
+    socket: TmuxSocket,
+    name: String,
+}
+
+/// One pane of a tmux session: its `%N` address, its buffer, and the task
+/// appending `%output %N` to it.
+struct ControlPane {
+    /// The xscore pane this `%N` belongs to. `Read`/`Write` arrive by pane id
+    /// (that is all `state.json` knows), so the slot has to remember it.
+    pane: PaneId,
+    buffer: Arc<Mutex<RingBuffer>>,
+    /// `None` until `Attach` subscribes; aborted by `Detach`/`DeletePane`.
+    pump: Option<JoinHandle<()>>,
+}
+
+impl ControlPane {
+    fn stop_pump(&mut self) {
+        if let Some(handle) = self.pump.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// One tmux session's control client — **one per session**, never one per
+/// pane or per link (ADR 0010 §4, "one tmux session, one link").
+///
+/// A slot outlives its client: after `%exit` the buffers stay so the CLI can
+/// still read what arrived (a pane is its buffer), and `OpenTmux`/`Structure`
+/// re-spawn the control inside the same slot when the session comes back.
+struct ControlSlot {
+    control: Arc<TmuxControl>,
+    /// `"%N"` → pane. Keyed by the address tmux demultiplexes on.
+    panes: HashMap<String, ControlPane>,
+    /// Shared with the exit watcher: false once tmux sent `%exit` (or the
+    /// reader thread hit EOF), so `ProbeTmux` does not report a dead client.
+    alive: Arc<AtomicBool>,
+    config: ControlConfig,
+    /// The task turning `%exit` into `alive = false`. Aborted on close.
+    watcher: JoinHandle<()>,
+}
+
+impl ControlSlot {
+    /// A client that tmux has hung up on is not "connected", even though the
+    /// handle still exists (it is kept for its buffers).
+    fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::SeqCst) && !self.control.is_closed()
+    }
+
+    fn stop_pumps(&mut self) {
+        for pane in self.panes.values_mut() {
+            pane.stop_pump();
+        }
+    }
+}
+
 struct DaemonState {
     links: Mutex<HashMap<LinkId, Arc<dyn Transport>>>,
     panes: Mutex<HashMap<PaneId, PaneSlot>>,
+    tmux: Mutex<HashMap<SessionId, ControlSlot>>,
+    /// Serialises "look at a tmux slot, maybe replace its client, maybe add a
+    /// subscriber". Two CLI invocations can hit the same session at once, and
+    /// a second subscriber on one `%N` would append every byte twice.
+    tmux_open: Mutex<()>,
     last_activity: Mutex<tokio::time::Instant>,
 }
 
@@ -90,6 +172,8 @@ impl DaemonState {
         Self {
             links: Mutex::new(HashMap::new()),
             panes: Mutex::new(HashMap::new()),
+            tmux: Mutex::new(HashMap::new()),
+            tmux_open: Mutex::new(()),
             last_activity: Mutex::new(tokio::time::Instant::now()),
         }
     }
@@ -98,16 +182,20 @@ impl DaemonState {
         *self.last_activity.lock().await = tokio::time::Instant::now();
     }
 
-    /// Exit when nothing is left to serve. A daemon with a link must stay
-    /// up — that transport is the entire reason it exists.
+    /// Exit when nothing is left to serve. A daemon holding a link or a tmux
+    /// control client must stay up — that connection is the entire reason it
+    /// exists (and a control slot also holds the panes' buffers).
     async fn should_exit_idle(&self) -> bool {
-        if !self.links.lock().await.is_empty() {
-            return false;
-        }
-        self.last_activity.lock().await.elapsed() >= IDLE_TIMEOUT
+        let idle = self.last_activity.lock().await.elapsed();
+        idle_ready(
+            !self.links.lock().await.is_empty(),
+            !self.tmux.lock().await.is_empty(),
+            idle,
+        )
     }
 
-    /// Abort every pump and close every transport (daemon shutdown).
+    /// Abort every pump, close every transport and every control client
+    /// (daemon shutdown — `daemon stop` is the only way to lose the buffers).
     async fn shutdown(&self) {
         {
             let mut panes = self.panes.lock().await;
@@ -119,6 +207,15 @@ impl DaemonState {
             self.links.lock().await.drain().map(|(_, t)| t).collect();
         for t in links {
             let _ = t.close().await;
+        }
+        let controls: Vec<ControlSlot> =
+            self.tmux.lock().await.drain().map(|(_, c)| c).collect();
+        for mut slot in controls {
+            slot.stop_pumps();
+            slot.watcher.abort();
+            // `close()` drops stdin (tmux detaches) and reaps the child;
+            // the buffers die with the slot, by design (arch.md §13).
+            let _ = slot.control.close().await;
         }
     }
 
@@ -176,45 +273,105 @@ impl DaemonState {
                 if let Some(mut slot) = self.panes.lock().await.remove(&pane) {
                     slot.stop_pump();
                 }
+                // A tmux pane's buffer lives in its session's slot; `pane del`
+                // is a full teardown, so stop the subscriber and drop it.
+                let mut tmux = self.tmux.lock().await;
+                for slot in tmux.values_mut() {
+                    let keys: Vec<String> = slot
+                        .panes
+                        .iter()
+                        .filter(|(_, cp)| cp.pane == pane)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for key in keys {
+                        if let Some(mut cp) = slot.panes.remove(&key) {
+                            cp.stop_pump();
+                        }
+                    }
+                }
                 Ok(Response::ok())
             }
 
-            Request::Attach { pane, link } => {
-                // Never hold both locks: `links` is cloned out first so
-                // the ordering (links → panes) can't invert anywhere.
-                let transport = self
-                    .links
-                    .lock()
-                    .await
-                    .get(&link)
-                    .cloned()
-                    .ok_or_else(|| format!("link {link} is not held by the daemon"))?;
+            Request::OpenTmux { session, host, socket, name, cols: _, rows: _ } => {
+                // `cols`/`rows` are informational: `-C attach` takes no size,
+                // and a fresh client adopts the session's own geometry.
+                let config = ControlConfig { host, socket, name };
+                self.open_control(session, config).await?;
+                Ok(Response::structure(self.structure(session).await?))
+            }
 
-                let mut panes = self.panes.lock().await;
-                // Q1: a direct link has exactly ONE active pane. Mirror
-                // the manager's rule here — the daemon must enforce it
-                // too, otherwise two pumps would race on one transport
-                // (and duplicate every byte into two buffers).
-                for (other, slot) in panes.iter_mut() {
-                    if *other != pane && slot.link == Some(link) {
-                        slot.stop_pump();
-                        slot.link = None;
+            Request::Structure { session } => {
+                // The slot's own config is enough to re-open a client that
+                // died; without a slot the daemon has never been told where
+                // this session lives (it never reads `state.json`).
+                let config = {
+                    let slots = self.tmux.lock().await;
+                    slots.get(&session).map(|slot| slot.config.clone())
+                };
+                match config {
+                    Some(config) => {
+                        self.open_control(session, config).await?;
+                        Ok(Response::structure(self.structure(session).await?))
                     }
+                    None => Err(format!(
+                        "session {session} has no control client in the daemon (open it first)"
+                    )),
                 }
-                let slot = panes.entry(pane).or_insert_with(PaneSlot::new);
-                if slot.link == Some(link) && slot.pump.is_some() {
-                    return Ok(Response::ok());
-                }
-                slot.stop_pump();
-                slot.link = Some(link);
-                slot.pump = Some(spawn_pump(transport, Arc::clone(&slot.buffer)));
+            }
+
+            Request::TmuxCommand { session, command } => {
+                let control = self.control_for(session).await?;
+                let lines = control.send(&command).await.map_err(|e| e.to_string())?;
+                Ok(Response::lines(lines))
+            }
+
+            Request::CloseTmux { session } => {
+                self.close_control(session).await;
                 Ok(Response::ok())
+            }
+
+            Request::ProbeTmux { session } => {
+                Ok(Response::bool(self.probe_control(session).await))
+            }
+
+            Request::Attach { pane, link, key, session } => {
+                match (key, session) {
+                    (Some(key), Some(session)) => {
+                        self.attach_control_pane(session, pane, key).await?;
+                        Ok(Response::ok())
+                    }
+                    (None, _) => {
+                        let link = link.ok_or_else(|| {
+                            format!("pane {pane} has no link and no `%N` address to attach to")
+                        })?;
+                        self.attach_native_pane(pane, link).await
+                    }
+                    (Some(_), None) => Err(format!(
+                        "pane {pane} was given a `%N` key without the session it belongs to"
+                    )),
+                }
             }
 
             Request::Detach { pane } => {
                 if let Some(slot) = self.panes.lock().await.get_mut(&pane) {
                     slot.stop_pump();
                     slot.link = None;
+                }
+                // A tmux pane cannot be detached (its `%N` is its identity on
+                // the server), but stopping its subscriber is the closest
+                // honest answer if someone asks.
+                for slot in self.tmux.lock().await.values_mut() {
+                    let keys: Vec<String> = slot
+                        .panes
+                        .iter()
+                        .filter(|(_, cp)| cp.pane == pane)
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for key in keys {
+                        if let Some(cp) = slot.panes.get_mut(&key) {
+                            cp.stop_pump();
+                        }
+                    }
                 }
                 // Idempotent: detaching an unknown/already-detached pane
                 // is the state the caller asked for.
@@ -223,41 +380,43 @@ impl DaemonState {
 
             Request::Read { pane, max } => {
                 let buffer = {
-                    let panes = self.panes.lock().await;
-                    Arc::clone(
-                        &panes
-                            .get(&pane)
-                            .ok_or_else(|| format!("pane {pane} has no buffer in the daemon"))?
-                            .buffer,
-                    )
+                    let native = self.panes.lock().await.get(&pane).map(|s| Arc::clone(&s.buffer));
+                    match native {
+                        Some(buffer) => buffer,
+                        None => self.control_pane_buffer(pane).await.ok_or_else(|| {
+                            format!("pane {pane} has no buffer in the daemon")
+                        })?,
+                    }
                 };
-                let max = max.max(1);
-                let deadline = tokio::time::Instant::now() + READ_WAIT;
-                loop {
-                    {
-                        let ring = buffer.lock().await;
-                        if !ring.is_empty() {
-                            let mut out = vec![0u8; max.min(ring.len())];
-                            let n = ring.copy_out(&mut out);
-                            out.truncate(n);
-                            return Ok(Response::bytes(&out));
-                        }
-                    }
-                    if tokio::time::Instant::now() >= deadline {
-                        return Ok(Response::bytes(&[]));
-                    }
-                    tokio::time::sleep(READ_POLL).await;
-                }
+                Ok(Response::bytes(&read_snapshot(buffer, max).await))
             }
 
             Request::Write { pane, data } => {
                 let bytes = protocol::from_hex(&data).map_err(|e| e.to_string())?;
+                // A tmux pane's write is one protocol line on its session's
+                // control client, not a byte stream: same text rules as
+                // `ControlBridge` (UTF-8, no NUL — the protocol is line-framed).
+                if let Some((control, key)) = self.control_target(pane).await {
+                    let text = std::str::from_utf8(&bytes).map_err(|_| {
+                        "a tmux pane takes UTF-8 text; this payload is not valid UTF-8".to_string()
+                    })?;
+                    let command = tmux::send_keys_literal(&key, text).map_err(|e| e.to_string())?;
+                    control.send(&command).await.map_err(|e| e.to_string())?;
+                    return Ok(Response::count(bytes.len()));
+                }
                 let transport = self.pane_transport(pane).await?;
                 let n = transport.write(&bytes).await.map_err(|e| e.to_string())?;
                 Ok(Response::count(n))
             }
 
             Request::Resize { pane, cols, rows } => {
+                if let Some((control, key)) = self.control_target(pane).await {
+                    control
+                        .send(&tmux::resize_pane_command(&key, cols, rows))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    return Ok(Response::ok());
+                }
                 let transport = self.pane_transport(pane).await?;
                 transport
                     .resize(cols, rows)
@@ -268,6 +427,253 @@ impl DaemonState {
 
             Request::Stop => Ok(Response::ok()),
         }
+    }
+
+    /// The native pipe path of `Attach`: one pump on one transport, Q1
+    /// enforced (a direct link has exactly ONE active pane).
+    async fn attach_native_pane(
+        &self,
+        pane: PaneId,
+        link: LinkId,
+    ) -> std::result::Result<Response, String> {
+        // Never hold both locks: `links` is cloned out first so
+        // the ordering (links → panes) can't invert anywhere.
+        let transport = self
+            .links
+            .lock()
+            .await
+            .get(&link)
+            .cloned()
+            .ok_or_else(|| format!("link {link} is not held by the daemon"))?;
+
+        let mut panes = self.panes.lock().await;
+        // Q1: a direct link has exactly ONE active pane. Mirror
+        // the manager's rule here — the daemon must enforce it
+        // too, otherwise two pumps would race on one transport
+        // (and duplicate every byte into two buffers).
+        for (other, slot) in panes.iter_mut() {
+            if *other != pane && slot.link == Some(link) {
+                slot.stop_pump();
+                slot.link = None;
+            }
+        }
+        let slot = panes.entry(pane).or_insert_with(PaneSlot::new);
+        if slot.link == Some(link) && slot.pump.is_some() {
+            return Ok(Response::ok());
+        }
+        slot.stop_pump();
+        slot.link = Some(link);
+        slot.pump = Some(spawn_pump(transport, Arc::clone(&slot.buffer)));
+        Ok(Response::ok())
+    }
+
+    // ----- tmux control slots -----
+
+    /// Get the session's control client, spawning (or re-spawning) it as
+    /// needed. Idempotent: a live slot is reused as it is.
+    ///
+    /// `tmux_open` is held across the check-and-spawn so two CLI invocations
+    /// cannot each start a client for the same session (two clients would be
+    /// two `%output` streams, i.e. every byte twice).
+    async fn open_control(
+        &self,
+        session: SessionId,
+        config: ControlConfig,
+    ) -> std::result::Result<Arc<TmuxControl>, String> {
+        let _guard = self.tmux_open.lock().await;
+        let mut slots = self.tmux.lock().await;
+        if let Some(slot) = slots.get_mut(&session) {
+            if slot.is_alive() {
+                slot.config = config;
+                return Ok(Arc::clone(&slot.control));
+            }
+            // The client is gone (`%exit`, ssh dropped). Replace it, but KEEP
+            // the panes and their buffers: they are the only history there is
+            // (tmux replays nothing), and a re-attach re-subscribes them.
+            slot.stop_pumps();
+            slot.watcher.abort();
+            let control = spawn_control(&config)?;
+            // A fresh flag per client: the old watcher may still store `false`
+            // as it winds down, and it must not mark the new client dead.
+            let alive = Arc::new(AtomicBool::new(true));
+            slot.watcher = spawn_exit_watcher(Arc::clone(&control), Arc::clone(&alive));
+            slot.control = Arc::clone(&control);
+            slot.alive = alive;
+            slot.config = config;
+            return Ok(control);
+        }
+        let control = spawn_control(&config)?;
+        let alive = Arc::new(AtomicBool::new(true));
+        let watcher = spawn_exit_watcher(Arc::clone(&control), Arc::clone(&alive));
+        slots.insert(
+            session,
+            ControlSlot { control: Arc::clone(&control), panes: HashMap::new(), alive, config, watcher },
+        );
+        Ok(control)
+    }
+
+    /// The session's live control client, or an error naming why not.
+    async fn control_for(&self, session: SessionId) -> std::result::Result<Arc<TmuxControl>, String> {
+        let slots = self.tmux.lock().await;
+        let slot = slots
+            .get(&session)
+            .ok_or_else(|| format!("session {session} has no control client in the daemon"))?;
+        if !slot.is_alive() {
+            return Err(format!(
+                "session {session}'s control client is not alive (re-open it)"
+            ));
+        }
+        Ok(Arc::clone(&slot.control))
+    }
+
+    /// Enumerate the session through its control client: `list-windows` once,
+    /// then `list-panes` per window. One round trip each — no `tmux` exec per
+    /// command (arch.md §6).
+    async fn structure(&self, session: SessionId) -> std::result::Result<TmuxStructure, String> {
+        let (control, name) = {
+            let slots = self.tmux.lock().await;
+            let slot = slots
+                .get(&session)
+                .ok_or_else(|| format!("session {session} has no control client in the daemon"))?;
+            (Arc::clone(&slot.control), slot.config.name.clone())
+        };
+
+        let window_lines = control
+            .send(&tmux::list_windows_command(&name))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = TmuxStructure::default();
+        for line in &window_lines {
+            let Some(window) = tmux::parse_window_line(line) else { continue };
+            let pane_lines = control
+                .send(&tmux::list_panes_command(&window.handle))
+                .await
+                .map_err(|e| e.to_string())?;
+            for pane_line in &pane_lines {
+                let Some(pane) = tmux::parse_pane_line(pane_line) else { continue };
+                out.panes.push(TmuxPaneRow {
+                    handle: pane.handle,
+                    cols: pane.cols,
+                    rows: pane.rows,
+                    x: pane.x,
+                    y: pane.y,
+                    window_handle: window.handle.clone(),
+                });
+            }
+            out.windows.push(TmuxWindowRow {
+                handle: window.handle,
+                name: window.name,
+                cols: window.cols,
+                rows: window.rows,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn probe_control(&self, session: SessionId) -> bool {
+        self.tmux
+            .lock()
+            .await
+            .get(&session)
+            .map(ControlSlot::is_alive)
+            .unwrap_or(false)
+    }
+
+    /// Drop the slot — and therefore the child (`TmuxControl::drop` kills it)
+    /// and every buffer it held.
+    async fn close_control(&self, session: SessionId) {
+        let slot = self.tmux.lock().await.remove(&session);
+        if let Some(mut slot) = slot {
+            slot.stop_pumps();
+            slot.watcher.abort();
+            let _ = slot.control.close().await;
+        }
+    }
+
+    /// Subscribe this pane's `%output %N` into its buffer.
+    ///
+    /// Idempotent: an existing subscriber for that `%N` is left alone (a
+    /// second one would append every byte twice). The pane id is recorded so
+    /// `Read`/`Write` — which only know the xscore pane — can find it.
+    async fn attach_control_pane(
+        &self,
+        session: SessionId,
+        pane: PaneId,
+        key: String,
+    ) -> std::result::Result<(), String> {
+        let _guard = self.tmux_open.lock().await;
+        {
+            let mut slots = self.tmux.lock().await;
+            let slot = slots
+                .get_mut(&session)
+                .ok_or_else(|| format!("session {session} has no control client in the daemon"))?;
+            if !slot.is_alive() {
+                return Err(format!(
+                    "session {session}'s control client is not alive (re-open it)"
+                ));
+            }
+            if let Some(existing) = slot.panes.get_mut(&key) {
+                existing.pane = pane;
+                if existing.pump.is_some() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Subscribe BEFORE taking the slot lock again: `output` only registers
+        // a channel, and the pump below must not miss it.
+        let control = {
+            let slots = self.tmux.lock().await;
+            let slot = slots
+                .get(&session)
+                .ok_or_else(|| format!("session {session} has no control client in the daemon"))?;
+            Arc::clone(&slot.control)
+        };
+        let mut rx = control.output(&key).await.map_err(|e| e.to_string())?;
+
+        let mut slots = self.tmux.lock().await;
+        let slot = slots
+            .get_mut(&session)
+            .ok_or_else(|| format!("session {session} has no control client in the daemon"))?;
+        let buffer = slot
+            .panes
+            .get(&key)
+            .map(|cp| Arc::clone(&cp.buffer))
+            .unwrap_or_else(|| Arc::new(Mutex::new(RingBuffer::new(DIRECT_BUFFER_CAPACITY))));
+        let sink = Arc::clone(&buffer);
+        let pump = tokio::spawn(async move {
+            // Ends when the client closes: `%exit`/EOF drops every sender.
+            while let Some(bytes) = rx.recv().await {
+                sink.lock().await.push_slice(&bytes);
+            }
+        });
+        slot.panes.insert(key, ControlPane { pane, buffer, pump: Some(pump) });
+        Ok(())
+    }
+
+    /// The buffer of the tmux pane `pane`, if any slot is serving it.
+    async fn control_pane_buffer(&self, pane: PaneId) -> Option<Arc<Mutex<RingBuffer>>> {
+        let slots = self.tmux.lock().await;
+        slots
+            .values()
+            .flat_map(|slot| slot.panes.values())
+            .find(|cp| cp.pane == pane)
+            .map(|cp| Arc::clone(&cp.buffer))
+    }
+
+    /// The control client and `%N` behind a tmux pane: what a write or a
+    /// resize must address.
+    async fn control_target(&self, pane: PaneId) -> Option<(Arc<TmuxControl>, String)> {
+        let slots = self.tmux.lock().await;
+        for slot in slots.values() {
+            if !slot.is_alive() {
+                continue;
+            }
+            if let Some((key, _)) = slot.panes.iter().find(|(_, cp)| cp.pane == pane) {
+                return Some((Arc::clone(&slot.control), key.clone()));
+            }
+        }
+        None
     }
 
     /// The transport behind a pane's current link. The error text mirrors
@@ -309,7 +715,27 @@ impl DaemonState {
         }
         panes.sort_by_key(|p| p.pane.to_string());
 
-        Status { pid: std::process::id(), links, panes }
+        let mut tmux = Vec::new();
+        for (session, slot) in self.tmux.lock().await.iter() {
+            let mut buffered = 0usize;
+            let mut attached = 0usize;
+            for cp in slot.panes.values() {
+                if cp.pump.is_some() {
+                    attached += 1;
+                }
+                buffered += cp.buffer.lock().await.len();
+            }
+            tmux.push(TmuxStatus {
+                session: *session,
+                name: slot.config.name.clone(),
+                alive: slot.is_alive(),
+                panes: attached,
+                buffered,
+            });
+        }
+        tmux.sort_by_key(|t| t.name.clone());
+
+        Status { pid: std::process::id(), links, panes, tmux }
     }
 }
 
@@ -340,6 +766,65 @@ fn spawn_pump(transport: Arc<dyn Transport>, buffer: Arc<Mutex<RingBuffer>>) -> 
             }
         }
     })
+}
+
+/// Wait up to `READ_WAIT` for the buffer to hold bytes, then copy out a
+/// **non-destructive** snapshot (`DirectBridge::read`'s contract, which the
+/// CLI relies on: reading twice returns the same bytes).
+async fn read_snapshot(buffer: Arc<Mutex<RingBuffer>>, max: usize) -> Vec<u8> {
+    let max = max.max(1);
+    let deadline = tokio::time::Instant::now() + READ_WAIT;
+    loop {
+        {
+            let ring = buffer.lock().await;
+            if !ring.is_empty() {
+                let mut out = vec![0u8; max.min(ring.len())];
+                let n = ring.copy_out(&mut out);
+                out.truncate(n);
+                return out;
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Vec::new();
+        }
+        tokio::time::sleep(READ_POLL).await;
+    }
+}
+
+/// Spawn `tmux -C attach` for a session. The client — pipes, reader thread,
+/// writer thread — is exactly the one the CLI used to own; only its home
+/// changed (ADR 0010 §D2).
+fn spawn_control(config: &ControlConfig) -> std::result::Result<Arc<TmuxControl>, String> {
+    let prefix = tmux::host_prefix(&config.host);
+    TmuxControl::spawn(&prefix, &config.socket, &config.name)
+        .map(Arc::new)
+        .map_err(|e| e.to_string())
+}
+
+/// Turn `%exit` — tmux hanging up, the ssh channel dropping, the server
+/// going away — into `alive = false`, so `ProbeTmux` stops reporting a dead
+/// client as connected. The buffers stay: they are the only history there is.
+///
+/// The pane pumps need no help here: `%exit` makes `TmuxControl` drop every
+/// `%output` sender, which ends their `recv` loops.
+fn spawn_exit_watcher(control: Arc<TmuxControl>, alive: Arc<AtomicBool>) -> JoinHandle<()> {
+    let mut events = control.subscribe();
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let TmuxEvent::Exit { reason } = &event {
+                tracing::info!("tmux: control client exited: {reason}");
+                break;
+            }
+        }
+        alive.store(false, Ordering::SeqCst);
+    })
+}
+
+/// Exit only when nothing is left to serve: no native links, no tmux control
+/// slots, and `IDLE_TIMEOUT` of quiet. Split out so the gate itself is
+/// testable without spawning a client.
+fn idle_ready(has_links: bool, has_tmux: bool, idle: Duration) -> bool {
+    !has_links && !has_tmux && idle >= IDLE_TIMEOUT
 }
 
 /// Bind the socket and serve until told to stop.
@@ -435,7 +920,7 @@ pub async fn run() -> Result<()> {
             _ = shutdown.notified() => break,
             _ = tokio::time::sleep(IDLE_TICK) => {
                 if state.should_exit_idle().await {
-                    tracing::info!("daemon exiting: idle with no links");
+                    tracing::info!("daemon exiting: idle with no links and no tmux clients");
                     break;
                 }
             }
@@ -597,6 +1082,11 @@ mod tests {
         st
     }
 
+    /// The native `Attach` shape (a `%N` key is the tmux one).
+    fn attach(pane: PaneId, link: LinkId) -> Request {
+        Request::Attach { pane, link: Some(link), key: None, session: None }
+    }
+
     async fn read_pane(st: &DaemonState, pane: PaneId, max: usize) -> Vec<u8> {
         let resp = st.handle(Request::Read { pane, max }).await;
         assert!(resp.ok, "read failed: {:?}", resp.error);
@@ -611,7 +1101,7 @@ mod tests {
         let st = state_with_link(link, Arc::clone(&fake));
 
         st.handle(Request::CreatePane { pane }).await;
-        assert!(st.handle(Request::Attach { pane, link }).await.ok);
+        assert!(st.handle(attach(pane, link)).await.ok);
 
         // The pump drains the transport into the buffer; Read waits for
         // it (up to READ_WAIT) instead of racing it.
@@ -628,7 +1118,7 @@ mod tests {
         let fake = Fake::new(vec![]);
         let st = state_with_link(link, Arc::clone(&fake));
         st.handle(Request::CreatePane { pane }).await;
-        st.handle(Request::Attach { pane, link }).await;
+        st.handle(attach(pane, link)).await;
 
         let resp = st
             .handle(Request::Write { pane, data: protocol::to_hex(b"abc") })
@@ -659,7 +1149,7 @@ mod tests {
         let fake = Fake::new(vec![b"abc"]);
         let st = state_with_link(link, fake);
         st.handle(Request::CreatePane { pane }).await;
-        st.handle(Request::Attach { pane, link }).await;
+        st.handle(attach(pane, link)).await;
         assert_eq!(read_pane(&st, pane, 16).await, b"abc");
 
         assert!(st.handle(Request::Detach { pane }).await.ok);
@@ -682,8 +1172,8 @@ mod tests {
         for p in [p1, p2] {
             st.handle(Request::CreatePane { pane: p }).await;
         }
-        st.handle(Request::Attach { pane: p1, link }).await;
-        st.handle(Request::Attach { pane: p2, link }).await;
+        st.handle(attach(p1, link)).await;
+        st.handle(attach(p2, link)).await;
 
         let status = st.status().await;
         let attached: Vec<PaneId> = status
@@ -707,7 +1197,7 @@ mod tests {
         let fake = Fake::new(vec![b"keep-me"]);
         let st = state_with_link(link, Arc::clone(&fake));
         st.handle(Request::CreatePane { pane }).await;
-        st.handle(Request::Attach { pane, link }).await;
+        st.handle(attach(pane, link)).await;
         assert_eq!(read_pane(&st, pane, 32).await, b"keep-me");
 
         assert!(st.handle(Request::DeleteLink { link }).await.ok);
@@ -759,7 +1249,7 @@ mod tests {
         let pane = PaneId::new();
         let st = state_with_link(link, Fake::new(vec![b"12345"]));
         st.handle(Request::CreatePane { pane }).await;
-        st.handle(Request::Attach { pane, link }).await;
+        st.handle(attach(pane, link)).await;
         let _ = read_pane(&st, pane, 16).await;
 
         let resp = st.handle(Request::Status).await;
@@ -788,8 +1278,55 @@ mod tests {
     async fn attach_to_an_unknown_link_is_refused() {
         let st = DaemonState::new();
         let pane = PaneId::new();
-        let resp = st.handle(Request::Attach { pane, link: LinkId::new() }).await;
+        let resp = st.handle(attach(pane, LinkId::new())).await;
         assert!(!resp.ok);
         assert!(resp.error.unwrap_or_default().contains("not held by the daemon"));
+    }
+
+    #[tokio::test]
+    async fn probe_and_close_an_unknown_tmux_session_are_harmless() {
+        let st = DaemonState::new();
+        let sid = SessionId::new();
+        let probe = st.handle(Request::ProbeTmux { session: sid }).await;
+        assert!(probe.ok);
+        assert_eq!(probe.alive, Some(false));
+
+        // Closing a slot that was never opened is the state the caller asked
+        // for, and must not invent one.
+        assert!(st.handle(Request::CloseTmux { session: sid }).await.ok);
+        assert!(st.tmux.lock().await.is_empty());
+
+        // A structure query for a session the daemon was never told about is
+        // an error naming the reason, not an empty structure.
+        let resp = st.handle(Request::Structure { session: sid }).await;
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap_or_default().contains("open it first"));
+    }
+
+    #[tokio::test]
+    async fn a_tmux_slot_blocks_idle_exit() {
+        // The gate is "no links AND no control slots": a managed session must
+        // keep the daemon (and therefore its buffers) alive.
+        assert!(idle_ready(false, false, IDLE_TIMEOUT));
+        assert!(!idle_ready(true, false, IDLE_TIMEOUT), "a link must hold the daemon");
+        assert!(!idle_ready(false, true, IDLE_TIMEOUT), "a control slot must hold the daemon");
+        assert!(!idle_ready(false, false, IDLE_TIMEOUT / 2), "not idle long enough yet");
+    }
+
+    #[tokio::test]
+    async fn control_pane_writes_need_an_attached_control_client() {
+        // A write to a pane that is not in any tmux slot falls through to the
+        // native path, which says "not attached" (the message the CLI shows).
+        let st = DaemonState::new();
+        let pane = PaneId::new();
+        st.handle(Request::CreatePane { pane }).await;
+        let resp = st
+            .handle(Request::Write { pane, data: protocol::to_hex(b"x") })
+            .await;
+        assert!(!resp.ok);
+        assert!(resp.error.unwrap_or_default().contains("not attached"));
+        // ...and a read of a pane with no slot at all is refused, not empty.
+        let resp = st.handle(Request::Read { pane: PaneId::new(), max: 8 }).await;
+        assert!(!resp.ok);
     }
 }

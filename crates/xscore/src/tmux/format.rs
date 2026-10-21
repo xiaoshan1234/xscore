@@ -240,12 +240,6 @@ pub fn kill_pane_command(handle: &str) -> String {
     format!("kill-pane -t {handle}")
 }
 
-/// `capture-pane -p -t %N`: tmux's own scrollback, the fallback a fresh process
-/// reads when it streamed nothing itself (see `ControlBridge::read`).
-pub fn capture_pane_command(handle: &str) -> String {
-    format!("capture-pane -p -t {handle}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

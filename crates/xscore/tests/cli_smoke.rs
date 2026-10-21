@@ -1757,3 +1757,225 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
     let _ = xscore().args(["session", "kill", "build"]).output();
     cleanup_tmux(name);
 }
+
+// ===== v0.6.0 PR5: the daemon owns the tmux control clients =====
+//
+// These are the acceptance tests for "a pane's data is a stream, not a screen".
+// Every step is its own CLI process, so the only thing that can carry bytes
+// from the writer to the reader is the daemon's buffer: if the client (and its
+// `%output %N` subscription) lived in the CLI, the reader would have nothing
+// and the old `capture-pane` fallback would answer with the rendered screen
+// instead.
+//
+// The panes run `stty -echo raw; exec cat`:
+//   * `-echo` keeps the terminal's own echo off the stream (the bytes below
+//     must be what `cat` wrote, not what the line discipline showed);
+//   * `raw` is what makes a write **without a newline** reach `cat` at all —
+//     in cooked mode the pty holds it until a newline, so neither the screen
+//     nor `%output` ever sees it and no implementation could read it.
+//   * `cat` echoes what it reads back to its stdout, i.e. into the pane.
+
+/// `data write --from-file` in its own process.
+fn write_pane(xscore: &dyn Fn() -> Command, pane: &str, path: &std::path::Path) {
+    let out = xscore()
+        .args(["data", "write", "--pane", pane, "--from-file", path.to_str().unwrap()])
+        .output()
+        .expect("run data write");
+    assert!(ok(&out), "data write failed: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// `data read` in a fresh process, polled until it satisfies `done` (the pane's
+/// pump and the process hand-off are not instantaneous). Returns the last read.
+fn read_pane_until(
+    xscore: &dyn Fn() -> Command,
+    pane: &str,
+    done: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let read = xscore()
+            .args(["data", "read", "--pane", pane, "--bytes", "4096"])
+            .output()
+            .expect("run data read");
+        assert!(ok(&read), "data read failed: {}", String::from_utf8_lossy(&read.stderr));
+        last = String::from_utf8_lossy(&read.stdout).to_string();
+        if done(&last) {
+            return last;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    last
+}
+
+/// Test 1 — the discriminator between "stream" and "screen snapshot".
+///
+/// Process A writes three bytes with no newline; process B must read exactly
+/// those three bytes back. Then a burst longer than the pane's screen proves
+/// the buffer kept what the screen scrolled away.
+#[test]
+fn xscore_tmux_data_read_across_processes_is_a_stream() {
+    let name = "tmux_stream";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+    cleanup_daemon(name);
+
+    let created = xscore()
+        .args([
+            "session", "new", "work", "--tmux",
+            "--cmd", "stty -echo raw; exec cat",
+            "--cols", "40", "--rows", "3",
+        ])
+        .output()
+        .unwrap();
+    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    let pid = parse_id_from_stdout(&created.stdout, "pane");
+
+    // Process A: three bytes, deliberately unterminated.
+    let xyz = home_for(name).join("xyz.txt");
+    std::fs::write(&xyz, b"XYZ").unwrap();
+    write_pane(&xscore, &pid, &xyz);
+
+    // Process B: a new CLI, hydrating state from disk. Only the daemon's
+    // buffer can answer this — `XYZ` has never had a newline, and a screen
+    // snapshot of a line-discipline-held payload would be empty.
+    let first = read_pane_until(&xscore, &pid, |s| s == "XYZ");
+    assert_eq!(
+        first, "XYZ",
+        "a cross-process read must return the bytes written, not the screen: {first:?}"
+    );
+
+    // A burst that cannot fit on three rows: the screen forgets the start, the
+    // stream does not.
+    let burst = home_for(name).join("burst.txt");
+    std::fs::write(&burst, b"\nline1\nline2\nline3\nline4\nline5\n").unwrap();
+    write_pane(&xscore, &pid, &burst);
+
+    let all = read_pane_until(&xscore, &pid, |s| s.contains("line5"));
+    assert!(
+        all.starts_with("XYZ\nline1"),
+        "the buffer must hold the stream from its first byte: {all:?}"
+    );
+    assert!(
+        all.lines().count() > 3,
+        "only {} lines: this looks like a screen snapshot, not the stream",
+        all.lines().count()
+    );
+    let screen = tmux_stdout(name, &["capture-pane", "-p", "-t", "work"]);
+    assert!(
+        !screen.contains("XYZ"),
+        "the screen still shows what the read returned, so this proves nothing: {screen:?}"
+    );
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+    cleanup_daemon(name);
+}
+
+/// Test 2 — the buffers are daemon memory, exactly like a direct pane's.
+///
+/// `daemon stop` loses what was buffered and leaves the tmux session alone:
+/// re-creating scrollback is cheap, a durability contract is not (arch.md §13).
+#[test]
+fn xscore_daemon_restart_drops_tmux_buffers() {
+    let name = "daemon_tmux_buffers";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+    cleanup_daemon(name);
+
+    let created = xscore()
+        .args([
+            "session", "new", "work", "--tmux",
+            "--cmd", "stty -echo raw; exec cat",
+            "--cols", "40", "--rows", "3",
+        ])
+        .output()
+        .unwrap();
+    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    let pid = parse_id_from_stdout(&created.stdout, "pane");
+
+    let payload = home_for(name).join("kept.txt");
+    std::fs::write(&payload, b"buffered-in-daemon").unwrap();
+    write_pane(&xscore, &pid, &payload);
+    let seen = read_pane_until(&xscore, &pid, |s| s == "buffered-in-daemon");
+    assert_eq!(seen, "buffered-in-daemon", "the daemon never buffered the pane: {seen:?}");
+
+    let stop = xscore().args(["daemon", "stop"]).output().unwrap();
+    assert!(ok(&stop), "daemon stop failed: {}", String::from_utf8_lossy(&stop.stderr));
+
+    // A new daemon has no history for this pane (tmux replays nothing), so the
+    // read succeeds and says "nothing arrived" instead of inventing a screen.
+    let read = xscore()
+        .args(["data", "read", "--pane", &pid, "--bytes", "4096"])
+        .output()
+        .unwrap();
+    assert!(ok(&read), "data read failed: {}", String::from_utf8_lossy(&read.stderr));
+    assert!(
+        read.stdout.is_empty(),
+        "the buffer must be memory, like a native pane's: {:?}",
+        String::from_utf8_lossy(&read.stdout)
+    );
+
+    // ...and the tmux session itself was never touched.
+    let alive = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
+    assert!(alive.status.success(), "`daemon stop` must not end the tmux session");
+
+    let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+    cleanup_daemon(name);
+}
+
+/// Test 3 — `session kill` closes the daemon's slot as well as the server
+/// session: a client left attached to a dead session would keep the daemon
+/// (and its buffers) alive for nothing.
+#[test]
+fn xscore_session_kill_removes_the_daemon_slot() {
+    let name = "daemon_tmux_slot";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+    cleanup_daemon(name);
+
+    let created = xscore()
+        .args(["session", "new", "work", "--tmux"])
+        .output()
+        .unwrap();
+    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+
+    // Creating a managed session is what brings the daemon up, and it says so.
+    let status = xscore().args(["daemon", "status"]).output().unwrap();
+    assert!(ok(&status), "daemon status failed: {}", String::from_utf8_lossy(&status.stderr));
+    let v = json(&status.stdout);
+    let slots = v["status"]["tmux"].as_array().expect("status.tmux array");
+    let slot = slots
+        .iter()
+        .find(|t| t["name"] == serde_json::json!("work"))
+        .unwrap_or_else(|| panic!("the daemon must hold the tmux session: {v}"));
+    assert_eq!(slot["alive"], serde_json::json!(true), "and its client must be up: {slot}");
+
+    let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
+    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+
+    // The slot is gone. The daemon may also have idle-exited by now (it has
+    // nothing left to serve), which is the same answer.
+    let status = xscore().args(["daemon", "status"]).output().unwrap();
+    if status.status.success() {
+        let v = json(&status.stdout);
+        let slots = v["status"]["tmux"].as_array().cloned().unwrap_or_default();
+        assert!(
+            slots.iter().all(|t| t["name"] != serde_json::json!("work")),
+            "the daemon still holds the killed session: {v}"
+        );
+    } else {
+        assert!(
+            String::from_utf8_lossy(&status.stderr).contains("no daemon"),
+            "status failed for the wrong reason: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
+
+    let alive = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
+    assert!(!alive.status.success(), "the tmux session survived `session kill`");
+
+    cleanup_tmux(name);
+    cleanup_daemon(name);
+}

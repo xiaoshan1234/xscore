@@ -43,7 +43,7 @@ Session ── workspace; 1:1 with a tmux session, or standalone
 | Window | xscore grouping; no layout engine | mirrors a tmux window (`@N`) |
 | Pane | xscore buffer + geometry | is a tmux pane (`%N`) |
 | Link | **N** links, one per connection you opened (`Pipe`) | **exactly 1** link: the control client (`Control`) |
-| who feeds the pane buffer | the link's `PipeSink` | the link's `ControlSink`, routing `%output %N` |
+| who feeds the pane buffer | the link's `PipeSink` | the session's control client, routing `%output %N` (in the daemon) |
 | survives CLI exit | yes (daemon) | yes (tmux) |
 | attach a human | n/a | `exec tmux attach` |
 | multi-client | no | yes |
@@ -183,7 +183,7 @@ daemon, keyed by pane:
 - every pane, native or tmux, owns a `RingBuffer` (64 KiB);
 - a native pane's buffer is filled by its pipe link's reader;
 - a tmux pane's buffer is filled by `%output %N` arriving on the session's
-  control link, routed by `link_key`;
+  control client (which the daemon holds), routed by `link_key`;
 - a detached tmux pane keeps its buffer too, and tmux additionally keeps the
   scrollback, reachable with `capture-pane`.
 
@@ -286,8 +286,10 @@ pub enum Dispatch {
 
 - `PipeSink` emits one `Data { key: None }` per read. It is a forwarding device,
   and that is all a byte stream can be.
-- `ControlSink` parses the protocol: `%output` becomes `Data`, everything else
-  becomes `Event`, unknown `%` lines are dropped (§7).
+- The session's control client parses the protocol: `%output` becomes `Data`,
+  everything else becomes `Event`, unknown `%` lines are dropped (§7). (This
+  used to be a `ControlSink`; ADR 0010 §D7 folded the sink away, and the client
+  now lives in the daemon — §5.)
 
 Two properties of the protocol make this parser safe, both measured rather than
 assumed:
@@ -382,26 +384,38 @@ graph TB
 ```mermaid
 graph LR
     SRV["tmux server<br/>session work<br/>structure + one pty per pane"]
-    L["link work-ctl<br/>Control, one per session"]
-    SK["ControlSink<br/>line buffer, parse, demux"]
-    B["pane buffers<br/>%0, %1, %2"]
+    CLI["xscore CLI<br/>one process per command"]
+    subgraph D["daemon process"]
+        L["control slot: work-ctl<br/>Control link, one per session"]
+        AL["alive flag<br/>false on %exit"]
+        B["per-pane buffers %0, %1, %2<br/>one %output pump each"]
+    end
     ST["registries<br/>windows @N, panes %N"]
 
-    SRV -->|"%output %N + events"| L
-    L --> SK
-    SK -->|"Data key=%N"| B
-    SK -->|"Event"| ST
-    SK -->|"send-keys, split-window"| SRV
+    SRV -->|"%output %N and events"| L
+    L -->|"%output %N, by address"| B
+    L -->|"%exit"| AL
+    CLI -->|"OpenTmux, Structure, TmuxCommand, CloseTmux"| L
+    CLI -->|"Read and Write, by pane id"| B
+    CLI -->|"rows"| ST
+    L -->|"send-keys, split-window, list-windows"| SRV
 
     classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
     classDef ctl fill:#e8f5e9,stroke:#2e7d32
-    class SRV ext
-    class L,SK ctl
+    class SRV,CLI,ST ext
+    class L,AL,B ctl
 ```
 
 One link for the whole session, not one per pane: the link is the connection to
 the **server**, and `%output %N` is what makes a single stream addressable by
 three panes. Across ssh (§6) the same link is one channel; nothing else changes.
+
+The control slot lives in the **daemon** (ADR 0009 §1): the client, its
+`%output` subscriptions and every pane buffer are daemon state, so a CLI
+invocation that ends does not end the stream. The CLI's `Read`/`Write` are
+requests over the socket, keyed by pane id; `Structure` and `TmuxCommand` are
+the two ways it ever touches the client. In the no-daemon build (tests, an
+embedding caller) the same slot sits in the manager instead.
 
 ## 6. tmux over SSH
 
@@ -582,17 +596,33 @@ Parser rules, both learned from real output rather than documentation:
   3.5a emits `%unlinked-window-close` where older releases emitted
   `%window-close`. Unknown notifications are skipped, never fatal.
 
+**Structure is enumerated on touch, not mirrored.** The reader is a one-shot
+process: it does not exist between commands, so nothing of its own is
+subscribed, and an event that arrives while it is gone has nobody to notify.
+`window list` / `pane list` / `session show` therefore ask for the structure
+(`Structure` on the daemon, one `list-windows` plus one `list-panes` per window
+on any client) and reconcile the rows from that answer. Events keep their two
+real jobs: in the daemon, `%exit` is **liveness** (`alive=false`, and the
+client is re-opened or the slot dropped) and dropping a closed pane's buffer
+happens through the row reconciliation that follows from the enumeration; in
+the in-process build, where the client lives as long as the manager, events
+still update rows as they arrive. No command ever waits for an event, and
+nothing polls: "on touch" is one request per listing, not a ticker.
+
 Consequences of this being event-driven:
 
 - no `refresh`, no `--heal`, no global pass, no geometry polling;
 - `%exit` distinguishes "session gone" from "host unreachable" without exit-code
   guesswork;
 - a detached pane keeps its buffer (§3) and `data read` still returns what
-  arrived before the detach, but nothing new arrives until a client re-attaches.
+  arrived before the detach, but nothing new arrives until a client re-attaches;
+- a pane discovered late has no history: tmux replays nothing, so its buffer
+  starts empty and fills from the next byte (§13).
 
 `capture-pane` remains available as an explicit screen query (`pane screen`),
 because "the last 200 lines as rendered" and "the bytes since I last looked" are
-different questions and both are legitimate.
+different questions and both are legitimate. It is never what `data read`
+returns.
 
 ## 8. Lifecycle and invariants
 
@@ -916,9 +946,15 @@ hard error naming the command.
   not any bytes.
 - **The control client is a single point of failure per session.** If it dies,
   every pane in that session stops streaming at once (tmux keeps running;
-  re-attaching resumes, but the gap is lost).
+  re-attaching resumes, but the gap is lost). It now lives in the daemon, so
+  "the client died" and "the daemon died" are the same event.
 - **No replay.** Attaching a control client does not re-send earlier output;
   history exists only as scrollback (`capture-pane -S -`).
+- **Pane buffers live in daemon memory and are lost on `daemon stop`.** They are
+  the same kind of object as a native pane's buffer: seconds-to-minutes of
+  scrollback, not a durability contract. The tmux session is untouched; a read
+  after a restart returns nothing. A pane discovered late has no history either
+  — tmux replays nothing — so its buffer starts at the next byte.
 - **No exit status from a pane.** Liveness arrives as a pane-dead flag, not as a
   `waitpid` status.
 - **No renderer.** Native windows have no layout model and no drawing code;
@@ -932,4 +968,3 @@ hard error naming the command.
 - **Concurrent `state.json` writers still last-writer-wins.** Unchanged from
   v0.5.1. Sessions shrink the blast radius (mutations are scoped) but add no
   locking.
-- **Daemon idle exit still drops native pane buffers** (they are not persisted).

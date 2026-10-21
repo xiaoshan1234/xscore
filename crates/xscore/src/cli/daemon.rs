@@ -1,10 +1,11 @@
-// cli/daemon.rs (v0.5.0 — resident daemon, ADR 0009)
+// cli/daemon.rs (v0.5.0 — resident daemon, ADR 0009/0010)
 //
 // `xscore daemon serve|status|stop`.
 //
 // `serve` is normally started for you: the first command that needs a
-// direct-link transport (`link add`, `pane attach`) auto-starts it and
-// waits for the socket. `status`/`stop` are the manual handle on it.
+// transport or a tmux control client (`link add`, `session new --tmux`,
+// `pane attach`) auto-starts it and waits for the socket. `status`/`stop`
+// are the manual handle on it.
 
 use clap::Subcommand;
 
@@ -14,17 +15,20 @@ use crate::daemon::{client, protocol::Request};
 pub enum DaemonCmd {
     /// Run the daemon in the foreground (auto-start uses this).
     ///
-    /// Holds every live direct-link transport and every pane's byte
-    /// buffer, so they survive the CLI process that created them. Exits
-    /// after `daemon stop`, or after 5 s idle with no links.
+    /// Holds every live transport, every tmux session's control client and
+    /// every pane's byte buffer, so they survive the CLI process that
+    /// created them. Exits after `daemon stop`, or after 5 s idle with no
+    /// links and no tmux control clients.
     Serve,
 
     /// Print the daemon's status as JSON (pid, links, panes + buffered
-    /// byte counts). Exits non-zero if no daemon is running.
+    /// byte counts, and one entry per tmux session). Exits non-zero if no
+    /// daemon is running.
     Status,
 
-    /// Ask the daemon to exit (it closes its transports and removes its
-    /// socket). Direct links then report `connected: false`.
+    /// Ask the daemon to exit (it closes its transports and tmux clients,
+    /// and removes its socket). Direct links then report `connected: false`,
+    /// and tmux pane buffers are gone — they are memory.
     Stop,
 }
 
@@ -40,6 +44,21 @@ pub async fn run(cmd: DaemonCmd) -> anyhow::Result<()> {
                     "daemon refused status: {}",
                     resp.error.unwrap_or_else(|| "unknown error".into())
                 );
+            }
+            // One line per tmux session on stderr, so stdout stays the JSON a
+            // script (or a test) can parse while a human can still see what the
+            // daemon is doing.
+            if let Some(status) = &resp.status {
+                for t in &status.tmux {
+                    eprintln!(
+                        "tmux {}: {} alive={} panes={} buffered={}",
+                        t.session,
+                        t.name,
+                        t.alive,
+                        t.panes,
+                        t.buffered
+                    );
+                }
             }
             println!("{}", serde_json::to_string_pretty(&resp)?);
         }

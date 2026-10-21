@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   client and takes the server session down while `session forget` only detaches.
 
   New: `SessionManager::{create_tmux_session, create_tmux_session_with,
-  adopt_tmux_session, ensure_tmux_attached, refresh_tmux_session}`,
+  adopt_tmux_session, refresh_tmux_session}`,
   `ControlBridge`, `EndpointRef::{Pipe, Control}` on `LinkInfo`, `link_key` on
   `PaneInfo`, `tmux::format` (the `-F` parsers and `send_keys_literal`), and
   `util::resolve_socket` (`--socket`, then `XSCORE_SOCKET`, then the default
@@ -58,6 +58,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `control`, since that is now what decides how many panes a link serves.
 
 ### Changed
+
+- **tmux pane data is streamed by the daemon and survives CLI exit.**
+  The session's `tmux -C attach` client, its `%output %N` subscriptions and
+  every pane's `RingBuffer` moved from the CLI process into the resident
+  daemon (one control slot per session), so `data read` in a new process returns
+  the **bytes** since the daemon subscribed instead of a `capture-pane` screen
+  snapshot — the fallback is gone, and an empty buffer now means "nothing
+  arrived", which is what tmux's no-replay rule implies. Structure is a daemon
+  query (`Structure`: one `list-windows` plus one `list-panes` per window on
+  the resident client), so `window list` / `pane list` no longer spawn a client
+  per command and still see windows created outside xscore. Window/pane
+  mutations (`new-window`, `split-window`, `kill-pane`) ride the same client as
+  a `TmuxCommand`. Idle exit is now gated on **no links and no control slots**,
+  `daemon stop` closes the clients (pane buffers are memory and go with them),
+  and `session kill` / `session forget` send `CloseTmux` first. `link show`'s
+  `connected` for a `Control` link is a `ProbeTmux`, which reports `alive=false`
+  after `%exit`. In the no-daemon build (`data_smoke`) the client and pumps stay
+  in-process as before.
 
 - **State schema v3, and `xscore state migrate` to get there.** `state.json`
   gains the `sessions` list, and every link, window and pane gains a

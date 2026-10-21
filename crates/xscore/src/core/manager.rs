@@ -23,11 +23,24 @@
 // deleted at all — `session kill` / `session forget` are the verbs.
 //
 // v0.6.0 PR3b (ADR 0010 §D2) added tmux-backed sessions: `create_tmux_session`
-// / `adopt_tmux_session` spawn ONE `tmux -C attach` client per session, which
-// is the session's single `Control` link. Pane bytes arrive as `%output %N`
-// and are routed to the pane whose `link_key` is that handle; structure arrives
-// as events. PR4 deleted the old per-command tmux path, so the control client is
+// / `adopt_tmux_session` give a session ONE `tmux -C attach` client, which is
+// the session's single `Control` link. Pane bytes arrive as `%output %N` and
+// are routed to the pane whose `link_key` is that handle; structure arrives as
+// events. PR4 deleted the old per-command tmux path, so the control client is
 // only way xscore touches tmux data.
+//
+// v0.6.0 PR5 (ADR 0009 §1): the client — and every pane buffer it fills —
+// lives in the **daemon** when one is configured, so `data read` is a stream
+// across CLI invocations rather than a `capture-pane` snapshot. This module
+// therefore has two modes, and says so at each decision point:
+//
+//   * daemon mode (`main.rs` always enables it): `OpenTmux`/`Structure`/
+//     `TmuxCommand`/`Attach {key}`/`CloseTmux` on the daemon; no client, no
+//     pump and no buffer of ours. Structure is *enumerated on touch*.
+//   * in-process mode (`data_smoke`, an embedding caller): exactly what PR3b
+//     built — spawn the client here, pump `%output` into `pane_buffers`, react
+//     to events. Kept behind `daemon.is_none()` so the tests keep covering the
+//     tmux protocol itself, without a socket in the way.
 //
 // State persistence: `save_state` writes `StateSnapshot` (schema v3);
 // see `core::state` for the version gate and the migrations.
@@ -89,7 +102,10 @@ pub struct SessionManager {
     /// (that is what `data_smoke` exercises).
     daemon: Option<Arc<DaemonClient>>,
     /// v0.6.0 (ADR 0010 §D2): the live control client of every tmux-backed
-    /// session this manager has attached. One per session — a tmux session is
+    /// session this process attached, **in-process mode only**. With a daemon
+    /// the client belongs to the daemon (`tmux: HashMap<SessionId,
+    /// ControlSlot>` there), because a client that dies with the CLI cannot
+    /// stream anything into the next one. One per session — a tmux session is
     /// driven by exactly one client, and a second subscriber for the same
     /// `%output %N` would append every byte twice.
     tmux_controls: Arc<Mutex<HashMap<SessionId, Arc<TmuxControl>>>>,
@@ -155,14 +171,28 @@ impl SessionManager {
     pub async fn link_is_connected(&self, lid: LinkId) -> bool {
         let Some(link) = self.links.get(lid).await else { return false };
         if link.info.is_control() {
-            // The attached client is the fast, exact answer; note that a stale
-            // handle (closed by `%exit`) must not count as connected.
+            let sid = link.info.session_id;
+            // v0.6.0 PR5: the daemon owns the session's client, so its
+            // liveness IS the answer (ADR 0010 §4: the link is the connection).
+            // A daemon that is not running holds no client, but that says
+            // nothing about the tmux session — fall through to the server.
+            // (With a daemon that IS running but holds no client for this
+            // session, `connected` is false: nothing is streaming, and asking
+            // the server would put a `has-session` exec behind every `link
+            // show`, which is what moving the client here was meant to end.)
+            if self.daemon.is_some() {
+                if let Ok(alive) = crate::daemon::client::probe_tmux(sid).await {
+                    return alive;
+                }
+            }
+            // In-process: the attached client, then the session-keyed map (a
+            // stale handle closed by `%exit` must not count as connected).
             if let Some(control) = &link.control {
                 if !control.is_closed() {
                     return true;
                 }
             }
-            let held = { self.tmux_controls.lock().await.get(&link.info.session_id).cloned() };
+            let held = { self.tmux_controls.lock().await.get(&sid).cloned() };
             if let Some(control) = held {
                 return !control.is_closed();
             }
@@ -170,7 +200,7 @@ impl SessionManager {
             // is the honest answer; reporting `false` would call a perfectly
             // healthy session disconnected just because this process did not
             // attach. This is a `show`, and showing is live (arch.md §6).
-            let Ok(info) = self.get_session(link.info.session_id).await else { return false };
+            let Ok(info) = self.get_session(sid).await else { return false };
             return match info.backend {
                 SessionBackend::Tmux { host, socket, session } => self
                     .tmux_session_exists(&host, &socket, &session)
@@ -305,9 +335,20 @@ impl SessionManager {
             // is streaming into rows that are about to disappear), then
             // `kill-session` takes the server session down. Both steps are best
             // effort — a session that is already gone must still lose its rows.
-            let control = { self.tmux_controls.lock().await.remove(&id) };
-            if let Some(control) = control {
-                let _ = control.close().await;
+            //
+            // v0.6.0 PR5: in daemon mode the client (and its buffers) is the
+            // daemon's, so `CloseTmux` is the whole teardown; `kill-session`
+            // stays a one-shot exec (arch.md §6 allows exactly that shape).
+            match &self.daemon {
+                Some(client) => {
+                    let _ = client.close_tmux(id).await;
+                }
+                None => {
+                    let control = { self.tmux_controls.lock().await.remove(&id) };
+                    if let Some(control) = control {
+                        let _ = control.close().await;
+                    }
+                }
             }
             let _ = self
                 .run_tmux(
@@ -392,12 +433,19 @@ impl SessionManager {
             return Err(Error::ForgetNativeSession(id));
         }
 
-        // Detach: the control client is closed, which is what ends the pumps,
-        // and tmux keeps running (arch.md §8, "session forget leaves the
-        // backend running").
-        let control = { self.tmux_controls.lock().await.remove(&id) };
-        if let Some(control) = control {
-            let _ = control.close().await;
+        // Detach: the control client is closed (in daemon mode: `CloseTmux`,
+        // which drops the slot and therefore its buffers), and tmux keeps
+        // running (arch.md §8, "session forget leaves the backend running").
+        match &self.daemon {
+            Some(client) => {
+                let _ = client.close_tmux(id).await;
+            }
+            None => {
+                let control = { self.tmux_controls.lock().await.remove(&id) };
+                if let Some(control) = control {
+                    let _ = control.close().await;
+                }
+            }
         }
 
         // No `del_link`, no `close()`: both would terminate something that
@@ -455,11 +503,13 @@ impl SessionManager {
     //   * the registries (`WindowInfo` mirrors `@N`, `PaneInfo` mirrors `%N`);
     //   * the pane buffers, filled from `%output %N` and routed by `link_key`.
     //
-    // Structure arrives as events (`%window-add`, `%layout-change`,
-    // `%unlinked-window-close`), never from polling — but a CLI invocation is
-    // its own process, so a command that has to *see* the structure re-reads it
-    // through `ensure_tmux_attached` (arch.md §7, and ADR 0009's daemon is
-    // where that client will eventually live between commands).
+    // Where the client lives is the one thing PR5 changed: with a daemon it is
+    // the daemon's (so the buffers outlive this process and `data read` is a
+    // stream), without one it is this process's. Structure is therefore
+    // **enumerated on touch**: a one-shot CLI has no event subscription between
+    // commands, so a listing asks for the structure through whichever client
+    // holds it. Events still drive the in-process pumps (and liveness, in the
+    // daemon: `%exit` flips the slot's `alive` flag).
 
     /// Create a real tmux session and manage it.
     ///
@@ -541,22 +591,45 @@ impl SessionManager {
 
     /// Re-read a tmux session's structure now.
     ///
-    /// The event pump keeps a live manager in step, but this CLI is one
-    /// process per command: between commands no client is attached, so a
-    /// window created outside xscore is invisible until something attaches.
-    /// Listings call this for exactly that reason, and attaching is also what
-    /// gives a migrated session its control link (see `ensure_control_link`).
+    /// Listings call this because a CLI invocation is one process per command:
+    /// between commands nothing of ours is listening, so a window created
+    /// outside xscore is invisible until something asks. In daemon mode that is
+    /// one `Structure` request to the resident client; in-process it is an
+    /// attach for the lifetime of this command (arch.md §7).
     pub async fn refresh_tmux_session(&self, id: SessionId) -> Result<()> {
-        self.ensure_tmux_attached(id).await.map(|_| ())
+        // A session whose rows came from `state migrate` has no control link
+        // yet; reconciliation records every pane against it.
+        self.ensure_control_link(id).await?;
+        match &self.daemon {
+            Some(client) => match client.structure(id).await {
+                Ok(structure) => {
+                    let view = TmuxView::from_structure(structure);
+                    self.reconcile_all(id, &view, None).await.map(|_| ())
+                }
+                // The daemon holds no client yet (it restarted, or this is the
+                // first command since boot). Opening one enumerates as well,
+                // so both paths end in the same rows.
+                Err(_) => self.attach_daemon(id).await,
+            },
+            None => {
+                let control = self.ensure_local_control(id).await?;
+                let view = self.view_with(&control, id).await?;
+                self.reconcile_all(id, &view, Some(&control)).await.map(|_| ())
+            }
+        }
     }
 
-    /// The session's control client, attached on demand.
+    /// The session's control client **in this process**, attached on demand.
+    ///
+    /// Only used when there is no daemon (`data_smoke`, an embedding caller).
+    /// With a daemon the client is the daemon's (`OpenTmux`), so this is never
+    /// reached — `attach_daemon` is its counterpart.
     ///
     /// Attaching is also the reconnect path: after `%exit` (the client died,
     /// the ssh channel dropped) the handle is closed, so it is dropped and
     /// replaced. Output produced while nothing was attached is gone — tmux
     /// replays nothing (ADR 0010 §D2) — but the session itself keeps running.
-    pub async fn ensure_tmux_attached(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
+    async fn ensure_local_control(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
         // Held across the check-and-spawn: see `tmux_attach`.
         let _guard = self.tmux_attach.lock().await;
         let existing = { self.tmux_controls.lock().await.get(&id).cloned() };
@@ -566,45 +639,78 @@ impl SessionManager {
             }
             self.tmux_controls.lock().await.remove(&id);
         }
-        self.attach_tmux(id).await
+        self.attach_local_control(id).await
     }
 
-    /// Spawn the control client, enumerate the session, start the pumps.
+    /// Spawn the in-process control client, enumerate the session, start the
+    /// pumps.
     ///
     /// The caller serialises attaches (`tmux_attach`); this is not reentrant.
     /// A session that has no control link yet (one whose rows were converted by
     /// `state migrate`) gets it here: attaching IS what creates it.
-    async fn attach_tmux(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
+    async fn attach_local_control(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
+        // Row first: `sync_window` records every pane against it.
         self.ensure_control_link(id).await?;
-        let info = self.get_session(id).await?;
-        let SessionBackend::Tmux { host, socket, session } = info.backend else {
-            return Err(Error::NotTmuxSession(id));
-        };
-        let prefix = crate::tmux::host_prefix(&host);
-        let control = Arc::new(TmuxControl::spawn(&prefix, &socket, &session)?);
+        let target = self.tmux_target(id).await?;
+        let prefix = crate::tmux::host_prefix(&target.host);
+        let control = Arc::new(TmuxControl::spawn(&prefix, &target.socket, &target.name)?);
 
         // Subscribe BEFORE enumerating: `%output` is not replayed, so a pane
         // added between the enumeration and the subscription would stream into
         // nothing until it next prints.
         let events = control.subscribe();
 
-        if let Err(e) = self.reconcile_all(id, &control).await {
-            // Do not leave a client attached to a session we could not adopt.
+        let view = match TmuxView::enumerate(&control, &target.name).await {
+            Ok(view) => view,
+            Err(e) => {
+                // Do not leave a client attached to a session we could not adopt.
+                let _ = control.close().await;
+                // The client dying during the handshake means one of two things
+                // — the session is gone, or the host never answered — and
+                // `attach` cannot tell them apart (only a one-shot's exit 255
+                // can, arch.md §6). Say what happened instead of surfacing the
+                // raw "closed".
+                return Err(Error::Sink(format!(
+                    "could not attach to tmux session `{}` on {}: {e}",
+                    target.name,
+                    crate::tmux::host_label(&target.host)
+                )));
+            }
+        };
+
+        if let Err(e) = self.reconcile_all(id, &view, Some(&control)).await {
             let _ = control.close().await;
-            // The client dying during the handshake means one of two things —
-            // the session is gone, or the host never answered — and `attach`
-            // cannot tell them apart (only a one-shot's exit 255 can, arch.md
-            // §6). Say what happened instead of surfacing the raw "closed".
-            return Err(Error::Sink(format!(
-                "could not attach to tmux session `{session}` on {}: {e}",
-                crate::tmux::host_label(&host)
-            )));
+            return Err(e);
         }
 
         self.tmux_controls.lock().await.insert(id, Arc::clone(&control));
         self.record_control(id, &control).await;
         self.start_event_pump(id, Arc::clone(&control), events);
         Ok(control)
+    }
+
+    /// Attach in daemon mode: one `OpenTmux` (create-or-reuse the client) that
+    /// answers with the structure, so the rows come from the same round trip
+    /// that opened the session.
+    async fn attach_daemon(&self, id: SessionId) -> Result<()> {
+        // Row first: `sync_window` records every pane against it.
+        self.ensure_control_link(id).await?;
+        let target = self.tmux_target(id).await?;
+        let Some(client) = &self.daemon else {
+            return Err(Error::Daemon("no daemon configured".into()));
+        };
+        let structure = client
+            .open_tmux(id, target.host, target.socket, &target.name, target.cols, target.rows)
+            .await?;
+        let view = TmuxView::from_structure(structure);
+        self.reconcile_all(id, &view, None).await?;
+        Ok(())
+    }
+
+    /// Enumerate a tmux session through a client this process holds.
+    async fn view_with(&self, control: &Arc<TmuxControl>, id: SessionId) -> Result<TmuxView> {
+        let target = self.tmux_target(id).await?;
+        TmuxView::enumerate(control, &target.name).await
     }
 
     /// Note the live client on the session's control link (ADR 0010 §4: the
@@ -681,18 +787,26 @@ impl SessionManager {
         Ok(sid)
     }
 
-    /// Create the session's single link and attach its control client.
+    /// Create the session's single link and attach its control client — in the
+    /// daemon when there is one, here otherwise.
     async fn open_control_link(&self, id: SessionId) -> Result<LinkId> {
         let link_id = self.ensure_control_link(id).await?;
-        self.attach_tmux(id).await?;
+        match &self.daemon {
+            Some(_) => self.attach_daemon(id).await?,
+            None => {
+                self.ensure_local_control(id).await?;
+            }
+        }
         Ok(link_id)
     }
 
-    /// Make sure the session has its control link row, and return its id.
+    /// Make sure the session has its control link **row**, and return its id.
     ///
     /// Idempotent: this is the one place that materialises the link, so a
     /// session created by `session new --tmux`, one adopted, and one whose rows
-    /// came from `state migrate` all end up with exactly one.
+    /// came from `state migrate` all end up with exactly one. Attaching is a
+    /// separate step (`open_control_link` / `ensure_local_control` /
+    /// `attach_daemon`): a row is metadata, a client is a process.
     async fn ensure_control_link(&self, id: SessionId) -> Result<LinkId> {
         if let Some(link_id) = self.control_link_id(id).await {
             return Ok(link_id);
@@ -732,30 +846,45 @@ impl SessionManager {
 
     // ----- enumeration -----
 
-    /// Re-read every window and pane of the session.
+    /// Where a tmux session lives, plus the size the caller saw.
+    ///
+    /// The daemon needs this for `OpenTmux` (it never reads `state.json`); the
+    /// size is informational there (`-C attach` takes none).
+    async fn tmux_target(&self, id: SessionId) -> Result<TmuxTarget> {
+        let info = self.get_session(id).await?;
+        let SessionBackend::Tmux { host, socket, session } = info.backend else {
+            return Err(Error::NotTmuxSession(id));
+        };
+        let size = self
+            .windows
+            .list_all()
+            .await
+            .iter()
+            .find(|w| w.info.session_id == id)
+            .map(|w| (w.info.cols, w.info.rows))
+            .unwrap_or((80, 24));
+        Ok(TmuxTarget { host, socket, name: session, cols: size.0, rows: size.1 })
+    }
+
+    /// Re-read every window and pane of the session from one enumeration.
     ///
     /// Idempotent: rows are matched by handle (`@N`/`%N`, never the index), so
     /// running it twice changes nothing. Rows tmux no longer has are dropped.
-    async fn reconcile_all(&self, id: SessionId, control: &Arc<TmuxControl>) -> Result<bool> {
-        let info = self.get_session(id).await?;
-        let SessionBackend::Tmux { session, .. } = info.backend else {
-            return Err(Error::NotTmuxSession(id));
-        };
+    /// `local` is the in-process client (daemon mode passes `None`: the daemon
+    /// already owns the subscribers, and rows only mirror them).
+    async fn reconcile_all(
+        &self,
+        id: SessionId,
+        view: &TmuxView,
+        local: Option<&Arc<TmuxControl>>,
+    ) -> Result<bool> {
         let _guard = self.tmux_reconcile.lock().await;
-
-        let lines = control
-            .send(&crate::tmux::list_windows_command(&session))
-            .await?;
-        let windows: Vec<WindowLine> = lines
-            .iter()
-            .filter_map(|line| crate::tmux::parse_window_line(line))
-            .collect();
 
         let mut changed = false;
         let mut seen: HashSet<String> = HashSet::new();
-        for window in &windows {
+        for window in &view.windows {
             seen.insert(window.handle.clone());
-            changed |= self.sync_window(id, control, window).await?;
+            changed |= self.sync_window(id, view, window, local).await?;
         }
 
         let stale: Vec<WindowId> = self
@@ -785,23 +914,13 @@ impl SessionManager {
     async fn reconcile_window(
         &self,
         id: SessionId,
-        control: &Arc<TmuxControl>,
+        view: &TmuxView,
         handle: &str,
+        local: Option<&Arc<TmuxControl>>,
     ) -> Result<bool> {
-        let info = self.get_session(id).await?;
-        let SessionBackend::Tmux { session, .. } = info.backend else {
-            return Err(Error::NotTmuxSession(id));
-        };
         let _guard = self.tmux_reconcile.lock().await;
 
-        let lines = control
-            .send(&crate::tmux::list_windows_command(&session))
-            .await?;
-        let window = lines
-            .iter()
-            .filter_map(|line| crate::tmux::parse_window_line(line))
-            .find(|w| w.handle == handle);
-        let Some(window) = window else {
+        let Some(window) = view.windows.iter().find(|w| w.handle == handle) else {
             // Gone between the notification and the query: treat it as the
             // close it already is.
             let changed = self.forget_window_by_handle(id, handle).await;
@@ -811,22 +930,35 @@ impl SessionManager {
             return Ok(changed);
         };
 
-        let changed = self.sync_window(id, control, &window).await?;
+        let changed = self.sync_window(id, view, window, local).await?;
         if changed {
             self.save_state().await?;
         }
         Ok(changed)
     }
 
-    /// Upsert one window and its panes; start an output pump for each pane that
+    /// Enumerate through this process's client, then reconcile one window
+    /// (the event pump's path — daemon mode has no event pump here).
+    async fn reconcile_window_from_control(
+        &self,
+        id: SessionId,
+        control: &Arc<TmuxControl>,
+        handle: &str,
+    ) -> Result<bool> {
+        let view = self.view_with(control, id).await?;
+        self.reconcile_window(id, &view, handle, Some(control)).await
+    }
+
+    /// Upsert one window and its panes; start a subscriber for each pane that
     /// did not exist before.
     ///
     /// The caller holds `tmux_reconcile`.
     async fn sync_window(
         &self,
         id: SessionId,
-        control: &Arc<TmuxControl>,
+        view: &TmuxView,
         window: &WindowLine,
+        local: Option<&Arc<TmuxControl>>,
     ) -> Result<bool> {
         let Some(link_id) = self.control_link_id(id).await else {
             return Err(Error::Sink(format!(
@@ -868,16 +1000,11 @@ impl SessionManager {
             }
         };
 
-        let lines = control
-            .send(&crate::tmux::list_panes_command(&window.handle))
-            .await?;
-        let panes: Vec<PaneLine> = lines
-            .iter()
-            .filter_map(|line| crate::tmux::parse_pane_line(line))
-            .collect();
+        let empty: Vec<PaneLine> = Vec::new();
+        let panes = view.panes.get(&window.handle).unwrap_or(&empty);
 
         let mut seen: HashSet<String> = HashSet::new();
-        for pane in &panes {
+        for pane in panes {
             seen.insert(pane.handle.clone());
             match self.pane_by_link_key(id, &pane.handle).await {
                 Some(existing) => {
@@ -923,9 +1050,8 @@ impl SessionManager {
                         arc.panes.lock().await.push(pid);
                     }
                     // A pane with no subscriber loses its bytes: tmux replays
-                    // nothing, so the pump starts with the row.
-                    self.start_output_pump(Arc::clone(control), pid, pane.handle.clone())
-                        .await;
+                    // nothing, so the subscriber starts with the row.
+                    self.start_pane_pump(id, local, pid, &pane.handle).await;
                     changed = true;
                 }
             }
@@ -1007,6 +1133,10 @@ impl SessionManager {
     // ----- pumps -----
 
     /// One task per session: structure changes become registry rows.
+    ///
+    /// In-process mode only. In daemon mode the client is the daemon's, so
+    /// there is nothing here to subscribe: structure is enumerated on touch
+    /// (arch.md §7) and `%exit` only flips the daemon slot's `alive` flag.
     fn start_event_pump(
         &self,
         id: SessionId,
@@ -1024,7 +1154,9 @@ impl SessionManager {
                     TmuxEvent::WindowAdd { handle }
                     | TmuxEvent::WindowRenamed { handle }
                     | TmuxEvent::LayoutChange { handle, .. } => {
-                        if let Err(e) = manager.reconcile_window(id, &control, &handle).await {
+                        if let Err(e) =
+                            manager.reconcile_window_from_control(id, &control, &handle).await
+                        {
                             tracing::warn!("tmux: could not reconcile window {handle}: {e}");
                         }
                     }
@@ -1061,6 +1193,31 @@ impl SessionManager {
         });
     }
 
+    /// Give a new pane its `%output %N` subscriber, wherever the client lives.
+    ///
+    /// In-process: a task here appending to `pane_buffers`. Daemon: one
+    /// `Attach`, and the daemon's own pump fills the daemon's buffer — which is
+    /// the whole point of moving the client there.
+    async fn start_pane_pump(
+        &self,
+        id: SessionId,
+        local: Option<&Arc<TmuxControl>>,
+        pid: PaneId,
+        key: &str,
+    ) {
+        if let Some(control) = local {
+            self.start_output_pump(Arc::clone(control), pid, key.to_string()).await;
+            return;
+        }
+        if let Some(client) = &self.daemon {
+            if let Err(e) = client.attach_pane(id, pid, key).await {
+                // Not fatal: the row is still right, and the next data op
+                // re-attaches (`control_bridge`).
+                tracing::warn!("tmux: daemon could not subscribe pane {key}: {e}");
+            }
+        }
+    }
+
     /// One task per pane: `%output %N` appended to that pane's buffer.
     async fn start_output_pump(&self, control: Arc<TmuxControl>, pid: PaneId, key: String) {
         let buffer = self.buffer_for(pid).await;
@@ -1076,6 +1233,63 @@ impl SessionManager {
                 buffer.lock().await.push_slice(&bytes);
             }
         });
+    }
+
+    /// Run one command on the session's control client, wherever it lives.
+    ///
+    /// Only the mutations that must stay on the one client use this
+    /// (`new-window`, `split-window`, `kill-pane`). Data goes through the
+    /// pane's bridge and structure through `Structure`; neither is an exec.
+    async fn tmux_send(&self, id: SessionId, command: &str) -> Result<Vec<String>> {
+        match &self.daemon {
+            Some(client) => client.tmux_command(id, command).await,
+            None => self.ensure_local_control(id).await?.send(command).await,
+        }
+    }
+
+    /// Re-read one window after a mutation and reconcile it into rows.
+    async fn refresh_window(&self, id: SessionId, handle: &str) -> Result<bool> {
+        match &self.daemon {
+            Some(_) => {
+                let view = self.tmux_view(id).await?;
+                self.reconcile_window(id, &view, handle, None).await
+            }
+            None => {
+                let control = self.ensure_local_control(id).await?;
+                self.reconcile_window_from_control(id, &control, handle).await
+            }
+        }
+    }
+
+    /// One enumeration through whichever client holds the session.
+    async fn tmux_view(&self, id: SessionId) -> Result<TmuxView> {
+        match &self.daemon {
+            Some(client) => {
+                let structure = match client.structure(id).await {
+                    Ok(structure) => structure,
+                    // No client in the daemon yet (it restarted): opening one
+                    // enumerates too.
+                    Err(_) => {
+                        let target = self.tmux_target(id).await?;
+                        client
+                            .open_tmux(
+                                id,
+                                target.host,
+                                target.socket,
+                                &target.name,
+                                target.cols,
+                                target.rows,
+                            )
+                            .await?
+                    }
+                };
+                Ok(TmuxView::from_structure(structure))
+            }
+            None => {
+                let control = self.ensure_local_control(id).await?;
+                self.view_with(&control, id).await
+            }
+        }
     }
 
     // ----- one-shot tmux commands (arch.md §6, "two exec shapes") -----
@@ -1460,9 +1674,8 @@ impl SessionManager {
                 Ok(window_id)
             }
             SessionBackend::Tmux { .. } => {
-                let control = self.ensure_tmux_attached(session).await?;
-                let lines = control
-                    .send(&crate::tmux::new_window_command(name.as_deref()))
+                let lines = self
+                    .tmux_send(session, &crate::tmux::new_window_command(name.as_deref()))
                     .await?;
                 let handle = tmux_handle_from(&lines, '@').ok_or_else(|| {
                     Error::Sink(format!(
@@ -1471,7 +1684,7 @@ impl SessionManager {
                 })?;
                 // Read the new window back: the row must be tmux's view of it,
                 // not our guess at its geometry or name.
-                self.reconcile_window(session, &control, &handle).await?;
+                self.refresh_window(session, &handle).await?;
                 self.window_for_handle_in(session, &handle)
                     .await
                     .ok_or_else(|| {
@@ -1557,16 +1770,15 @@ impl SessionManager {
                 });
             }
             if let Some(handle) = arc_window.info.backend.tmux_handle().map(str::to_string) {
-                let control = self.ensure_tmux_attached(session).await?;
-                let lines = control
-                    .send(&crate::tmux::split_window_command(&handle))
+                let lines = self
+                    .tmux_send(session, &crate::tmux::split_window_command(&handle))
                     .await?;
                 let key = tmux_handle_from(&lines, '%').ok_or_else(|| {
                     Error::Sink(format!(
                         "tmux split-window did not report a pane handle: {lines:?}"
                     ))
                 })?;
-                self.reconcile_window(session, &control, &handle).await?;
+                self.refresh_window(session, &handle).await?;
                 let existing = self.pane_by_link_key(session, &key).await.ok_or_else(|| {
                     Error::Sink(format!(
                         "tmux created pane {key} but it did not become a row"
@@ -1623,14 +1835,12 @@ impl SessionManager {
         // A pane tmux owns is killed on the server: dropping only the row would
         // leave a `%N` that the next reconciliation adopts right back.
         if let Some(key) = info.link_key.clone() {
-            if let Ok(control) = self.ensure_tmux_attached(info.session_id).await {
-                if let Err(e) = control
-                    .send(&crate::tmux::kill_pane_command(&key))
-                    .await
-                {
-                    // Already gone is the state we wanted.
-                    tracing::debug!("pane del: kill-pane {key} failed: {e}");
-                }
+            if let Err(e) = self
+                .tmux_send(info.session_id, &crate::tmux::kill_pane_command(&key))
+                .await
+            {
+                // Already gone is the state we wanted.
+                tracing::debug!("pane del: kill-pane {key} failed: {e}");
             }
         }
         if let Some(wid) = info.window_id {
@@ -1988,6 +2198,12 @@ impl SessionManager {
     /// Attaching here — rather than only at creation — is what makes
     /// `data read/write` work from a process that did nothing but load
     /// `state.json` (arch.md §7: the structure is live, not a mirror).
+    ///
+    /// v0.6.0 PR5: with a daemon, the read path is the **daemon's** buffer, so
+    /// the daemon must hold the client (it may have restarted) and a subscriber
+    /// for this `%N` before the bridge is handed out. Both calls are
+    /// idempotent, and the second is what makes a pane discovered late
+    /// (arch.md §13: no history) start streaming from now on.
     async fn control_bridge(&self, info: &PaneInfo) -> Result<Option<Arc<dyn PaneBridge>>> {
         let (Some(link_id), Some(key)) = (info.link_id, info.link_key.clone()) else {
             return Ok(None);
@@ -1996,9 +2212,34 @@ impl SessionManager {
         if !link.info.is_control() {
             return Ok(None);
         }
-        let control = self.ensure_tmux_attached(info.session_id).await?;
-        let buffer = self.buffer_for(info.id).await;
-        Ok(Some(Arc::new(ControlBridge::new(control, key, buffer))))
+        match &self.daemon {
+            Some(client) => {
+                if !client.probe_tmux(info.session_id).await {
+                    let target = self.tmux_target(info.session_id).await?;
+                    client
+                        .open_tmux(
+                            info.session_id,
+                            target.host,
+                            target.socket,
+                            &target.name,
+                            target.cols,
+                            target.rows,
+                        )
+                        .await?;
+                }
+                client.attach_pane(info.session_id, info.id, &key).await?;
+                let bridge: Arc<dyn PaneBridge> =
+                    Arc::new(DaemonBridge::new(Arc::clone(client), info.id));
+                Ok(Some(bridge))
+            }
+            None => {
+                let control = self.ensure_local_control(info.session_id).await?;
+                let buffer = self.buffer_for(info.id).await;
+                let bridge: Arc<dyn PaneBridge> =
+                    Arc::new(ControlBridge::new(control, key, buffer));
+                Ok(Some(bridge))
+            }
+        }
     }
 
     // ===== internal helpers =====
@@ -2099,9 +2340,10 @@ impl SessionManager {
         // Nothing else is rebuilt here on purpose. A pipe link's transport died
         // with the process that owned it (see `Link::connected`: false is the
         // honest answer, so data ops say `LinkNotConnected`), and a control
-        // link has no client until this process attaches — `bridge_for` and
-        // `ensure_tmux_attached` build both on first use, which is what makes a
-        // fresh CLI process work against a session it never created.
+        // link has no client here at all — in daemon mode the daemon holds it
+        // (and the buffers), otherwise `ensure_local_control` spawns one on
+        // first use. Either way a fresh CLI process works against a session it
+        // never created.
         Ok(mgr)
     }
 
@@ -2118,6 +2360,87 @@ impl SessionManager {
             connected: false,
         };
         self.links.insert(link).await;
+    }
+}
+
+/// Where a tmux session lives, plus the size the caller saw.
+///
+/// The daemon never reads `state.json` (ADR 0009 §2), so `OpenTmux` has to carry
+/// this: host, socket, name. `cols`/`rows` are informational (`-C attach` takes
+/// no size).
+struct TmuxTarget {
+    host: TmuxHostConfig,
+    socket: TmuxSocket,
+    name: String,
+    cols: u16,
+    rows: u16,
+}
+
+/// One enumeration of a tmux session: its windows, and the panes of each keyed
+/// by window handle.
+///
+/// This is what both modes reconcile from: the daemon answers with the same
+/// information the in-process client reads off the wire, so `sync_window` has
+/// exactly one shape to consume (arch.md §7, "enumerated on touch").
+struct TmuxView {
+    windows: Vec<WindowLine>,
+    panes: HashMap<String, Vec<PaneLine>>,
+}
+
+impl TmuxView {
+    /// Build a view from a `Structure` answer (one round trip for the windows,
+    /// one per window for the panes — all on the daemon's resident client).
+    fn from_structure(structure: crate::daemon::protocol::TmuxStructure) -> Self {
+        let mut panes: HashMap<String, Vec<PaneLine>> = HashMap::new();
+        for pane in structure.panes {
+            panes.entry(pane.window_handle).or_default().push(PaneLine {
+                handle: pane.handle,
+                cols: pane.cols,
+                rows: pane.rows,
+                x: pane.x,
+                y: pane.y,
+            });
+        }
+        let windows = structure
+            .windows
+            .into_iter()
+            .map(|window| WindowLine {
+                handle: window.handle,
+                name: window.name,
+                cols: window.cols,
+                rows: window.rows,
+                // Not on the wire: nothing in xscore reads a window's layout or
+                // its active flag yet (arch.md §7 lists both as future state).
+                layout: String::new(),
+                active: false,
+            })
+            .collect();
+        Self { windows, panes }
+    }
+
+    /// Enumerate through a client this process holds (`list-windows` once,
+    /// `list-panes` per window).
+    async fn enumerate(control: &Arc<TmuxControl>, session: &str) -> Result<Self> {
+        let lines = control
+            .send(&crate::tmux::list_windows_command(session))
+            .await?;
+        let windows: Vec<WindowLine> = lines
+            .iter()
+            .filter_map(|line| crate::tmux::parse_window_line(line))
+            .collect();
+
+        let mut panes: HashMap<String, Vec<PaneLine>> = HashMap::new();
+        for window in &windows {
+            let lines = control
+                .send(&crate::tmux::list_panes_command(&window.handle))
+                .await?;
+            let rows: Vec<PaneLine> = lines
+                .iter()
+                .filter_map(|line| crate::tmux::parse_pane_line(line))
+                .collect();
+            panes.insert(window.handle.clone(), rows);
+        }
+        Ok(Self { windows, panes })
     }
 }
 

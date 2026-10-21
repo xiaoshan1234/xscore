@@ -1,9 +1,10 @@
 // cli/data.rs (v0.4.0 — data ops route through `pane.bridge`)
 //
 // `xscore data {read, write, resize}` — per-pane data ops. Read serves a
-// snapshot of the pane's buffer (direct panes: the ring buffer; tmux
-// panes: `tmux capture-pane`). Write sends text to the bridge. Resize
-// forwards to the bridge and updates the pane info.
+// snapshot of the pane's buffer: the ring buffer inside the daemon (which is
+// what survives this process), or the local buffer in the no-daemon build.
+// Write sends text to the bridge. Resize forwards to the bridge and updates
+// the pane info.
 
 use crate::core::PaneId;
 use crate::core::SessionManager;
@@ -13,7 +14,8 @@ use std::sync::Arc;
 #[derive(Subcommand)]
 pub enum DataCmd {
     /// Read a snapshot of the pane's buffer (bytes `--bytes` wide).
-    /// Direct panes: the ring buffer. tmux panes: capture-pane.
+    /// The bytes that arrived on the pane while the daemon was subscribed —
+    /// never a screen snapshot. Empty means nothing arrived.
     /// Errors with `NotAttached(pid)` for orphan panes.
     Read {
         #[arg(long)] pane: String,

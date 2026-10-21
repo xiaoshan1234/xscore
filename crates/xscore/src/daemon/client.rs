@@ -19,11 +19,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::net::UnixStream;
 
-use crate::core::{Error, LinkAddress, LinkId, PaneId, Result};
-use crate::model::TransportConfig;
+use crate::core::{Error, LinkAddress, LinkId, PaneId, Result, SessionId};
+use crate::model::{TmuxHostConfig, TmuxSocket, TransportConfig};
 use crate::transport::Transport;
 
-use super::protocol::{self, Request, Response, Status};
+use super::protocol::{self, Request, Response, Status, TmuxStructure};
 
 /// How long `ensure_daemon` waits for a spawned daemon to accept.
 const START_TIMEOUT: Duration = Duration::from_secs(2);
@@ -153,6 +153,29 @@ pub async fn probe_pane(pane: PaneId) -> Result<bool> {
     Ok(fetch_status().await?.panes.iter().any(|p| p.pane == pane))
 }
 
+/// Is this session's tmux control client alive inside the daemon? This is what
+/// a `Control` link's `connected` reports (ADR 0010 §4: the link IS the
+/// client, so "is the link up" and "is the session streaming" are one
+/// question).
+///
+/// A daemon that is not running answers `Err`, which the caller must read as
+/// "no answer", not as "disconnected": a stopped daemon holds no buffers but
+/// says nothing about the tmux session itself.
+pub async fn probe_tmux(session: SessionId) -> Result<bool> {
+    let resp = send(&Request::ProbeTmux { session }).await?;
+    if !resp.ok {
+        return Err(Error::Daemon(
+            resp.error.unwrap_or_else(|| "probe failed".into()),
+        ));
+    }
+    Ok(resp.alive.unwrap_or(false))
+}
+
+fn structure_of(resp: Response) -> Result<TmuxStructure> {
+    resp.structure
+        .ok_or_else(|| Error::Daemon("response has no `structure` field".into()))
+}
+
 pub async fn fetch_status() -> Result<Status> {
     let resp = send(&Request::Status).await?;
     if !resp.ok {
@@ -208,7 +231,73 @@ impl DaemonClient {
     }
 
     pub async fn attach(&self, pane: PaneId, link: LinkId) -> Result<()> {
-        self.call(Request::Attach { pane, link }).await.map(|_| ())
+        self.call(Request::Attach { pane, link: Some(link), key: None, session: None })
+            .await
+            .map(|_| ())
+    }
+
+    /// Subscribe a tmux pane's `%output %N` into the daemon's buffer for it.
+    /// Idempotent: a pane that is already attached is left alone.
+    pub async fn attach_pane(&self, session: SessionId, pane: PaneId, key: &str) -> Result<()> {
+        self.call(Request::Attach {
+            pane,
+            link: None,
+            key: Some(key.to_string()),
+            session: Some(session),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Open (or reuse) the session's control client and return its structure.
+    /// Auto-starts the daemon: a managed session is exactly what the daemon
+    /// exists to hold.
+    pub async fn open_tmux(
+        &self,
+        session: SessionId,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TmuxStructure> {
+        self.ensure().await?;
+        let resp = self
+            .call(Request::OpenTmux {
+                session,
+                host,
+                socket,
+                name: name.to_string(),
+                cols,
+                rows,
+            })
+            .await?;
+        structure_of(resp)
+    }
+
+    /// Enumerate the session through the client the daemon already holds.
+    pub async fn structure(&self, session: SessionId) -> Result<TmuxStructure> {
+        structure_of(self.call(Request::Structure { session }).await?)
+    }
+
+    /// Run one command on the session's control client (window/pane
+    /// mutations: `new-window`, `split-window`, `kill-pane`).
+    pub async fn tmux_command(&self, session: SessionId, command: &str) -> Result<Vec<String>> {
+        let resp = self
+            .call(Request::TmuxCommand { session, command: command.to_string() })
+            .await?;
+        Ok(resp.lines.unwrap_or_default())
+    }
+
+    /// Close the client and drop its buffers (kill/forget).
+    pub async fn close_tmux(&self, session: SessionId) -> Result<()> {
+        self.call(Request::CloseTmux { session }).await.map(|_| ())
+    }
+
+    /// Is the server session's client alive in the daemon? `false` when the
+    /// daemon is not running at all.
+    pub async fn probe_tmux(&self, session: SessionId) -> bool {
+        probe_tmux(session).await.unwrap_or(false)
     }
 
     pub async fn detach(&self, pane: PaneId) -> Result<()> {
