@@ -48,6 +48,42 @@ Session ── workspace; 1:1 with a tmux session, or standalone
 That table is why `Session` exists. "Does this go through tmux?" was never a
 property of a *link*; it is a property of the *workspace* the link lives in.
 
+### A session is a container, not a viewport
+
+Both backends hold **N windows, each with N panes, each pane bound to at most
+one link**. Cardinality is not what separates them — ownership is.
+
+```
+session dev                                  (Backend::Native)
+├── window "edit"
+│   ├── pane p1 ── link l1   shell:///bin/bash
+│   └── pane p2 ── link l2   shell:///bin/vim
+└── window "ops"
+    ├── pane p3 ── link l3   ssh://u@host
+    └── pane p4 ── link l4   serial:///dev/ttyUSB0
+
+session work                                 (Backend::Tmux { session: "work" })
+├── window @0
+│   ├── pane %0 ── link l5
+│   └── pane %1 ── link l6
+└── window @1
+    └── pane %2 ── link l7
+```
+
+```
+Session 1:N Window      Window  1:N Pane       Pane 0..1 Link   (unbound = history only)
+Session 1:N Link        Session 1:N Pane       Link 0..1 Pane   (serves at most one)
+```
+
+A native session is a *workspace*, not a single shell: it can hold several
+windows, several panes, and links of **mixed kinds** at the same time (shell +
+ssh + serial in one workspace is a normal case). A tmux-backed session gets the
+same multiplicity from tmux, which additionally owns the layout.
+
+`session new` creates initial content so the common path stays one step — one
+window plus one link and one pane, mirroring what tmux does — but that is a
+convenience, not a limit. Grow it with `window new`, `link add`, `pane new`.
+
 ## 1. Session
 
 ```rust
@@ -195,79 +231,96 @@ existed to express "this link may be shared", and after this change nothing may.
 
 ## 5. Runtime topology
 
+Both pictures below are *structure*, not call sequences — the point is that a
+session holds many windows, many panes and many links.
+
 ### Native session
 
 ```mermaid
 graph TB
-    subgraph CLI["CLI"]
-        S1["session new dev --shell"]
-        S2["link add shell://... --session dev"]
-        S3["pane new --session dev"]
-        S4["pane attach --pane P --link L"]
-        S5["data write --pane P"]
+    subgraph SESS["session dev — Backend::Native"]
+        W1["window edit"]
+        W2["window ops"]
+        P1["pane p1"]
+        P2["pane p2"]
+        P3["pane p3"]
+        L1["link l1<br/>shell:///bin/bash"]
+        L2["link l2<br/>shell:///bin/vim"]
+        L3["link l3<br/>ssh://u@host"]
+        W1 --> P1
+        W1 --> P2
+        W2 --> P3
+        P1 --> L1
+        P2 --> L2
+        P3 --> L3
     end
 
     subgraph D["daemon process"]
-        DL["links: LinkId to Pipe transport"]
-        DP["panes: PaneId to slot<br/>buffer + pump"]
+        DL["3 live Pipe transports"]
+        DP["3 pane buffers + pumps"]
     end
 
     subgraph ST["state.json"]
-        SS["sessions / windows / panes / links<br/>handles only, never bytes"]
+        SS["session + 2 windows + 3 panes + 3 links<br/>handles only, never bytes"]
     end
 
-    S1 --> SS
-    S2 --> SS
-    S2 --> DL
-    S3 --> SS
-    S4 --> SS
-    S4 --> DP
-    S5 --> DP
-    DP --> CH["shell child / serial / ssh"]
+    L1 --> DL
+    L2 --> DL
+    L3 --> DL
+    P1 --> DP
+    P2 --> DP
+    P3 --> DP
+    SESS --> SS
+    DL --> EXT["shell child / shell child / ssh channel"]
 
-    classDef cli fill:#e3f2fd,stroke:#1976d2
+    classDef sess fill:#f3e5f5,stroke:#7b1fa2
     classDef dd fill:#ede7f6,stroke:#5e35b1
     classDef st fill:#fff3e0,stroke:#f57c00
     classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
-    class S1,S2,S3,S4,S5 cli
+    class W1,W2,P1,P2,P3,L1,L2,L3 sess
     class DL,DP dd
     class SS st
-    class CH ext
+    class EXT ext
 ```
 
 ### tmux-backed session
 
 ```mermaid
 graph TB
-    subgraph CLI["CLI"]
-        T1["session new work --tmux"]
-        T2["window new --session work"]
-        T3["pane new --session work --window W"]
-        T4["data read --pane P"]
-        T5["session attach work"]
+    subgraph SESS["session work — Backend::Tmux"]
+        W0["window @0"]
+        W1["window @1"]
+        Q0["pane %0"]
+        Q1["pane %1"]
+        Q2["pane %2"]
+        M0["link m0<br/>Screen %0"]
+        M1["link m1<br/>Screen %1"]
+        M2["link m2<br/>Screen %2"]
+        W0 --> Q0
+        W0 --> Q1
+        W1 --> Q2
+        Q0 --> M0
+        Q1 --> M1
+        Q2 --> M2
     end
 
     subgraph ST["state.json"]
-        TS["Session Tmux socket+session<br/>Window Tmux @N<br/>Pane Tmux %N<br/>Link Screen %N"]
+        TS["session + 2 windows + 3 panes + 3 links<br/>handles: @N and %N only"]
     end
 
     subgraph TM["tmux server"]
         TMS["session work<br/>windows, panes, layout<br/>THE source of truth"]
     end
 
-    T1 --> TM
-    T1 --> ST
-    T2 --> TM
-    T2 --> ST
-    T3 --> TM
-    T3 --> ST
-    T4 --> TM
-    T5 --> TM
+    SESS --> ST
+    M0 --> TMS
+    M1 --> TMS
+    M2 --> TMS
 
-    classDef cli fill:#e3f2fd,stroke:#1976d2
+    classDef sess fill:#f3e5f5,stroke:#7b1fa2
     classDef st fill:#fff3e0,stroke:#f57c00
     classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
-    class T1,T2,T3,T4,T5 cli
+    class W0,W1,Q0,Q1,Q2,M0,M1,M2 sess
     class TS st
     class TMS ext
 ```
@@ -447,7 +500,7 @@ Two notes that survive from v0.5.1:
 ```bash
 # Session — the workspace
 xscore session ls [--all]
-xscore session new <name> [--tmux [--socket S]] [--shell] [--cmd C] [--cwd D]
+xscore session new <name> [--tmux [--socket S]] [--empty] [--cmd C] [--cwd D]
                           [--cols N --rows N]
 xscore session adopt <name> [--socket S]     # take over an existing tmux session
 xscore session show <name>                   # its windows / panes / links
@@ -487,6 +540,13 @@ Notes:
   `window new`, `pane new`). URLs only say how to connect. This is where the
   command that v0.5.1 silently dropped (`?tmux=on` ignored the URL's command)
   now lives.
+- `session new` starts the workspace with **one window, one link, one pane**
+  so the common path stays a single command. `--empty` skips that for a native
+  session (bare workspace); it is a no-op for `--tmux`, where tmux always
+  creates at least one pane.
+- `session new` creates a *workspace*, not one viewport. A native session can
+  hold several windows and links of mixed kinds (shell + ssh + serial) at the
+  same time — see §0.
 - For a tmux session, `pane new` is atomic: `split-window`, adopt `%N`, create
   the link, bind them. A tmux pane is born bound.
 - `session attach` replaces `link open`; `session kill` / `session forget`
