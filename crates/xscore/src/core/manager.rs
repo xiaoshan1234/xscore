@@ -194,6 +194,16 @@ impl SessionManager {
         self.add_session(SessionInfo::new_native(name)).await
     }
 
+    /// Every child references a session, and hydration drops rows whose
+    /// session is missing (with a warning), so writing one here would be silent
+    /// data loss on the next load. A caller passing an unknown id is a bug.
+    async fn require_session(&self, id: SessionId) -> Result<()> {
+        if self.sessions.get(id).await.is_none() {
+            return Err(Error::SessionNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     pub async fn add_session(&self, info: SessionInfo) -> Result<SessionId> {
         if self.sessions.get_by_name(&info.name).await.is_some() {
             return Err(Error::SessionExists(info.name));
@@ -400,6 +410,7 @@ impl SessionManager {
         id: Option<LinkId>,
         pane: Option<PaneId>,
     ) -> Result<LinkAddResult> {
+        self.require_session(session).await?;
         // --- validate before allocating anything (a rejected call must
         //     not leave a tmux session or a spawned child behind) ---
         let is_tmux = !matches!(spec.sink, SinkConfig::Raw);
@@ -805,6 +816,7 @@ impl SessionManager {
         rows: u16,
         link: Option<LinkId>,
     ) -> Result<WindowId> {
+        self.require_session(session).await?;
         let window_id = WindowId::new();
         let resolved_name = name.unwrap_or_else(|| format!("w-{}", &window_id.to_string()[..8]));
 
@@ -918,6 +930,7 @@ impl SessionManager {
         y: u16,
         window: Option<WindowId>,
     ) -> Result<PaneId> {
+        self.require_session(session).await?;
         let pane_id = PaneId::new();
         let resolved_name = name.unwrap_or_else(|| format!("p-{pane_id}"));
 
