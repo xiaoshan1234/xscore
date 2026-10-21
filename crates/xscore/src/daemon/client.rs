@@ -102,16 +102,43 @@ pub async fn ensure_daemon() -> Result<()> {
 /// Detached spawn of `xscore daemon serve`. The child's stdio is closed
 /// so it can never hold the caller's terminal open, and we deliberately
 /// do not `wait()` — the daemon must outlive this process.
+///
+/// The daemon is placed in its OWN SESSION via `setsid` when available.
+/// Without that it inherits the caller's session and process group,
+/// which means:
+///
+///   * closing the terminal that happened to run `link add` sends SIGHUP
+///     and drops every live direct link,
+///   * Ctrl-C at that terminal sends SIGINT to the daemon too,
+///   * any wrapper that waits for the caller's whole process group (test
+///     harnesses, editors, CI runners) blocks until the daemon exits —
+///     which it never does while a link is alive.
+///
+/// `setsid` ships with util-linux on every Linux distro we target. If it
+/// is somehow missing we fall back to a plain spawn: still functional,
+/// just not session-isolated.
 fn spawn_serve() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
-    std::process::Command::new(exe)
-        .args(["daemon", "serve"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| Error::Daemon(format!("spawn daemon: {e}")))?;
+    let spawn = |cmd: &mut std::process::Command| {
+        cmd.args(["daemon", "serve"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+
+    let mut detached = std::process::Command::new("setsid");
+    detached.arg(&exe);
+    match spawn(&mut detached) {
+        Ok(_) => return Ok(()),
+        // No `setsid` on PATH — fall back to spawning the binary directly.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(Error::Daemon(format!("spawn daemon: {e}"))),
+    }
+
+    let mut plain = std::process::Command::new(&exe);
+    spawn(&mut plain).map_err(|e| Error::Daemon(format!("spawn daemon: {e}")))?;
     Ok(())
 }
 

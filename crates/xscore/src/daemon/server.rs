@@ -354,6 +354,24 @@ fn spawn_pump(transport: Arc<dyn Transport>, buffer: Arc<Mutex<RingBuffer>>) -> 
 /// a single winner, and a crashed daemon's lock is detected and taken
 /// over (its socket no longer answers).
 pub async fn run() -> Result<()> {
+    // Ignore SIGHUP: the daemon may have been started by a `link add`
+    // that ran in a terminal which is since closed. Dropping every live
+    // direct link because a terminal went away is never what the user
+    // wants — links are only torn down explicitly (`link del`) or when
+    // the daemon is idle. SIGTERM/SIGINT are left alone so `daemon stop`
+    // and a deliberate Ctrl-C on `daemon serve` still work.
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut hup) = signal(SignalKind::hangup()) {
+            tokio::spawn(async move {
+                while hup.recv().await.is_some() {
+                    // Swallow it. Deliberately no logging: stderr is null
+                    // in the auto-started case.
+                }
+            });
+        }
+    }
+
     let path = socket_path();
 
     if let Some(dir) = path.parent() {

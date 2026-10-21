@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-21
+
+### Fixed
+
+- **The daemon now runs in its own session and ignores SIGHUP.**
+  It is auto-started by whichever command first needs it, so without
+  this it inherited that command's session and process group:
+
+  - closing the terminal that ran `link add` sent SIGHUP, destroying
+    every live direct link;
+  - Ctrl-C at that terminal would have reached the daemon too;
+  - any wrapper that waits for the caller's whole process group (CI
+    runners, editors, test harnesses) would block until the daemon
+    exits — which it never does while a link is alive.
+
+  `spawn_serve` now launches the daemon through `setsid` (falling back
+  to a plain spawn if `setsid` is absent), and `daemon serve` installs
+  a SIGHUP handler that swallows the signal. SIGTERM/SIGINT are left
+  alone so `xscore daemon stop` and a deliberate Ctrl-C on a foreground
+  `daemon serve` still work.
+
+  New test `xscore_daemon_survives_sighup` sends a real SIGHUP to the
+  daemon's pid and asserts the pid is unchanged and the link stays
+  `connected: true`.
+
 ## [0.5.0] - 2026-10-20
 
 A resident daemon, so direct links stop dying with the CLI process. See

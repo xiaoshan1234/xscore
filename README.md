@@ -338,7 +338,7 @@ Each Link owns one Transport (raw IO) + one Sink (tmux orchestration or no-op) â
 - `open` attaches to an existing tmux session (tmux only â€” shell/serial/ssh return `OpenOnlyForTmux`).
 - `close` is a no-op for v0.4.0 (tmux sessions are inherently persistent across xscore invocations).
 
-## Status (v0.5.0)
+## Status (v0.5.1)
 
 **Working end-to-end:**
 - 3-entity decoupled model with dynamic associations (ADR 0007 v2)

@@ -1116,3 +1116,50 @@ fn xscore_daemon_buffer_survives_detach_across_processes() {
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
     cleanup_daemon(name);
 }
+
+// ----- v0.5.1: the daemon must not die when its starting terminal goes away -----
+//
+// The daemon is auto-started from whatever command first needed it. If it
+// inherited that command's session, closing the terminal (SIGHUP) or
+// Ctrl-C (SIGINT) would take every live direct link down with it, and any
+// wrapper waiting on the caller's process group would block until the
+// daemon exits — which it never does while a link is alive.
+//
+// Two things keep it safe and both are asserted here: the daemon runs in
+// its own session (`setsid` at spawn) and it ignores SIGHUP.
+
+#[test]
+fn xscore_daemon_survives_sighup() {
+    let name = "daemon_sighup";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    assert!(ok(&add), "add failed: {}", String::from_utf8_lossy(&add.stderr));
+    let link_id = parse_id_from_stdout(&add.stdout, "link");
+    let pane_id = parse_id_from_stdout(&add.stdout, "pane");
+
+    let status = json(&xscore().args(["daemon", "status"]).output().unwrap().stdout);
+    let pid = status["status"]["pid"].as_u64().expect("daemon pid");
+
+    // Hang up on the daemon the way a closing terminal would.
+    let killed = std::process::Command::new("kill")
+        .args(["-HUP", &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success(), "failed to send SIGHUP to {pid}");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Still serving: the pid is unchanged and the link is still connected.
+    let after = json(&xscore().args(["daemon", "status"]).output().unwrap().stdout);
+    assert_eq!(after["status"]["pid"], serde_json::json!(pid),
+        "daemon must survive SIGHUP: {after}");
+    let link = json(&xscore().args(["link", "show", "--id", &link_id]).output()
+        .unwrap().stdout);
+    assert_eq!(link["connected"], serde_json::json!(true),
+        "link must stay connected after SIGHUP: {link}");
+
+    let _ = xscore().args(["link", "del", "--id", &link_id]).output();
+    let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
+}
