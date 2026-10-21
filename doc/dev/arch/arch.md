@@ -227,6 +227,30 @@ one per tmux pane.
 That is also why `Sink` is retired (§10): `capacity` / `grant` / `revoke` only
 existed to express "this link may be shared", and after this change nothing may.
 
+### Who owns the stream
+
+`Pipe` is not one mechanism. Three families sit behind it, and they do not
+behave alike:
+
+| link | who owns the stream | what `read` returns | `resize` means |
+|---|---|---|---|
+| `serial://` | xscore, a device fd | raw device bytes | nothing (no size) |
+| `shell://` | xscore, a **pty** | terminal output, escapes included | `TIOCSWINSZ` |
+| `ssh://` | xscore, a TCP socket + SSH channel | channel bytes | channel `window-change` |
+| `tmux://` (any host) | **tmux** | a rendered screen (`Screen`, not `Pipe`) | `resize-pane` |
+
+Two rules follow, and they belong in the design rather than in a bug report:
+
+1. **A shell link must allocate a pty.** With a plain pipe the child
+   block-buffers stdout (output appears only at 4 KiB or exit), `isatty` is
+   false, echo and job control are gone, and `vim`, `sudo`, `python -i` and every
+   TUI take their non-interactive path. A "shell session manager" that cannot
+   run an interactive program is not one.
+2. **`resize` must not lie.** It is real only where someone owns the size:
+   `TIOCSWINSZ` for a pty, `window-change` for SSH, `resize-pane` for tmux. For a
+   serial link there is no size, so the call must fail explicitly instead of
+   returning ok and storing the numbers in `PaneInfo`.
+
 ### What a link is not
 
 - not a tmux session (a session is a session)
@@ -615,8 +639,9 @@ Invariants and what enforces each:
 - **A tmux handle is never an index.** `@N` / `%N` only — indices shift on
   rename and reorder.
 - **Binding ≠ liveness.** `pane show` reports `link_id`; `link show` reports
-  `connected`. A native link after a restart keeps the binding and loses the
-  connection → `LinkNotConnected`, never `NotAttached`.
+  `connected` (probed from the daemon for native links). A native link whose
+  transport died — the daemon exited or restarted — keeps its binding and loses
+  its connection → `LinkNotConnected`, never `NotAttached`.
 - **Killing a session is the only cascade.** It removes its windows, panes and
   links and nothing else.
 - **`link del` on a tmux link forgets the handle.** The tmux pane and its
@@ -812,6 +837,17 @@ Notes:
 | tmux control | `Sink` methods + `link sync` | `session` / `window` / `pane` verbs; tmux queried per session |
 | remote tmux | `?tmux=remote`, never read — always local | `SessionBackend::Tmux { host: Ssh { .. } }`; one `ssh` exec per tmux command |
 | `Window.layout` | stored enum | gone; `#{window_layout}` read from tmux when needed |
+
+### Behaviour that must change (defects, not features)
+
+These are wrong in v0.5.1 and are not optional for v0.6.0:
+
+| today | why it matters | v0.6.0 |
+|---|---|---|
+| `ShellTransport` uses `Stdio::piped()`, not a pty | child block-buffers stdout; no `isatty`, echo, job control or `SIGWINCH`; TUIs and `sudo` misbehave | allocate a pty, set `TERM` (§4) |
+| `portable-pty` is a declared dependency with **zero uses** | dead weight; the pty path was intended and never finished | used by the shell side of `PipeChannel` |
+| `data resize` on a direct pane returns ok and does nothing | a silent lie: the caller sees success | `TIOCSWINSZ` / `window-change` / `resize-pane`, else an explicit error (§4) |
+| `ShellTransport` holds **one** mutex across `read` and `write` | a blocking read starves writes; the 10 ms poll and `spawn_blocking` are workarounds, and `data write` can stall behind a queued read | split the pty into independent read and write halves |
 
 ### Migration (v2 → v3)
 
