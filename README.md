@@ -152,6 +152,9 @@ Measured on tmux 3.5a, and the reasons the details matter:
 
 ## Commands
 
+Full flag-by-flag reference: [`doc/user-guide/commands.md`](doc/user-guide/commands.md).
+Below is the shape of the surface.
+
 ```bash
 # Sessions — the workspace
 xscore session new <name> [--tmux [--socket S] [--ssh DEST]] [--empty]
