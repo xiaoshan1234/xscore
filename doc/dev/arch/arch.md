@@ -1,527 +1,575 @@
-# Architecture
+# Architecture — target design
 
-Runtime structure of `xscore` as of **v0.5.1**.
+**Status: design only.** This describes the architecture for **v0.6.0**. The
+code at `HEAD` is v0.5.1 and does not match it yet — see
+[§10 Delta](#10-delta-from-v051) for the gap and the migration.
 
-Read this if you want to know "what are the moving parts and which one owns
-which fact". For the *why* behind each shape, follow the ADR links; this file
-deliberately does not re-argue decisions.
+For the as-built description of v0.5.1:
 
-Superseded diagrams live in `doc/dev/archive-*`. This file describes only the
-current tree — do not trust it for versions before v0.3.0.
+```bash
+git show v0.5.1:doc/dev/arch/arch.md
+```
+
+This file is the shape, not the argument. Rationale lives in the ADRs:
 
 | ADR | Owns |
 |---|---|
 | [0001](../adr/0001-link-pane-model.md) | Link / Window / Pane as addressable tiers |
-| [0002](../adr/0002-transport-sink-split.md) | Transport (bytes) vs Sink (terminal semantics) split |
-| [0003](../adr/0003-external-tmux-server.md) | Shared external `tmux -L xscore`; never embed tmux |
-| [0005](../adr/0005-add-open-close-del-verbs.md) | `add` / `del` / `open` / `close` verb split |
+| [0002](../adr/0002-transport-sink-split.md) | Transport vs Sink split — *Sink is retired by this design* |
+| [0003](../adr/0003-external-tmux-server.md) | External tmux, never embedded |
+| [0005](../adr/0005-add-open-close-del-verbs.md) | Verb semantics — *`open`/`close` move to `session`* |
 | [0006](../adr/0006-window-concept.md) | Window tier |
-| [0007 v2](../adr/0007-raw-default-tmux-opt-in.md) | 3 entities decoupled; buffer-per-pane; Q1/Q2 |
-| [0008](../adr/0008-tmux-adoption.md) | tmux is the source of truth; `@N` / `%N` identity anchors |
-| [0009](../adr/0009-daemon.md) | Resident daemon owns direct-link transports and buffers |
+| [0007 v2](../adr/0007-raw-default-tmux-opt-in.md) | Decoupled entities, buffer-per-pane, Q1/Q2 |
+| [0008](../adr/0008-tmux-adoption.md) | tmux is the source of truth; `@N` / `%N` anchors |
+| [0009](../adr/0009-daemon.md) | Resident daemon owns native transports and buffers |
 
-## 1. Three entities, separately owned
+## 0. The model in one screen
 
-The three nouns are **independent rows of state**. Associations are dynamic,
-one-directional `Option` fields on the pane — nothing is nested.
+A **session is a workspace with a backend**. The backend decides who keeps the
+processes alive and who owns the structure:
 
 ```
-Link      a connection.            Knows: its transport, its sink, its active pane.
-Window    a layout container.      Knows: its own size, its layout hint, its pane list.
-Pane      a buffer + geometry.     Knows: which link it is bound to, which window it sits in.
+Session ── workspace; 1:1 with a tmux session, or standalone
+  ├ Window ── layout container
+  ├ Pane   ── buffer + geometry
+  └ Link   ── one connection (an endpoint)
 ```
+
+| | `Backend::Native` | `Backend::Tmux { .. }` |
+|---|---|---|
+| keeps processes alive | the resident daemon | the tmux server |
+| Window | xscore grouping; no layout engine | mirrors a tmux window (`@N`) |
+| Pane | xscore buffer + geometry | is a tmux pane (`%N`) |
+| Link endpoint | `Pipe` — a byte stream | `Screen` — capture / send-keys |
+| survives CLI exit | yes (daemon) | yes (tmux) |
+| attach a human | n/a | `exec tmux attach` |
+| multi-client | no | yes |
+
+That table is why `Session` exists. "Does this go through tmux?" was never a
+property of a *link*; it is a property of the *workspace* the link lives in.
+
+## 1. Session
 
 ```rust
-// core/link.rs
-pub struct Link {
-    pub id: LinkId,
-    pub info: LinkInfo,                    // serializable: name, address, transport cfg, sink cfg
-    pub transport: Arc<dyn Transport>,     // Arc so a bridge can share it
-    pub sink: Box<dyn Sink>,               // tmux orchestration, or RawSink (no-op)
-    pub tmux_sink: Option<Arc<TmuxSink>>,  // concrete sink, for building TmuxBridge
-    pub active_pane: Mutex<Option<PaneId>>,// Q1: direct links allow one active pane
-    pub connected: bool,                   // is the transport ALIVE right now?
-}
-
-// core/window.rs
-pub struct Window {
-    pub info: WindowInfo,                  // id, name, created_at, layout, cols, rows,
-                                           //   tmux_window_handle: Option<"@N">
-    pub panes: Mutex<Vec<PaneId>>,         // membership (see §8 for the duplication note)
-}
-
-// model/session.rs — there is no `Pane` struct.
-pub struct PaneInfo {
-    pub id: PaneId,
+pub struct SessionInfo {
+    pub id: SessionId,
     pub name: String,
     pub created_at: DateTime<Utc>,
-    pub cols: u16, pub rows: u16,          // Q2: the pane's size
-    pub x: u16,    pub y: u16,             // Q2: its position inside the window
-    pub link_id: Option<LinkId>,           // None = orphan (no live source)
-    pub window_id: Option<WindowId>,       // None = not shown anywhere
-    pub sink_handle: Option<String>,       // Some("%N") = tmux OWNS this pane
+    pub backend: SessionBackend,
+}
+
+pub enum SessionBackend {
+    /// Links are byte pipes owned by the daemon; windows are xscore's own
+    /// grouping. Dies when the daemon forgets it.
+    Native,
+
+    /// This session IS a tmux session. Windows and panes are read from tmux;
+    /// xscore stores only the handles it adopted.
+    Tmux {
+        /// None = tmux's default socket, Some("xscore") = `tmux -L xscore`.
+        socket: Option<String>,
+        /// tmux session name. Deliberately NOT derived from SessionId:
+        /// tmux sessions are user-visible and user-nameable.
+        session: String,
+    },
 }
 ```
 
-Two `Option` fields carry the whole association graph. That is the point of
-ADR 0007 v2: a pane can be created with neither, then attached and placed
-later, in either order.
+`Backend::Tmux` is the 1:1 correspondence held as a **pointer, not a mirror**.
+xscore does not keep a second copy of tmux's structure that could drift; when a
+command touches a tmux-backed session it **refreshes that one session** from
+tmux (see §6) and acts on what tmux reports.
 
-`core/pane.rs` is a comment-only module. The pane's runtime half is not on
-`PaneInfo` — see §3.
+## 2. Window
 
-### Registries and the manager's maps
+```rust
+pub struct WindowInfo {
+    pub id: WindowId,
+    pub session_id: SessionId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub backend: WindowBackend,
+}
 
+pub enum WindowBackend {
+    /// xscore-side grouping. Panes inside are a list; there is no renderer,
+    /// so there is no layout to describe.
+    Native,
+    /// Mirrors a tmux window. Layout is read from tmux on demand
+    /// (`#{window_layout}`) and never stored.
+    Tmux { handle: String },   // "@N"
+}
 ```
-SessionManager
-├── links   : LinkRegistry    by_id  + by_address (routing only, never a user key)
-├── windows : WindowRegistry  by_id
-├── panes   : PaneRegistry    by_id, holds PaneInfo ONLY (JSON-serializable)
-├── pane_bridges : HashMap<PaneId, Arc<dyn PaneBridge>>       in-memory, rebuilt or dropped
-├── pane_buffers : HashMap<PaneId, Arc<Mutex<RingBuffer>>>    in-process mode only
-└── daemon  : Option<Arc<DaemonClient>>                        None = in-process mode
+
+**`WindowLayout` is deleted.** It was a five-variant enum (`single`, `tabs`,
+`split_h`, `split_v`, `grid`) with zero consumers: tmux owns layout for tmux
+windows, and nothing renders native ones. A stored layout hint nobody applies
+reads like a feature. When a UI layer exists it can introduce a layout model
+shaped by what that layer actually needs.
+
+## 3. Pane
+
+A pane is a **buffer with a viewport** — the unit users read and write.
+
+```rust
+pub struct PaneInfo {
+    pub id: PaneId,
+    pub session_id: SessionId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub cols: u16, pub rows: u16,      // size
+    pub x: u16,    pub y: u16,         // position inside its window
+    pub window_id: Option<WindowId>,   // None = not displayed
+    pub link_id: Option<LinkId>,       // None = no source; history only
+    pub backend: PaneBackend,
+}
+
+pub enum PaneBackend {
+    Native,
+    /// This pane IS tmux pane `%N`. Its identity is the handle: it cannot be
+    /// re-bound to another link, and it dies with its tmux session.
+    Tmux { handle: String },
+}
 ```
 
-The split between `panes` and `pane_bridges` is deliberate: `PaneInfo` is
-rewritten on every geometry change and every `save_state()`, and a bridge must
-not be destroyed by that (it owns a running task / a socket handle).
+The pane's **bytes are not in `PaneInfo`** — it is rewritten on every geometry
+change and every save, and a 64 KiB scrollback is neither. The bytes live beside
+the channel:
 
-## 2. Two I/O paths
+- native pane → `RingBuffer` (64 KiB) in the daemon (or in-process in tests).
+  Survives `detach`; read is a non-destructive snapshot.
+- tmux pane → no local buffer. tmux *is* the scrollback; each read is a
+  `capture-pane`.
 
-There is no single "pane backend" any more. Which bridge a pane gets depends on
-the **link's sink**, and only on that:
+## 4. Link and Endpoint
 
-| Link sink (`SinkConfig`) | Bridge | Read comes from | Write goes to |
-|---|---|---|---|
-| `Raw` + daemon enabled | `DaemonBridge` | daemon's ring buffer for this pane | daemon → link transport |
-| `Raw` + no daemon (tests) | `DirectBridge` | local ring buffer, filled by a pump over the link's transport | link transport |
-| `Tmux { .. }` | `TmuxBridge` | `tmux capture-pane -p -t %N` | `tmux send-keys -t %N` |
+A link is **one connection**: a handle you can list and hand to at most one pane.
 
-`DaemonBridge` and `DirectBridge` share a contract but not a mechanism: the
-daemon one is a socket round-trip, the direct one is an in-process pump
-(`tokio::time::timeout(10ms, transport.read())` — the timeout matters, see
-ADR 0008 §6 and the serial read-timeout note in v0.4.1).
+```rust
+pub struct LinkInfo {
+    pub id: LinkId,
+    pub session_id: SessionId,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    /// What this link is attached to. The tmux session is NOT repeated here:
+    /// it is implied by `session_id` (`SessionInfo::backend`). Only the pane
+    /// handle is local to the link, so a session rename can never leave a
+    /// stale name behind in a link.
+    pub endpoint: EndpointRef,
+}
 
-`TmuxBridge` holds `Weak<TmuxSink>` + the `%N` handle. Weak is intentional: if
-the link is dropped, the upgrade fails and the bridge reports
-`Sink("tmux sink dropped")` instead of operating on a half-dead session.
+pub enum EndpointRef {
+    /// shell / serial / ssh — a byte stream, owned by the daemon.
+    Pipe(TransportConfig),
+    /// A tmux pane in this session's tmux session.
+    Screen { pane: String },   // "%N"
+}
 
-### Why the pane's buffer is not on the pane
+// Runtime, never serialized:
+pub enum Endpoint {
+    Pipe(Arc<dyn Transport>),
+    Screen { tmux: Arc<TmuxSession>, pane: String },
+}
+```
 
-`PaneInfo` is persisted and rewritten; a 64 KiB scrollback is neither. So the
-bytes live next to the bridge:
+`Endpoint` is the honest split. A tmux pane cannot pretend to be a byte stream:
+reads are non-destructive screen snapshots, writes are key injection, and
+binary output is not recoverable. Stating that once here is better than
+discovering it per call site.
 
-- tmux pane → no local buffer at all. tmux *is* the scrollback; every read is
-  a `capture-pane`.
-- direct pane, in-process → `pane_buffers[PaneId]`, kept when the bridge is
-  dropped, so detach → read still returns history.
-- direct pane, daemon → the daemon's `PaneSlot.buffer`. Same semantics, but it
-  survives the CLI process.
+### Every link is exclusive
 
-## 3. Runtime topology
+Q1 ("a direct link serves one pane at a time") stops being a special case and
+becomes the only rule: **a link is handed to at most one pane**. Multi-pane is a
+*backend* capability — `Backend::Tmux` gives you N panes by giving you N links,
+one per tmux pane.
+
+That is also why `Sink` is retired (§9): `capacity` / `grant` / `revoke` only
+existed to express "this link may be shared", and after this change nothing may.
+
+### What a link is not
+
+- not a tmux session (a session is a session)
+- not a pane (a pane consumes a link)
+- not an owner of windows or panes
+
+## 5. Runtime topology
+
+### Native session
 
 ```mermaid
 graph TB
-    subgraph CLIP["CLI — clap"]
-        LK["link add/open/close/del/show/list/sync/config"]
-        WN["window add/del/show/list/set-layout/add-pane/remove-pane"]
-        PN["pane add/del/show/list/attach/detach/resize/move/add-to-window/remove-from-window"]
-        DT["data read/write/resize --pane"]
-        DM["daemon serve/status/stop"]
+    subgraph CLI["CLI"]
+        S1["session new dev --shell"]
+        S2["link add shell://... --session dev"]
+        S3["pane new --session dev"]
+        S4["pane attach --pane P --link L"]
+        S5["data write --pane P"]
     end
 
-    subgraph CORE["core"]
-        SM["SessionManager"]
-        LR["LinkRegistry"]
-        WR["WindowRegistry"]
-        PR["PaneRegistry — PaneInfo only"]
-        BR["pane_bridges"]
-        BU["pane_buffers — in-process mode"]
+    subgraph D["daemon process"]
+        DL["links: LinkId to Pipe transport"]
+        DP["panes: PaneId to slot<br/>buffer + pump"]
     end
 
-    subgraph ENT["entities"]
-        L["Link<br/>transport Arc&lt;dyn Transport&gt;<br/>sink Box&lt;dyn Sink&gt;<br/>active_pane — Q1<br/>connected"]
-        W["Window<br/>info + panes Vec"]
-        P["PaneInfo<br/>link_id? window_id?<br/>cols rows x y<br/>sink_handle?"]
+    subgraph ST["state.json"]
+        SS["sessions / windows / panes / links<br/>handles only, never bytes"]
     end
 
-    subgraph BRIDGES["backends/"]
-        PB["PaneBridge"]
-        DB["DirectBridge"]
-        DAB["DaemonBridge"]
-        TB["TmuxBridge"]
-        RB["RingBuffer"]
-    end
-
-    subgraph TR["transport/"]
-        TF["transport_for"]
-        SH["ShellTransport"]
-        SE["SerialTransport"]
-        SS["SshTransport"]
-        ND["NoopTransport — hydrate"]
-        DTR["DaemonTransport — client side"]
-    end
-
-    subgraph SN["sink/"]
-        SF["sink_for"]
-        TS["TmuxSink"]
-        RS["RawSink"]
-    end
-
-    subgraph DAEMON["daemon/ — separate process"]
-        DPROTO["protocol — length-prefixed JSON + hex"]
-        DSRV["server: DaemonState<br/>links HashMap&lt;LinkId, Arc&lt;dyn Transport&gt;&gt;<br/>panes HashMap&lt;PaneId, PaneSlot&gt;"]
-        DCLI["client: ensure_daemon, send, probes"]
-    end
-
-    subgraph EXT["external"]
-        TM["tmux -L xscore — shared server"]
-        CH["shell child process"]
-        SP["serial port"]
-        SSH["SSH channel"]
-    end
-
-    LK --> SM
-    WN --> SM
-    PN --> SM
-    DT --> SM
-    DM --> DCLI
-    DT --> DCLI
-
-    SM --> LR
-    SM --> WR
-    SM --> PR
-    SM --> BR
-    SM --> BU
-    LR --> L
-    WR --> W
-    PR --> P
-
-    BR --> PB
-    PB --> DB
-    PB --> DAB
-    PB --> TB
-    DB --> RB
-    DAB --> DCLI
-    TB --> TS
-
-    L --> TF
-    L --> SF
-    L --> DTR
-    TF --> SH
-    TF --> SE
-    TF --> SS
-    TF --> ND
-    SF --> TS
-    SF --> RS
-    TS --> TM
-    SH --> CH
-    SE --> SP
-    SS --> SSH
-
-    DAB --> DPROTO
-    DPROTO --> DSRV
-    DSRV --> TF2["transport_for — daemon side"]
-    TF2 --> CH
-    TF2 --> SP
-    TF2 --> SSH
+    S1 --> SS
+    S2 --> SS
+    S2 --> DL
+    S3 --> SS
+    S4 --> SS
+    S4 --> DP
+    S5 --> DP
+    DP --> CH["shell child / serial / ssh"]
 
     classDef cli fill:#e3f2fd,stroke:#1976d2
-    classDef core fill:#fff3e0,stroke:#f57c00
-    classDef model fill:#f3e5f5,stroke:#7b1fa2
-    classDef layer fill:#e8f5e9,stroke:#388e3c
-    classDef daemon fill:#ede7f6,stroke:#5e35b1
-    classDef external fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
-
-    class LK,WN,PN,DT,DM cli
-    class SM,LR,WR,PR,BR,BU core
-    class L,P,W model
-    class PB,DB,DAB,TB,RB,TF,SH,SE,SS,ND,DTR,SF,TS,RS layer
-    class DPROTO,DSRV,DCLI,TF2 daemon
-    class TM,CH,SP,SSH external
+    classDef dd fill:#ede7f6,stroke:#5e35b1
+    classDef st fill:#fff3e0,stroke:#f57c00
+    classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
+    class S1,S2,S3,S4,S5 cli
+    class DL,DP dd
+    class SS st
+    class CH ext
 ```
 
-### What is deliberately absent
-
-`BackendRegistry` / `PaneBackend` / `CompositeBackend` existed up to v0.2.0:
-a `HashMap<PaneId, Arc<dyn PaneBackend>>` whose entries forwarded to
-`link.sink`. They were deleted in v0.3.0 because the sink is no longer the only
-I/O path — a direct pane never touches one. `pane_bridges` + `PaneBridge` is the
-same lookup table without the extra hop.
-
-## 4. The daemon
-
-A direct link's transport is created by the process that asked for it. Before
-v0.5.0 that was the CLI process, so `link add` followed by `data write` in a
-later invocation was impossible by construction. The daemon fixes that by
-owning the two things that must outlive a single command:
-
-```
-links: HashMap<LinkId, Arc<dyn Transport>>     live direct transports
-panes: HashMap<PaneId, PaneSlot>               PaneSlot { link, buffer, pump }
-```
-
-The CLI keeps owning `state.json`; the daemon owns bytes. tmux links never go
-through it — tmux already is a resident server.
+### tmux-backed session
 
 ```mermaid
-sequenceDiagram
-    participant A as CLI process A
-    participant S as daemon socket
-    participant D as daemon
-    participant C as shell child
+graph TB
+    subgraph CLI["CLI"]
+        T1["session new work --tmux"]
+        T2["window new --session work"]
+        T3["pane new --session work --window W"]
+        T4["data read --pane P"]
+        T5["session attach work"]
+    end
 
-    A->>S: connect, CreateLink lid+spec
-    S->>D: spawn transport
-    D->>C: Command::spawn
-    A->>S: CreatePane pid
-    A->>S: Attach pid lid
-    D->>D: start pump: transport.read into pid buffer
+    subgraph ST["state.json"]
+        TS["Session Tmux socket+session<br/>Window Tmux @N<br/>Pane Tmux %N<br/>Link Screen %N"]
+    end
 
-    Note over A: process A exits. daemon keeps running.
+    subgraph TM["tmux server"]
+        TMS["session work<br/>windows, panes, layout<br/>THE source of truth"]
+    end
 
-    participant B as CLI process B
-    B->>S: Write pid hello
-    S->>D: transport.write
-    B->>S: Read pid
-    D-->>B: buffer bytes
+    T1 --> TM
+    T1 --> ST
+    T2 --> TM
+    T2 --> ST
+    T3 --> TM
+    T3 --> ST
+    T4 --> TM
+    T5 --> TM
+
+    classDef cli fill:#e3f2fd,stroke:#1976d2
+    classDef st fill:#fff3e0,stroke:#f57c00
+    classDef ext fill:#fafafa,stroke:#616161,stroke-dasharray: 5 5
+    class T1,T2,T3,T4,T5 cli
+    class TS st
+    class TMS ext
 ```
 
-Wire format: `[u32 LE length][JSON]`, one request per connection, binary as hex.
-Ops: `ping`, `status`, `create_link`, `delete_link`, `create_pane`,
-`delete_pane`, `attach`, `detach`, `read`, `write`, `resize`, `stop`.
+The difference between the two pictures is the whole design: **native keeps
+bytes, tmux keeps structure.** xscore keeps handles in both cases, and bytes
+only in the native case.
 
-Process rules (each is a bug that was hit, not a preference):
+## 6. Refresh, not sync
 
-| Rule | Why |
-|---|---|
-| Spawned via `setsid` | otherwise closing the terminal SIGHUPs the daemon and drops every link |
-| SIGHUP swallowed; SIGTERM/SIGINT left alone | survive terminal close, but keep `daemon stop` and foreground Ctrl-C working |
-| Startup `daemon.lock` taken with `create_new` before binding | two concurrent auto-starts each unlink-and-bind, leaving a daemon on an orphaned inode |
-| Stale socket unlinked before bind | crashed daemon leaves a socket nobody answers |
-| Idle exit when `links` is empty for 5s | tests must not leak daemons. Buffers die with the daemon |
-| `delete_link` unbinds panes but keeps their slots | a direct pane's history outlives its link (ADR 0008 §5) |
+A tmux-backed session has rows in `state.json` (windows, panes, links) but tmux
+owns their truth. The rule, applied **per session** and only when a session is
+touched:
 
-## 5. Lifecycle
+```
+touch(session) →
+  tmux list-windows + list-panes -t <tmux session>
+  for each adopted row whose handle is gone   → remove the row; its pane's
+                                                 link_id becomes None
+  for each adopted row whose geometry changed → update cols/rows/x/y
+  panes that tmux reports but xscore never adopted → REPORTED, not adopted
+```
 
-Three independent lifecycles. The only cross-entity rule is Q1.
+Notes that make this different from v0.5.1's `link sync --heal`:
+
+- **Scoped to one session.** A refresh can never touch another session's rows
+  (v0.4.0 shipped that bug once and fixed it).
+- **No adoption by default.** Panes the user created by hand in tmux stay
+  invisible to xscore until `xscore session adopt <name>`.
+- **No `--heal` flag.** Healing is the only behaviour; there is no mode where a
+  known-stale row is kept.
+- **No global pass.** Nothing walks all sessions; a session is refreshed because
+  a command mentioned it.
+- **Refresh is in-memory.** Removed rows and changed geometry are applied to the
+  in-memory registries only; persistence rides on the normal save at the end of
+  a *mutating* command. A read-only command (`ls`, `show`, `data read`) must not
+  write `state.json` — otherwise every read would contend for the file and every
+  user would see a mutation they did not ask for.
+
+`session adopt <name>` is the explicit "take the current tmux structure as
+xscore rows" operation — the way to start managing a session you created outside
+xscore.
+
+## 7. Lifecycle and invariants
 
 ```mermaid
 stateDiagram-v2
-    state "Pane: binding to a link" as Bind {
-        [*] --> Orphan
-        Orphan --> Bound: pane attach
-        Bound --> Orphan: pane detach
-        note right of Bound
-            tmux panes cannot move:
-            sink_handle is Some, detach is refused
+    state "Session" as SS {
+        [*] --> Live: session new / adopt
+        Live --> Gone: session kill
+        Live --> Unmanaged: session forget
+        note right of Live
+            native: daemon owns it
+            tmux: tmux owns it
         end note
     }
 
-    state "Pane: membership in a window" as Memb {
-        [*] --> Unwindowed
-        Unwindowed --> InWindow: pane add-to-window
-        InWindow --> Unwindowed: pane remove-from-window
-        InWindow --> InWindow: pane move-to-window
+    state "Link" as LL {
+        [*] --> Bound: link add, or pane born in tmux
+        Bound --> Gone: link del on a native link
+        Bound --> Unmanaged: link del on a tmux link
     }
 
-    state "Link: liveness" as Live {
-        [*] --> Connected: link add
-        Connected --> NotConnected: hydrate, direct link
-        NotConnected --> Connected: pane attach reconnects
-        Connected --> Dead: link del
+    state "Pane source" as PP {
+        [*] --> Unbound
+        Unbound --> Bound: pane attach
+        Bound --> Unbound: pane detach
     }
 ```
 
-Invariants, and what enforces each:
+Invariants and what enforces each:
 
-- **Q1 — a direct link has at most one bound pane.** `attach_pane` scans
-  `PaneInfo` for other panes with this `link_id` and detaches them first. The
-  daemon repeats the scan on its own side, because a CLI can be killed between
-  the two steps.
-- **tmux panes are not movable.** `sink_handle.is_some()` ⇒ `detach_pane` and
-  `link add --pane` return `TmuxLinkCannotBindPane` / `TmuxPaneNotDetachable`.
-- **`window_id` and `link_id` are independent.** A pane can be in a window with
-  no link (shows history, cannot write) or bound with no window (live I/O, not
-  displayed). Both combinations are reachable and legal.
-- **Binding ≠ liveness.** `pane.show` reports `link_id`; `link.show` reports
-  `connected`. After a restart a direct link has the first and not the second;
-  data ops then say `LinkNotConnected`, never `NotAttached`.
-- **`link close` is tmux-only** (detach: registry rows dropped, session stays).
-  `link del` is universal teardown. Direct links have no `close` semantics —
-  there is nothing to detach to.
-- **`del_link` on a direct link** closes the transport once and orphans its
-  panes (history kept). On a tmux link it kills the session, and the panes die
-  with it — tmux owns them.
+- **A link serves at most one pane.** Per-session scan on attach; no other
+  capacity exists.
+- **A pane's link is in the same session.** Cross-session moves only via an
+  explicit `pane move --session`, never as a side effect of `attach`.
+- **A tmux pane cannot be detached.** `PaneBackend::Tmux` is its identity;
+  `pane detach` refuses. Destroying it is `pane kill`.
+- **A tmux handle is never an index.** `@N` / `%N` only — indices shift on
+  rename and reorder.
+- **Binding ≠ liveness.** `pane show` reports `link_id`; `link show` reports
+  `connected`. A native link after a restart keeps the binding and loses the
+  connection → `LinkNotConnected`, never `NotAttached`.
+- **Killing a session is the only cascade.** It removes its windows, panes and
+  links and nothing else.
+- **`link del` on a tmux link forgets the handle.** The tmux pane and its
+  session survive: a handle is not an owner. To destroy tmux state use
+  `pane kill` / `session kill`.
+- **`session forget` leaves the backend running.** Drops xscore's rows only
+  (tmux-backed sessions; for native it is equivalent to `kill`, because the
+  daemon is the backend).
 
-## 6. Module dependency rules
+## 8. Module structure (target)
 
-Solid = allowed. The dashed block at the bottom is what must never appear.
+```
+crates/xscore/src/
+  core/        ids, error, address, session, link, pane, window, registries,
+               manager, state, buffer (RingBuffer), refresh
+  model/       SessionInfo, LinkInfo, WindowInfo, PaneInfo,
+               SessionBackend, WindowBackend, PaneBackend, TransportConfig
+  channel/     Channel trait, PipeChannel, ScreenChannel, DaemonChannel
+  transport/   Transport trait, shell, serial, ssh, NoopTransport, DaemonTransport
+  tmux/        TmuxHost (Local / ThroughTransport), structure queries, session runtime
+  daemon/      protocol, server, client
+  url/         URL parser
+  config/      link templates
+  cli/         session, window, pane, link, data, daemon
+```
+
+`backends/` disappears: it held the conduit (`PaneBridge`) and the pane's buffer.
+The conduit becomes `channel/`; the buffer moves to `core/buffer.rs` because it
+belongs to the pane, not to the connection.
 
 ```mermaid
 graph LR
     CLI["cli/"]
     CORE["core/"]
     MODEL["model/"]
+    CHAN["channel/"]
+    TR["transport/"]
+    TM["tmux/"]
+    DM["daemon/"]
     URL["url/"]
-    CONFIG["config/"]
-    BACKENDS["backends/"]
-    TRANSPORT["transport/"]
-    SINK["sink/"]
-    UTIL["util/"]
-    DCLIENT["daemon/client.rs"]
-    DSERVER["daemon/server.rs"]
-    DPROTO["daemon/protocol.rs"]
+    CFG["config/"]
 
     CLI --> CORE
     CLI --> MODEL
     CLI --> URL
-    CLI --> CONFIG
-    CLI --> DCLIENT
+    CLI --> CFG
+    CLI --> DM
 
     CORE --> MODEL
+    CORE --> CHAN
+    CORE --> TR
+    CORE --> TM
+    CORE --> DM
     CORE --> URL
-    CORE --> BACKENDS
-    CORE --> CONFIG
-    CORE --> TRANSPORT
-    CORE --> SINK
-    CORE --> UTIL
-    CORE --> DCLIENT
+    CORE --> CFG
 
-    BACKENDS --> CORE
-    BACKENDS --> TRANSPORT
-    BACKENDS --> SINK
+    CHAN --> TR
+    CHAN --> TM
+    CHAN --> MODEL
 
-    TRANSPORT --> CORE
-    TRANSPORT --> MODEL
+    TM --> TR
+    TM --> MODEL
 
-    SINK --> CORE
-    SINK --> MODEL
-    SINK --> TRANSPORT
-    SINK --> UTIL
+    TR --> MODEL
 
-    DSERVER --> BACKENDS
-    DSERVER --> TRANSPORT
-    DSERVER --> CORE
-    DSERVER --> DPROTO
-    DSERVER --> DCLIENT
-
-    DCLIENT --> CORE
-    DCLIENT --> MODEL
-    DCLIENT --> TRANSPORT
-    DCLIENT --> DPROTO
+    DM --> TR
+    DM --> CORE
 
     URL --> MODEL
-    CONFIG --> MODEL
+    CFG --> MODEL
 
     classDef bad stroke:#c62828,stroke-width:2px,stroke-dasharray: 5 5
-    CLI -.->|forbidden| TRANSPORT
-    CLI -.->|forbidden| SINK
-    CLI -.->|forbidden| BACKENDS
+    CLI -.->|forbidden| TR
+    CLI -.->|forbidden| TM
+    CLI -.->|forbidden| CHAN
     MODEL -.->|forbidden| CORE
     URL -.->|forbidden| CORE
-    CONFIG -.->|forbidden| CORE
-    class TRANSPORT,SINK,BACKENDS,CORE bad
+    CFG -.->|forbidden| CORE
+    class TR,TM,CHAN,CORE bad
 ```
 
-Two honest notes:
+Two notes that survive from v0.5.1:
 
-- `core → daemon/client` and `daemon/client → core` is an **intra-crate cycle**.
-  It exists because `core` needs `DaemonClient` as a field type and
-  `DaemonClient` needs `Error` / `LinkId` / `Result`. It is tolerated while the
-  back-edge only touches those leaf types. If the client starts needing manager
-  state, move a `LinkStore` trait into `core` and implement it on the client.
-- `daemon/server` is only reachable from `main.rs` (the `daemon serve`
-  subcommand), never from `core`. That is what keeps "CLI may run in-process"
-  and "daemon may run as a server" from collapsing into one path.
+- `core ↔ daemon` is the one tolerated cycle: `core` holds a `DaemonClient`
+  field and the client needs `Error` / ids. Tolerable while the back-edge only
+  touches those leaf types; if it grows, extract a `LinkStore` trait into
+  `core`.
+- `daemon/server` is reachable only from `main.rs` (`daemon serve`), never from
+  `core`. That keeps "run in-process" and "run as a server" from collapsing into
+  one path.
 
-## 7. End-to-end: `xscore data write --pane <pid>`
+## 9. Command surface
 
-`manager.data_write(pid, data)` → `bridge_for(pid)` → one of the three bridges.
-`bridge_for` is the only place that decides, so the two failure modes cannot
-drift apart:
+```bash
+# Session — the workspace
+xscore session ls [--all]
+xscore session new <name> [--tmux [--socket S]] [--shell] [--cmd C] [--cwd D]
+                          [--cols N --rows N]
+xscore session adopt <name> [--socket S]     # take over an existing tmux session
+xscore session show <name>                   # its windows / panes / links
+xscore session attach <name>                 # tmux: exec tmux attach; native: unsupported
+xscore session kill <name>                   # destroy the backend and the rows
+xscore session forget <name>                 # drop xscore rows, leave backend running
+xscore session rename <old> <new>
 
-```
-bridge_for(pid)
-├── pane_bridges has pid             → use it
-├── PaneInfo.link_id is Some(lid) and link.connected == false
-│                                     → Error::LinkNotConnected(lid)
-└── otherwise                         → Error::NotAttached(pid)
-```
+# Window — scoped to a session
+xscore window ls   --session <s>
+xscore window new  --session <s> [--name N] [--cmd C] [--cwd D]
+xscore window kill <w>
+xscore window rename <w> <new>
 
-Direct, daemon mode:
+# Pane — scoped to a session
+xscore pane ls   [--session <s>] [--window <w>]
+xscore pane new  --session <s> [--window <w>] [--cmd C] [--cwd D] [--cols N --rows N]
+xscore pane kill <p>
+xscore pane attach --pane <p> --link <l>     # native only
+xscore pane detach --pane <p>                # native only
+xscore pane move   --pane <p> --window <w>   # within the session
 
-```
-CLI: data write --pane P
-  → manager.data_write(P, bytes)
-  → DaemonBridge::write
-  → socket: {"op":"write","pane":"P","data":"<hex>"}
-  → daemon: PaneSlot[P].link → links[lid].write(bytes)
-  → shell child stdin
-```
+# Link — native sessions
+xscore link add <url> --session <s>
+xscore link ls  [--session <s>]
+xscore link del <l>
 
-Direct, read:
-
-```
-CLI: data read --pane P
-  → DaemonBridge::read
-  → socket: {"op":"read","pane":"P","max":4096}
-  → daemon: copy out PaneSlot[P].buffer      (filled by the pump, not consumed)
-```
-
-tmux:
-
-```
-CLI: data write --pane P
-  → TmuxBridge::write
-  → tmux -L xscore send-keys -l -t %N ...
-CLI: data read --pane P
-  → TmuxBridge::read
-  → tmux -L xscore capture-pane -p -t %N
+# Data — any pane
+xscore data read  --pane <p> [--bytes N]
+xscore data write --pane <p> [< file | --from-file F]
+xscore data resize --pane <p> --cols C --rows R
 ```
 
-Reads are **non-destructive snapshots** in all three paths: the buffer is
-scrollback, not a stream. `Ok(0)` means "nothing buffered yet".
+Notes:
 
-## 8. Known duplications and gaps
+- `--cmd` / `--cwd` belong to the verbs that **start a process** (`session new`,
+  `window new`, `pane new`). URLs only say how to connect. This is where the
+  command that v0.5.1 silently dropped (`?tmux=on` ignored the URL's command)
+  now lives.
+- For a tmux session, `pane new` is atomic: `split-window`, adopt `%N`, create
+  the link, bind them. A tmux pane is born bound.
+- `session attach` replaces `link open`; `session kill` / `session forget`
+  replace `link close`. `link` loses both verbs.
+- `?tmux=on|auto|local|remote` is **removed**. Whether a session is tmux-backed
+  is decided at `session new` / `session adopt`.
+- `tmux://` is **not** a link URL. Adoption happens at the session level.
 
-State that is stored twice, or modelled but not used. Listed so the next reader
-does not mistake them for invariants.
+## 10. Delta from v0.5.1
 
-| Item | Status |
+### Removed
+
+| Gone | Why |
 |---|---|
-| `Window.panes: Vec<PaneId>` **and** `PaneInfo.window_id` | Both written on every membership change, no transaction. `window_id` is authoritative for reads; `Window.panes` is the ordered list (which the layout hint will need). A crash between the two writes can desync them. |
-| `Link.active_pane` **and** `PaneInfo.link_id` | `attach_pane` rewrites both. Q1 recovery scans `PaneInfo`, so a desync self-heals on the next attach. |
-| `WindowLayout` (`single`/`tabs`/`split_h`/`split_v`/`grid`) | Stored, validated, never consumed. There is no renderer. It is a hint for a future UI. `tabs` has no tmux equivalent. |
-| `PaneInfo.x` / `y` | Stored, never validated against the window bounds, never used for placement. |
-| `xscore config` | Stub. `AppConfig` does not exist yet. |
-| `link open` (local tmux) | `todo!()`. Non-tmux links correctly return `OpenOnlyForTmux`. |
-| Concurrent `state.json` writers | Last writer wins. Two simultaneous mutating commands can drop one update. |
-| Daemon idle exit | Drops in-memory pane buffers (they are not persisted). |
+| `Sink` trait, `RawSink`, `TmuxSink: Sink` | no link may be shared, so `capacity` / `grant` / `revoke` have nothing to express |
+| `Link.sink: Box<dyn Sink>` | it was dead: one `no-op attach` call, then never touched |
+| `Link.active_pane` (Q1 ledger) | exclusivity follows from "one link, one pane" |
+| `SinkConfig::{Raw, Tmux}` | replaced by `SessionBackend`; a link no longer knows about tmux |
+| `?tmux=on|auto|local|remote` | tmux-ness is a session property |
+| `WindowInfo.tmux_window_handle`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux` / `PaneBackend::Tmux` |
+| `WindowLayout` (5 variants) | no consumer; tmux owns layout, native has no renderer |
+| `link open` / `link close` | `session attach` / `session kill` / `session forget` |
+| `link sync [--heal]` | replaced by per-session refresh (§6): same data, no mode flag, no global pass |
+| `backends/` module | split into `channel/` (the conduit) and `core/buffer.rs` |
 
-## 9. State file
+### Added
 
-`~/.config/xscore/state/state.json`, `schema_version: 2`, atomic write to a
-per-process temp name then rename. Older versions are rejected with a message
-telling the user to delete the file — a silent empty parse would look like data
-loss.
+| New | Role |
+|---|---|
+| `Session` + `SessionId` + `SessionBackend` | the workspace, and who keeps it alive |
+| `Endpoint::{Pipe, Screen}` | the honest split between byte streams and tmux screens |
+| `channel/{Pipe,Screen,Daemon}Channel` | what a pane reads and writes through |
+| `tmux::TmuxHost` (`Local`, `ThroughTransport`) | where tmux commands run — the seam for remote tmux |
+| `session adopt` / `session forget` | manage sessions xscore did not create; stop managing without destroying |
+| `pane new --window` on a tmux session | creates tmux pane + link + pane atomically |
 
-```json
-{
-  "schema_version": 2,
-  "links":   [{ "id": "...", "info": { "name": "...", "address": {...},
-                                       "transport": {...}, "sink": {...} } }],
-  "windows": [{ "id": "...", "info": { "name": "...", "layout": {"kind":"single"},
-                                       "cols": 120, "rows": 30,
-                                       "tmux_window_handle": "@0" },
-                "panes": ["<pid>", "..."] }],
-  "panes":   [{ "id": "...", "info": { "name": "...", "cols": 80, "rows": 24,
-                                       "x": 0, "y": 0,
-                                       "link_id": "...", "window_id": "...",
-                                       "sink_handle": "%0" } }]
-}
-```
+### Changed
 
-Three flat lists. Nothing is nested, because no entity owns another. Bridges,
-pumps and daemon sockets are runtime-only and never serialized; tmux bridges are
-rebuilt from `sink_handle` on hydration.
+| Area | v0.5.1 | v0.6.0 |
+|---|---|---|
+| state schema | v2: flat `links`/`windows`/`panes` | **v3**: adds `sessions`; every child carries `session_id`; backends replace `sink` / `sink_handle` / `tmux_window_handle` |
+| `link add` | no session | requires `--session` (a native session) |
+| Q1 | special case in `attach_pane` | universal: one link → one pane |
+| tmux control | `Sink` methods + `link sync` | `session` / `window` / `pane` verbs; tmux queried per session |
+| remote tmux | `?tmux=remote` (silently local) | `TmuxHost::ThroughTransport` seam; not implemented, not advertised |
+| `Window.layout` | stored enum | gone; `#{window_layout}` read from tmux when needed |
+
+### Migration (v2 → v3)
+
+`schema_version: 3`; v2 files are rejected with an actionable error, not
+silently converted (same policy as v0.4.0). The one-time migration:
+
+1. each existing tmux link → `Session { backend: Tmux { socket, session } }`
+   named after the link; its `@N` / `%N` handles move into the child backends.
+2. each existing native (raw) link → `Session { backend: Native }` named after
+   the link; its pane keeps the binding.
+3. windows and panes are re-parented to the session they came from.
+4. `link sync` output is discarded — it described cached structure that is now
+   refreshed per query.
+
+## 11. Open decisions
+
+| # | Question | Lean |
+|---|---|---|
+| D1 | Does a tmux-backed session have explicit `Link`s (1:1 with panes), or do panes hold a `Screen` endpoint directly? | **Explicit links.** One binding rule ("a pane uses a link") beats two, and it is where exclusivity lives. Cost: a 1:1 link that can never be re-bound. |
+| D2 | Window mirroring for tmux sessions: mirror `@N`, or keep one tmux window and treat xscore windows as private? | **Mirror `@N`.** `tmux attach` must show what xscore shows, or the product premise breaks. |
+| D3 | `WindowLayout`: delete for good, or keep a hint for native windows? | **Delete.** No consumer; reintroduce with the renderer. |
+| D4 | tmux socket: private `-L xscore`, or the user's default socket? | **Default socket**, `--socket` to override. Sessions invisible in `tmux ls` are not "managed". Tests pass `--socket` explicitly. |
+| D5 | `link del` on a tmux-backed link | **Forget the handle only.** A link is a view, not an owner. |
+| D6 | Can a pane move between sessions? | **No implicit moves.** `pane move --session` is explicit and native-only. |
+| D7 | `session forget` — needed, or is `kill` enough? | **Keep it.** Mirrors v0.5.1's `del` vs `close`: destroy vs stop managing. |
+| D8 | Alternative to mirroring: address tmux directly (`data --tmux work:1`) and have no xscore rows for tmux at all | **Rejected for now**, because it gives two addressing modes for `data`. Revisit if per-session refresh proves troublesome. |
+
+## 12. What this does not solve
+
+- **tmux has no byte stream.** `Screen` endpoints cannot carry binary, exact byte
+  order, or exit codes. Anything needing that must be a native session.
+- **No renderer.** Native windows have no layout model and no drawing code;
+  `pane.cols/rows/x/y` are recorded but unenforced. The tmux backend is the only
+  one that can display anything to a human today.
+- **No remote tmux.** `TmuxHost::ThroughTransport` is a seam, not an
+  implementation.
+- **Concurrent `state.json` writers still last-writer-wins.** Unchanged from
+  v0.5.1. Sessions shrink the blast radius (mutations are scoped) but add no
+  locking.
+- **Daemon idle exit still drops native pane buffers** (they are not persisted).
