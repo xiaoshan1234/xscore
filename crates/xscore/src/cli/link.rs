@@ -63,6 +63,11 @@ pub struct LinkAddArgs {
     /// for a pane that is already attached (detach it first).
     #[arg(long, value_name = "PANE_ID")]
     pub pane: Option<String>,
+
+    /// Put the link in this session. Omitted: the manager resolves the default
+    /// (the only session, else `default`, created on demand).
+    #[arg(long, value_name = "NAME")]
+    pub session: Option<String>,
 }
 
 #[derive(Args)]
@@ -103,7 +108,8 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
         Some(p) => Some(PaneId::parse(p)?),
         None => None,
     };
-    let result = mgr.add_link(spec, address, supplied_id, pane).await?;
+    let sid = mgr.resolve_session(args.session.as_deref()).await?;
+    let result = mgr.add_link_in(sid, spec, address, supplied_id, pane).await?;
     println!("link:  {}", result.link_id);
     if let Some(wid) = result.window_id {
         println!("window: {wid}");

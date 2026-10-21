@@ -52,6 +52,10 @@ pub struct PaneAddArgs {
     /// the pane is a real tmux split and tmux's geometry is used.
     #[arg(long, value_name = "WINDOW_ID")]
     pub window: Option<String>,
+    /// Put the pane in this session. Omitted: the manager resolves the default
+    /// (the only session, else `default`, created on demand).
+    #[arg(long, value_name = "NAME")]
+    pub session: Option<String>,
 }
 
 #[derive(Args)]
@@ -94,8 +98,9 @@ async fn add(mgr: Arc<SessionManager>, args: PaneAddArgs) -> anyhow::Result<()> 
         Some(s) => Some(WindowId::parse(s)?),
         None => None,
     };
+    let sid = mgr.resolve_session(args.session.as_deref()).await?;
     let pid = mgr
-        .add_pane(args.name, args.cols, args.rows, args.x, args.y, window)
+        .add_pane_in(sid, args.name, args.cols, args.rows, args.x, args.y, window)
         .await?;
     println!("pane:  {pid}");
     Ok(())

@@ -657,8 +657,11 @@ fn xscore_rejects_legacy_state_schema() {
     assert!(!out.status.success(), "legacy state.json must be a hard error");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("schema_version=0"), "got: {err}");
-    assert!(err.contains("expected 2"), "got: {err}");
+    // v0.6.0 (ADR 0010 D8): the schema moved to 3, so the message (and this
+    // assertion, which tracks it) moved with it.
+    assert!(err.contains("expected 3"), "got: {err}");
     assert!(err.contains("delete"), "error should tell the user what to do: {err}");
+    assert!(err.contains("state migrate"), "error should name the migration: {err}");
 
     // Deleting it restores normal operation.
     std::fs::remove_file(&state).unwrap();
@@ -1161,5 +1164,157 @@ fn xscore_daemon_survives_sighup() {
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
+    cleanup_daemon(name);
+}
+
+// ----- v0.6.0 (ADR 0010): the session is the workspace -----
+//
+// A session owns links, windows and panes; every child carries `session_id`.
+// `session new` is the one-command path (first link + window + pane), `kill`
+// is the only cascade, and `forget` only applies to tmux-backed sessions.
+
+#[test]
+fn xscore_session_new_creates_window_link_and_pane() {
+    let name = "session_new_creates";
+    let xscore = || xscore_for(name);
+
+    let out = xscore()
+        .args(["session", "new", "work"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "session new failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let sid = parse_id_from_stdout(&out.stdout, "session");
+    let lid = parse_id_from_stdout(&out.stdout, "link");
+    let wid = parse_id_from_stdout(&out.stdout, "window");
+    let pid = parse_id_from_stdout(&out.stdout, "pane");
+
+    // Every child points back at the session it was created in.
+    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    assert_eq!(pane["session_id"], serde_json::json!(sid), "pane session: {pane}");
+    assert_eq!(pane["link_id"], serde_json::json!(lid), "pane link: {pane}");
+    assert_eq!(pane["window_id"], serde_json::json!(wid), "pane window: {pane}");
+
+    let window = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
+    assert_eq!(window["session_id"], serde_json::json!(sid), "window session: {window}");
+
+    let link = json(&xscore().args(["link", "show", "--id", &lid]).output().unwrap().stdout);
+    assert_eq!(link["session_id"], serde_json::json!(sid), "link session: {link}");
+
+    cleanup_daemon(name);
+}
+
+#[test]
+fn xscore_session_ls_lists_it() {
+    let name = "session_ls";
+    let xscore = || xscore_for(name);
+
+    let new = xscore()
+        .args(["session", "new", "work", "--empty"])
+        .output()
+        .unwrap();
+    assert!(ok(&new), "session new --empty failed: {}", String::from_utf8_lossy(&new.stderr));
+    let sid = parse_id_from_stdout(&new.stdout, "session");
+
+    let list = xscore().args(["session", "ls"]).output().unwrap();
+    assert!(ok(&list));
+    let s = String::from_utf8_lossy(&list.stdout);
+    assert!(s.contains("SESSION ID"), "missing header: {s}");
+    assert!(s.contains(&sid), "missing session id: {s}");
+    assert!(s.contains("work"), "missing session name: {s}");
+    assert!(s.contains("native"), "missing backend: {s}");
+}
+
+#[test]
+fn xscore_session_kill_cascades() {
+    let name = "session_kill_cascades";
+    let xscore = || xscore_for(name);
+
+    let new = xscore().args(["session", "new", "work"]).output().unwrap();
+    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
+
+    let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
+    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+
+    // No sessions left...
+    let sessions = xscore().args(["session", "ls"]).output().unwrap();
+    let s = String::from_utf8_lossy(&sessions.stdout);
+    assert!(!s.contains("work"), "session still listed: {s}");
+    assert_eq!(s.lines().count(), 1, "only the header should remain: {s}");
+
+    // ...and nothing that belonged to it.
+    let links = xscore().args(["link", "list"]).output().unwrap();
+    let s = String::from_utf8_lossy(&links.stdout);
+    assert_eq!(s.lines().count(), 1, "link list must be empty after kill: {s}");
+
+    cleanup_daemon(name);
+}
+
+#[test]
+fn xscore_session_forget_native_is_refused() {
+    let name = "session_forget_native";
+    let xscore = || xscore_for(name);
+
+    let new = xscore()
+        .args(["session", "new", "work", "--empty"])
+        .output()
+        .unwrap();
+    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
+
+    let forget = xscore().args(["session", "forget", "work"]).output().unwrap();
+    assert!(
+        !forget.status.success(),
+        "`session forget` on a native session must be refused"
+    );
+    let err = String::from_utf8_lossy(&forget.stderr);
+    assert!(err.contains("native"), "got: {err}");
+    assert!(err.contains("session kill"), "error should name the right verb: {err}");
+
+    // Refused means untouched: the session is still there.
+    let sessions = xscore().args(["session", "ls"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&sessions.stdout).contains("work"),
+        "a refused forget must not drop the session"
+    );
+}
+
+#[test]
+fn xscore_link_add_with_session_flag() {
+    let name = "link_add_with_session";
+    let xscore = || xscore_for(name);
+
+    let new = xscore()
+        .args(["session", "new", "A", "--empty"])
+        .output()
+        .unwrap();
+    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
+    let sid = parse_id_from_stdout(&new.stdout, "session");
+
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat", "--session", "A"])
+        .output()
+        .unwrap();
+    assert!(ok(&add), "link add --session A failed: {}", String::from_utf8_lossy(&add.stderr));
+    let lid = parse_id_from_stdout(&add.stdout, "link");
+    let pid = parse_id_from_stdout(&add.stdout, "pane");
+
+    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    assert_eq!(pane["session_id"], serde_json::json!(sid), "pane joined A: {pane}");
+
+    let show = xscore().args(["session", "show", "A"]).output().unwrap();
+    assert!(ok(&show), "session show failed: {}", String::from_utf8_lossy(&show.stderr));
+    let s = String::from_utf8_lossy(&show.stdout);
+    assert!(s.contains(&lid), "session show A must list the link {lid}: {s}");
+    assert!(s.contains(&pid), "session show A must list the pane {pid}: {s}");
+
+    // A link in another session is not visible here.
+    let other = xscore()
+        .args(["session", "new", "B", "--empty"])
+        .output()
+        .unwrap();
+    assert!(ok(&other));
+    let show_a = xscore().args(["session", "show", "A"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&show_a.stdout).contains(&lid));
+
     cleanup_daemon(name);
 }

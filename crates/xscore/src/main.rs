@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 use clap::Parser;
-use xscore::cli::{link, pane, window, Cli, Commands};
+use xscore::cli::{link, pane, session, window, Cli, Commands};
 use xscore::core::SessionManager;
 
 #[tokio::main]
@@ -24,11 +24,15 @@ async fn main() -> anyhow::Result<()> {
     // `daemon serve` must NOT hydrate state: it owns no metadata, and a
     // stale/incompatible state.json must not stop the daemon from coming
     // up (that would take every direct link down with it).
-    if matches!(&cli.command, Commands::Daemon(_)) {
-        if let Commands::Daemon(cmd) = cli.command {
-            return xscore::cli::daemon::run(cmd).await;
+    //
+    // `state migrate` must not hydrate either, for the mirror-image reason:
+    // the file it exists to convert is the file hydration would reject.
+    if matches!(&cli.command, Commands::Daemon(_) | Commands::State(_)) {
+        match cli.command {
+            Commands::Daemon(cmd) => return xscore::cli::daemon::run(cmd).await,
+            Commands::State(cmd) => return xscore::cli::state::run(cmd),
+            _ => unreachable!("checked by matches! above"),
         }
-        unreachable!("checked by matches! above");
     }
 
     // Hydrate the manager from disk (task-15). On first run, this returns
@@ -39,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     mgr.enable_daemon(Arc::new(xscore::daemon::DaemonClient::new()));
     let mgr = Arc::new(mgr);
     match cli.command {
+        Commands::Session(c) => session::run(mgr, c).await?,
         Commands::Link(c) => link::run(mgr, c).await?,
         Commands::Window(c) => window::run(mgr, c).await?,
         Commands::Pane(c) => pane::run(mgr, c).await?,
@@ -47,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
             xscore::cli::data::run(mgr, c).await?;
         }
         Commands::Daemon(_) => unreachable!("handled before hydration"),
+        Commands::State(_) => unreachable!("handled before hydration"),
         Commands::Config => {
             // AppConfig is a separate concern; deferred to a later task.
             // Without this stub, clap would reject `xscore config` as an

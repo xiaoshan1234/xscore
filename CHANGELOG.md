@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Session tier: a workspace that owns windows, panes and links.**
+  Links, windows and panes used to float with no owner — "which links belong to
+  this tmux session" was inferred from a name prefix (`xscore-<link_id>`) that
+  the user could override (ADR 0010). `SessionInfo` with a
+  `Native`/`Tmux { host, socket, session }` backend is now the top of the model,
+  and every link, window and pane carries its `session_id`.
+
+  `xscore session new <name>` creates a native session *with* its first link,
+  window and pane (one command for the common case); `session ls|show|rename`
+  inspect it; `session kill` is the only cascade in the model; `session forget`
+  drops xscore's rows for a tmux session and leaves tmux running. `link add`,
+  `window add` and `pane add` take `--session <name>`.
+
+  `SessionManager` gains `resolve_session`, `add_session[_native]`,
+  `list_sessions`, `get_session`, `rename_session`, `del_session`,
+  `forget_session`, and explicit-session `add_link_in` / `add_window_in` /
+  `add_pane_in`; the old verbs are delegates that resolve the default session,
+  so no caller changed. Cross-session binding is refused
+  (`Error::NotInSession`): a pane may only attach to a link, or join a window,
+  of its own session.
+
+### Changed
+
+- **State schema v3, and `xscore state migrate` to get there.** `state.json`
+  gains the `sessions` list, and every link, window and pane gains a
+  `session_id`. A v2 file is rejected, never silently converted — but the error
+  now names the way out: `xscore state migrate` turns a v2 file into v3 in
+  place (one session per link, named after it; tmux links keep their tmux
+  session name; children with no link fall back to a `Native` session named
+  `default`) and reports how many sessions it created. `state migrate` runs
+  before hydration, like `daemon serve`, because the file it converts is exactly
+  the one hydration rejects.
+
 ### Fixed
 
 - **A shell link is a pty, not a pipe.**

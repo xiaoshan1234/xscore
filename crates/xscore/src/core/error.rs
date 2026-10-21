@@ -1,10 +1,34 @@
 use thiserror::Error;
-use super::id::{LinkId, PaneId, WindowId};
+use super::id::{LinkId, PaneId, SessionId, WindowId};
 
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("link not found: {0}")]
     LinkNotFound(LinkId),
+
+    // ===== v0.6.0 (ADR 0010 §1) — the session tier =====
+
+    /// Resolution by name failed (`--session work`, `session show work`). Keyed
+    /// by name because that is what the user typed.
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
+
+    /// Two sessions may not share a name: `by_name` is how every verb resolves
+    /// a `<ref>`, so a duplicate would make resolution a coin flip.
+    #[error("a session named `{0}` already exists")]
+    SessionExists(String),
+
+    /// A native session IS this process's backend (its links are daemon-owned
+    /// pipes). There is nothing to "stop managing" without destroying it, so
+    /// `session forget` points at the truthful verb instead.
+    #[error("session {0} is native — this process owns it; use `session kill`")]
+    ForgetNativeSession(SessionId),
+
+    /// Invariant guard (arch.md §8): a child may only be bound to another child
+    /// of the SAME session. Carries `what` ("pane", "window", "link") so the
+    /// message names both sides of the rejected pairing.
+    #[error("session {session} does not contain {what} {id}")]
+    NotInSession { session: SessionId, what: &'static str, id: String },
 
     #[error("window not found: {0}")]
     WindowNotFound(WindowId),

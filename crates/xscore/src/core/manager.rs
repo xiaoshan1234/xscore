@@ -21,25 +21,34 @@
 // link kills the session and drops the panes with it; on a direct link
 // it orphans the panes and keeps their buffers.
 //
-// State persistence: `save_state` writes `StateSnapshot` (schema v2);
-// see `core::state` for the version gate.
+// v0.6.0 (ADR 0010 §1) adds the Session tier ABOVE these three entities. A
+// session is the workspace that owns links, windows and panes; the children
+// carry `session_id`, and `del_session` is the only cascade in the model. The
+// `*_in(session, ..)` methods take the session explicitly; the older
+// `add_link`/`add_window`/`add_pane` are thin delegates that resolve the
+// default session first, so no caller had to change.
+//
+// State persistence: `save_state` writes `StateSnapshot` (schema v3);
+// see `core::state` for the version gate and `migrate_v2_to_v3`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use super::{Error, LinkAddress, Result};
-use super::id::{LinkId, PaneId, WindowId};
+use super::id::{LinkId, PaneId, SessionId, WindowId};
 use super::link::Link;
 use super::link_registry::LinkRegistry;
 use super::pane_registry::PaneRegistry;
+use super::session::Session;
+use super::session_registry::SessionRegistry;
 use super::window::Window;
 use super::window_registry::WindowRegistry;
 
 use crate::backends::{DaemonBridge, DirectBridge, PaneBridge, RingBuffer, TmuxBridge};
 use crate::daemon::client::DaemonClient;
 use crate::model::{
-    ConnectSpec, PaneInfo, SinkConfig, WindowInfo, WindowLayout,
+    ConnectSpec, PaneInfo, SessionInfo, SinkConfig, WindowInfo, WindowLayout,
 };
 use crate::sink::factory::sink_for;
 use crate::sink::tmux::TmuxSink;
@@ -87,6 +96,9 @@ impl SyncReport {
 
 #[derive(Clone)]
 pub struct SessionManager {
+    /// v0.6.0 (ADR 0010 §1): the workspaces. Children point at a session by
+    /// id; this registry is the only place the names live.
+    pub sessions: Arc<SessionRegistry>,
     pub links: Arc<LinkRegistry>,
     pub windows: Arc<WindowRegistry>,
     pub panes: Arc<PaneRegistry>,
@@ -113,6 +125,7 @@ impl Default for SessionManager {
 impl SessionManager {
     pub fn new() -> Self {
         Self {
+            sessions: Arc::new(SessionRegistry::new()),
             links: Arc::new(LinkRegistry::new()),
             windows: Arc::new(WindowRegistry::new()),
             panes: Arc::new(PaneRegistry::new()),
@@ -149,12 +162,239 @@ impl SessionManager {
         }
     }
 
+    // ===== sessions (v0.6.0, ADR 0010 §1) =====
+
+    /// Which workspace does this command mean?
+    ///
+    /// `Some(name)` is the user being explicit (`--session work`) and must
+    /// never fall back to something else — a typo would silently write into the
+    /// wrong workspace. `None` picks the only session if there is exactly one,
+    /// else `default`, and on a virgin state creates `default` so that every
+    /// pre-v0.6 command keeps working without a session of its own.
+    pub async fn resolve_session(&self, name: Option<&str>) -> Result<SessionId> {
+        if let Some(n) = name {
+            return self
+                .sessions
+                .get_by_name(n)
+                .await
+                .map(|s| s.info.id)
+                .ok_or_else(|| Error::SessionNotFound(n.to_string()));
+        }
+        let all = self.sessions.list().await;
+        if all.len() == 1 {
+            return Ok(all[0].info.id);
+        }
+        if let Some(s) = self.sessions.get_by_name("default").await {
+            return Ok(s.info.id);
+        }
+        self.add_session_native("default").await
+    }
+
+    pub async fn add_session_native(&self, name: &str) -> Result<SessionId> {
+        self.add_session(SessionInfo::new_native(name)).await
+    }
+
+    pub async fn add_session(&self, info: SessionInfo) -> Result<SessionId> {
+        if self.sessions.get_by_name(&info.name).await.is_some() {
+            return Err(Error::SessionExists(info.name));
+        }
+        let id = info.id;
+        self.sessions.insert(Session::new(info)).await;
+        self.save_state().await?;
+        Ok(id)
+    }
+
+    /// Sessions in creation order (uuid v7 is chronological, but
+    /// `created_at` is what the CLI prints, so sort by that).
+    pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        let mut all: Vec<SessionInfo> = self
+            .sessions
+            .list()
+            .await
+            .iter()
+            .map(|s| s.info.clone())
+            .collect();
+        all.sort_by_key(|s| s.created_at);
+        Ok(all)
+    }
+
+    pub async fn get_session(&self, id: SessionId) -> Result<SessionInfo> {
+        self.sessions
+            .get(id)
+            .await
+            .map(|s| s.info.clone())
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))
+    }
+
+    pub async fn rename_session(&self, id: SessionId, new_name: &str) -> Result<()> {
+        let current = self
+            .sessions
+            .get(id)
+            .await
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
+        if current.info.name == new_name {
+            return Ok(());
+        }
+        if self.sessions.get_by_name(new_name).await.is_some() {
+            return Err(Error::SessionExists(new_name.to_string()));
+        }
+        let mut info = current.info.clone();
+        info.name = new_name.to_string();
+        // Remove + reinsert so `by_name` follows the new name (the registry's
+        // `remove` only drops the index entry still pointing at this id).
+        self.sessions.remove(id).await;
+        self.sessions.insert(Session::new(info)).await;
+        self.save_state().await?;
+        Ok(())
+    }
+
+    /// Destroy a session and everything in it — the only cascade in the model
+    /// (arch.md §8).
+    ///
+    /// Links go through `del_link` (which kills a tmux session and already
+    /// removes the windows/panes that came from it). Then the registries are
+    /// swept for children that no link could reach: orphan panes (never
+    /// attached) and empty windows. The session row is removed last, so an
+    /// interrupted kill leaves an empty workspace rather than children pointing
+    /// at a missing session.
+    pub async fn del_session(&self, id: SessionId) -> Result<()> {
+        if self.sessions.get(id).await.is_none() {
+            return Err(Error::SessionNotFound(id.to_string()));
+        }
+
+        let link_ids: Vec<LinkId> = self
+            .links
+            .list()
+            .await
+            .iter()
+            .filter(|l| l.info.session_id == id)
+            .map(|l| l.id)
+            .collect();
+        for lid in link_ids {
+            self.del_link(lid).await?;
+        }
+
+        let stragglers: Vec<PaneInfo> = self
+            .panes
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|p| p.session_id == id)
+            .collect();
+        for info in &stragglers {
+            let bridge = self.pane_bridges.lock().await.remove(&info.id);
+            self.pane_buffers.lock().await.remove(&info.id);
+            // A tmux bridge is dropped, never closed: `close()` is a real
+            // `kill-pane`, and the tmux session is already gone (del_link).
+            // A native bridge is closed so its pump stops instead of being
+            // left holding the transport.
+            if let Some(b) = bridge {
+                if info.sink_handle.is_none() {
+                    let _ = b.close().await;
+                }
+            }
+            self.panes.remove(info.id).await;
+        }
+
+        let doomed_windows: Vec<WindowId> = self
+            .windows
+            .list_all()
+            .await
+            .iter()
+            .filter(|w| w.info.session_id == id)
+            .map(|w| w.info.id)
+            .collect();
+        for wid in doomed_windows {
+            self.windows.remove(wid).await;
+        }
+
+        self.sessions.remove(id).await;
+        self.save_state().await?;
+        Ok(())
+    }
+
+    /// Stop managing a session without touching its backend (arch.md §8).
+    ///
+    /// Only meaningful for tmux: the tmux server keeps running and the session
+    /// stays in `tmux ls`; xscore just drops its rows. A native session has no
+    /// backend outside this process, so "forget" would silently mean "kill" —
+    /// refuse instead.
+    pub async fn forget_session(&self, id: SessionId) -> Result<()> {
+        let session = self
+            .sessions
+            .get(id)
+            .await
+            .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
+        if !session.info.is_tmux() {
+            return Err(Error::ForgetNativeSession(id));
+        }
+
+        // No `del_link`, no `close()`: both would terminate something that
+        // belongs to tmux. Dropping the rows (and the bridges) is the whole
+        // operation.
+        let link_ids: Vec<LinkId> = self
+            .links
+            .list()
+            .await
+            .iter()
+            .filter(|l| l.info.session_id == id)
+            .map(|l| l.id)
+            .collect();
+        for lid in link_ids {
+            self.links.remove(lid).await;
+        }
+        for info in self.panes.list_all().await.iter().filter(|p| p.session_id == id) {
+            self.pane_bridges.lock().await.remove(&info.id);
+            self.pane_buffers.lock().await.remove(&info.id);
+        }
+        let pane_ids: Vec<PaneId> = self
+            .panes
+            .list_all()
+            .await
+            .iter()
+            .filter(|p| p.session_id == id)
+            .map(|p| p.id)
+            .collect();
+        for pid in pane_ids {
+            self.panes.remove(pid).await;
+        }
+        let window_ids: Vec<WindowId> = self
+            .windows
+            .list_all()
+            .await
+            .iter()
+            .filter(|w| w.info.session_id == id)
+            .map(|w| w.info.id)
+            .collect();
+        for wid in window_ids {
+            self.windows.remove(wid).await;
+        }
+        self.sessions.remove(id).await;
+        self.save_state().await?;
+        Ok(())
+    }
+
     // ===== add_link =====
 
-    /// Create a link and give it a usable pane. See the module comment
-    /// for the three branches.
+    /// Create a link and give it a usable pane, in the default session.
+    /// See `add_link_in` for the three branches.
     pub async fn add_link(
         &self,
+        spec: ConnectSpec,
+        address: LinkAddress,
+        id: Option<LinkId>,
+        pane: Option<PaneId>,
+    ) -> Result<LinkAddResult> {
+        let sid = self.resolve_session(None).await?;
+        self.add_link_in(sid, spec, address, id, pane).await
+    }
+
+    /// v0.6.0 (ADR 0010): `add_link`, scoped to an explicit session. Every
+    /// window/pane it creates carries `session`, and a pane it binds must
+    /// already belong to the same session (arch.md §8).
+    pub async fn add_link_in(
+        &self,
+        session: SessionId,
         spec: ConnectSpec,
         address: LinkAddress,
         id: Option<LinkId>,
@@ -175,6 +415,14 @@ impl SessionManager {
                 // tmux-owned panes are never re-bound: their identity is
                 // the `%N` handle tmux gave them.
                 return Err(Error::TmuxLinkCannotBindPane);
+            }
+            if info.session_id != session {
+                // Cross-session binding is never implicit (arch.md §8).
+                return Err(Error::NotInSession {
+                    session,
+                    what: "pane",
+                    id: pid.to_string(),
+                });
             }
         }
 
@@ -239,6 +487,7 @@ impl SessionManager {
                 let wid = WindowId::new();
                 let w = Window::new(WindowInfo {
                     id: wid,
+                    session_id: session,
                     name: win.name.clone(),
                     created_at: chrono::Utc::now(),
                     layout: layout_from_tmux(&win.layout),
@@ -257,6 +506,7 @@ impl SessionManager {
                     pid,
                     PaneInfo {
                         id: pid,
+                        session_id: session,
                         name: format!("p-{pid}"),
                         created_at: chrono::Utc::now(),
                         cols: first.cols,
@@ -301,6 +551,7 @@ impl SessionManager {
                 let pid = PaneId::new();
                 let w = Window::new(WindowInfo {
                     id: wid,
+                    session_id: session,
                     name: format!("w-{}", &wid.to_string()[..8]),
                     created_at: chrono::Utc::now(),
                     layout: WindowLayout::Single,
@@ -326,6 +577,7 @@ impl SessionManager {
                     pid,
                     PaneInfo {
                         id: pid,
+                        session_id: session,
                         name: format!("p-{pid}"),
                         created_at: chrono::Utc::now(),
                         cols: 80,
@@ -344,6 +596,7 @@ impl SessionManager {
 
         let link_info = crate::model::LinkInfo {
             id: link_id,
+            session_id: session,
             name: if spec.name.is_empty() { link_id.to_string() } else { spec.name.clone() },
             created_at: chrono::Utc::now(),
             address: address.clone(),
@@ -522,12 +775,30 @@ impl SessionManager {
 
     // ===== add_window / del_window / set_window_layout =====
 
+    /// Create a window in the default session. See `add_window_in`.
+    pub async fn add_window(
+        &self,
+        name: Option<String>,
+        layout: WindowLayout,
+        cols: u16,
+        rows: u16,
+        link: Option<LinkId>,
+    ) -> Result<WindowId> {
+        let sid = self.resolve_session(None).await?;
+        self.add_window_in(sid, name, layout, cols, rows, link).await
+    }
+
     /// Create a window. With `link: Some(tmux_lid)` a real tmux window is
     /// created (and adopted); `layout`/`cols`/`rows` are then IGNORED in
     /// favour of what tmux reports. With `link: None` the window is
     /// virtual (purely xscore-side).
-    pub async fn add_window(
+    ///
+    /// v0.6.0 (ADR 0010): the window belongs to `session`, and a `link` given
+    /// here must belong to that same session — a tmux window from another
+    /// workspace would make the two disagree about `session_id`.
+    pub async fn add_window_in(
         &self,
+        session: SessionId,
         name: Option<String>,
         layout: WindowLayout,
         cols: u16,
@@ -540,6 +811,7 @@ impl SessionManager {
         let info = match link {
             None => WindowInfo {
                 id: window_id,
+                session_id: session,
                 name: resolved_name,
                 created_at: chrono::Utc::now(),
                 layout,
@@ -549,6 +821,13 @@ impl SessionManager {
             },
             Some(lid) => {
                 let arc_link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
+                if arc_link.info.session_id != session {
+                    return Err(Error::NotInSession {
+                        session,
+                        what: "link",
+                        id: lid.to_string(),
+                    });
+                }
                 if matches!(arc_link.info.sink, SinkConfig::Raw) {
                     return Err(Error::NotTmuxLink(lid));
                 }
@@ -557,6 +836,7 @@ impl SessionManager {
                 let snap = ts.new_window(&resolved_name).await?;
                 WindowInfo {
                     id: window_id,
+                    session_id: session,
                     name: snap.name.clone(),
                     created_at: chrono::Utc::now(),
                     layout: layout_from_tmux(&snap.layout),
@@ -601,6 +881,20 @@ impl SessionManager {
 
     // ===== add_pane / del_pane =====
 
+    /// Create a pane in the default session. See `add_pane_in`.
+    pub async fn add_pane(
+        &self,
+        name: Option<String>,
+        cols: u16,
+        rows: u16,
+        x: u16,
+        y: u16,
+        window: Option<WindowId>,
+    ) -> Result<PaneId> {
+        let sid = self.resolve_session(None).await?;
+        self.add_pane_in(sid, name, cols, rows, x, y, window).await
+    }
+
     /// Create a pane.
     ///
     /// * `window: None` → hollow orphan pane (no link, no window).
@@ -608,8 +902,15 @@ impl SessionManager {
     ///   → split inside that real tmux window; the new pane is owned by
     ///   tmux, gets that window's link, and uses tmux's geometry.
     /// * `window: Some(wid)` virtual → hollow pane inside the window.
-    pub async fn add_pane(
+    ///
+    /// v0.6.0 (ADR 0010): the pane belongs to `session`, and the window it is
+    /// put into must belong there too (arch.md §8).
+    // The argument list is the model's (geometry + window + session); grouping
+    // it into a struct would just move the same fields somewhere else.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn add_pane_in(
         &self,
+        session: SessionId,
         name: Option<String>,
         cols: u16,
         rows: u16,
@@ -624,6 +925,7 @@ impl SessionManager {
             None => (
                 PaneInfo {
                     id: pane_id,
+                    session_id: session,
                     name: resolved_name,
                     created_at: chrono::Utc::now(),
                     cols,
@@ -638,6 +940,13 @@ impl SessionManager {
             ),
             Some(wid) => {
                 let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+                if arc_window.info.session_id != session {
+                    return Err(Error::NotInSession {
+                        session,
+                        what: "window",
+                        id: wid.to_string(),
+                    });
+                }
                 match arc_window.info.tmux_window_handle.clone() {
                     Some(handle) => {
                         let lid = self.link_for_window_handle(&handle).await?;
@@ -645,6 +954,7 @@ impl SessionManager {
                         let snap = ts.split_pane(&handle).await?;
                         let info = PaneInfo {
                             id: pane_id,
+                            session_id: session,
                             name: resolved_name,
                             created_at: chrono::Utc::now(),
                             cols: snap.cols,
@@ -664,6 +974,7 @@ impl SessionManager {
                     None => (
                         PaneInfo {
                             id: pane_id,
+                            session_id: session,
                             name: resolved_name,
                             created_at: chrono::Utc::now(),
                             cols,
@@ -730,6 +1041,17 @@ impl SessionManager {
     pub async fn attach_pane(&self, pid: PaneId, lid: LinkId) -> Result<()> {
         let arc_link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+
+        // v0.6.0 (ADR 0010 §8): a pane may only be bound to a link of its own
+        // session. Without this, `pane attach` could move a pane into another
+        // workspace's byte stream and the two would disagree about who owns it.
+        if info.session_id != arc_link.info.session_id {
+            return Err(Error::NotInSession {
+                session: arc_link.info.session_id,
+                what: "pane",
+                id: pid.to_string(),
+            });
+        }
 
         if info.link_id == Some(lid) {
             return Ok(());
@@ -876,7 +1198,15 @@ impl SessionManager {
 
     pub async fn add_pane_to_window(&self, wid: WindowId, pid: PaneId) -> Result<()> {
         let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
-        let _ = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        let pane_info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        // v0.6.0 (ADR 0010 §8): a window and its panes share one session.
+        if arc_window.info.session_id != pane_info.session_id {
+            return Err(Error::NotInSession {
+                session: arc_window.info.session_id,
+                what: "pane",
+                id: pid.to_string(),
+            });
+        }
         {
             let panes = arc_window.panes.lock().await;
             if panes.contains(&pid) {
@@ -912,6 +1242,17 @@ impl SessionManager {
 
     pub async fn move_pane_to_window(&self, pid: PaneId, wid: WindowId) -> Result<()> {
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        let target = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+        // Guard BEFORE touching the old window: a rejected move must leave the
+        // pane where it was, not half-moved (arch.md §8 — cross-session moves
+        // are never an implicit side effect).
+        if target.info.session_id != info.session_id {
+            return Err(Error::NotInSession {
+                session: target.info.session_id,
+                what: "pane",
+                id: pid.to_string(),
+            });
+        }
         let current_wid = info.window_id;
         if let Some(old_wid) = current_wid {
             if old_wid != wid {
@@ -1243,6 +1584,11 @@ impl SessionManager {
     // ===== state persistence =====
 
     pub async fn save_state(&self) -> Result<()> {
+        // v0.6.0 (ADR 0010 D8): `sessions` first — the children below all
+        // reference one. `list_sessions` sorts by `created_at`, so the file is
+        // stable across saves rather than following HashMap iteration order.
+        let sessions = self.list_sessions().await?;
+
         let arc_links = self.links.list().await;
         let links: Vec<crate::model::LinkInfo> = arc_links.iter().map(|l| l.info.clone()).collect();
 
@@ -1260,6 +1606,7 @@ impl SessionManager {
 
         let snapshot = super::state::StateSnapshot {
             schema_version: super::state::SCHEMA_VERSION,
+            sessions,
             links,
             windows,
             panes,
@@ -1278,12 +1625,32 @@ impl SessionManager {
 
     async fn hydrate(snapshot: super::state::StateSnapshot) -> Result<Self> {
         let mgr = Self::new();
+        // v0.6.0 (ADR 0010 D8): sessions BEFORE their children — a link's
+        // `session_id` must resolve, and there is deliberately no fallback that
+        // invents a session on load.
+        for info in snapshot.sessions {
+            mgr.sessions.insert(Session::new(info)).await;
+        }
         for info in snapshot.links {
+            if mgr.sessions.get(info.session_id).await.is_none() {
+                tracing::warn!(
+                    "hydration: skipping link {} — no session {} in state",
+                    info.id, info.session_id
+                );
+                continue;
+            }
             if let Err(e) = mgr.hydrate_link(info).await {
                 tracing::warn!("hydration: skipping link: {e}");
             }
         }
         for ws in snapshot.windows {
+            if mgr.sessions.get(ws.info.session_id).await.is_none() {
+                tracing::warn!(
+                    "hydration: skipping window {} — no session {} in state",
+                    ws.info.id, ws.info.session_id
+                );
+                continue;
+            }
             let w = Window::new(ws.info);
             for pid in ws.panes {
                 w.panes.lock().await.push(pid);
@@ -1291,6 +1658,13 @@ impl SessionManager {
             mgr.windows.insert(w).await;
         }
         for pinfo in snapshot.panes {
+            if mgr.sessions.get(pinfo.session_id).await.is_none() {
+                tracing::warn!(
+                    "hydration: skipping pane {} — no session {} in state",
+                    pinfo.id, pinfo.session_id
+                );
+                continue;
+            }
             mgr.panes.insert(pinfo).await;
         }
         // P0-c: with stable `%N` handles we can rebuild tmux bridges on

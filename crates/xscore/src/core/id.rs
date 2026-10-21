@@ -24,6 +24,7 @@ macro_rules! uuid_newtype {
     };
 }
 
+uuid_newtype!(SessionId);
 uuid_newtype!(LinkId);
 uuid_newtype!(WindowId);
 uuid_newtype!(PaneId);
@@ -53,6 +54,14 @@ mod tests {
         let id = WindowId::new();
         let s = id.to_string();
         let parsed = WindowId::parse(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn session_id_roundtrip_via_string() {
+        let id = SessionId::new();
+        let s = id.to_string();
+        let parsed = SessionId::parse(&s).unwrap();
         assert_eq!(id, parsed);
     }
 

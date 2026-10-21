@@ -43,6 +43,10 @@ pub struct WindowAddArgs {
     /// --layout/--cols/--rows.
     #[arg(long, value_name = "LINK_ID")]
     pub link: Option<String>,
+    /// Put the window in this session. Omitted: the manager resolves the
+    /// default (the only session, else `default`, created on demand).
+    #[arg(long, value_name = "NAME")]
+    pub session: Option<String>,
 }
 
 #[derive(Args)]
@@ -102,7 +106,10 @@ async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()
         Some(s) => Some(LinkId::parse(s)?),
         None => None,
     };
-    let wid = mgr.add_window(args.name, layout, args.cols, args.rows, link).await?;
+    let sid = mgr.resolve_session(args.session.as_deref()).await?;
+    let wid = mgr
+        .add_window_in(sid, args.name, layout, args.cols, args.rows, link)
+        .await?;
     println!("window: {wid}");
     Ok(())
 }

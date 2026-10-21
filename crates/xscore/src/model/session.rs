@@ -18,7 +18,7 @@
 // restriction; multiple panes can be attached simultaneously (Q1 corollary).
 
 use serde::{Deserialize, Serialize};
-use crate::core::{LinkAddress, LinkId, WindowId};
+use crate::core::{LinkAddress, LinkId, PaneId, SessionId, WindowId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "transport", rename_all = "snake_case")]
@@ -84,6 +84,10 @@ fn default_name() -> String { uuid::Uuid::now_v7().to_string() }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LinkInfo {
     pub id: LinkId,
+    /// v0.6.0 (ADR 0010 §1): the workspace this entity belongs to. A link is
+    /// one connection *inside* a session — the session, not the link, says
+    /// whether tmux is involved.
+    pub session_id: SessionId,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub address: LinkAddress,
@@ -107,6 +111,9 @@ impl LinkInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WindowInfo {
     pub id: WindowId,
+    /// v0.6.0 (ADR 0010 §1): the workspace this entity belongs to — see
+    /// `LinkInfo::session_id`.
+    pub session_id: SessionId,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Layout shape the window presents to the user (ADR 0007 v2 — Q2-adjacent).
@@ -167,7 +174,11 @@ impl Default for WindowLayout {
 /// orphan-creatable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PaneInfo {
-    pub id: crate::core::PaneId,
+    pub id: PaneId,
+    /// v0.6.0 (ADR 0010 §1): the workspace this entity belongs to — see
+    /// `LinkInfo::session_id`. A pane's session is fixed at creation; the
+    /// manager refuses to bind it to a link from another session.
+    pub session_id: SessionId,
     pub name: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     // Geometry (Q2 — pane's UI info is cols/rows/x/y).
@@ -189,4 +200,177 @@ pub struct PaneInfo {
     /// it dies with the tmux session.
     #[serde(default)]
     pub sink_handle: Option<String>,
+}
+
+// ===== v0.6.0 — the Session tier (ADR 0010 §1) =====
+
+/// The workspace: the entity that owns windows, panes and links.
+///
+/// v0.6.0 (ADR 0010): "does this go through tmux?" moved here from the link.
+/// A session holds N windows, N panes and its links; the children carry
+/// `session_id`, so there is no child list to keep in sync.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionInfo {
+    pub id: SessionId,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub backend: SessionBackend,
+}
+
+/// Who keeps this workspace alive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionBackend {
+    /// Links are byte pipes; the daemon owns them. Dies when xscore forgets
+    /// the session.
+    Native,
+    /// This session IS a tmux session: `session` is the user-visible tmux
+    /// session name on `host`, reached through the server at `socket`.
+    Tmux {
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        session: String,
+    },
+}
+
+/// Where the tmux server runs (ADR 0010 §6).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TmuxHostConfig {
+    Local,
+    Ssh { destination: String, args: Vec<String> },
+}
+
+/// Which tmux server on that host (ADR 0010 §6).
+///
+/// A named socket resolves *on the host*, so a name is not a location — that
+/// is why this is not `Option<PathBuf>`. On disk: `{"kind":"default"}`,
+/// `{"kind":"named","name":"x"}`, `{"kind":"path","path":"/tmp/s"}`.
+///
+/// Serialized by hand (v0.6.0): `Named(String)` is a newtype variant wrapping a
+/// scalar, and serde's internally-tagged representation cannot inline a bare
+/// string — deriving here compiles and then fails on the first `to_string`
+/// ("cannot serialize tagged newtype variant ... containing a string"). The
+/// wire enum below gives the payload a field of its own instead of changing the
+/// API shape to `Named { name: String }`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TmuxSocket {
+    Default,
+    Named(String),
+    Path(String),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TmuxSocketWire<'a> {
+    Default,
+    Named { name: &'a str },
+    Path { path: &'a str },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TmuxSocketRepr {
+    Default,
+    Named { name: String },
+    Path { path: String },
+}
+
+impl Serialize for TmuxSocket {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let wire = match self {
+            TmuxSocket::Default => TmuxSocketWire::Default,
+            TmuxSocket::Named(name) => TmuxSocketWire::Named { name },
+            TmuxSocket::Path(path) => TmuxSocketWire::Path { path },
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TmuxSocket {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(match TmuxSocketRepr::deserialize(deserializer)? {
+            TmuxSocketRepr::Default => TmuxSocket::Default,
+            TmuxSocketRepr::Named { name } => TmuxSocket::Named(name),
+            TmuxSocketRepr::Path { path } => TmuxSocket::Path(path),
+        })
+    }
+}
+
+impl SessionInfo {
+    pub fn new_native(name: impl Into<String>) -> Self {
+        Self {
+            id: SessionId::new(),
+            name: name.into(),
+            created_at: chrono::Utc::now(),
+            backend: SessionBackend::Native,
+        }
+    }
+
+    pub fn new_tmux(
+        name: impl Into<String>,
+        host: TmuxHostConfig,
+        socket: TmuxSocket,
+        session: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: SessionId::new(),
+            name: name.into(),
+            created_at: chrono::Utc::now(),
+            backend: SessionBackend::Tmux { host, socket, session: session.into() },
+        }
+    }
+
+    pub fn is_tmux(&self) -> bool {
+        matches!(self.backend, SessionBackend::Tmux { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_backend_is_tagged_object() {
+        // Internally-tagged unit variants must become `{"kind":"native"}` —
+        // a bare `"native"` would fail to deserialize back.
+        let s = serde_json::to_string(&SessionBackend::Native).unwrap();
+        assert_eq!(s, r#"{"kind":"native"}"#);
+        let back: SessionBackend = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, SessionBackend::Native);
+    }
+
+    #[test]
+    fn tmux_socket_named_roundtrips() {
+        let socket = TmuxSocket::Named("x".into());
+        let s = serde_json::to_string(&socket).unwrap();
+        assert!(s.contains("\"named\""), "tag missing: {s}");
+        assert!(s.contains("\"x\""), "payload missing: {s}");
+        let back: TmuxSocket = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, socket);
+    }
+
+    #[test]
+    fn tmux_socket_default_and_path_roundtrip() {
+        for socket in [TmuxSocket::Default, TmuxSocket::Path("/tmp/s".into())] {
+            let s = serde_json::to_string(&socket).unwrap();
+            let back: TmuxSocket = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, socket);
+        }
+    }
+
+    #[test]
+    fn session_info_roundtrips_with_its_children() {
+        let info = SessionInfo::new_tmux(
+            "work",
+            TmuxHostConfig::Ssh { destination: "devbox".into(), args: vec![] },
+            TmuxSocket::Default,
+            "tmux-work",
+        );
+        assert!(info.is_tmux());
+        let s = serde_json::to_string(&info).unwrap();
+        let back: SessionInfo = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, info);
+        assert!(!SessionInfo::new_native("plain").is_tmux());
+    }
 }
