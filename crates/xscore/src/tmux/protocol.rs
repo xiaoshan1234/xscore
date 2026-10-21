@@ -1,4 +1,4 @@
-// tmux/protocol.rs — the `tmux -CC` wire format, parsed without any IO.
+// tmux/protocol.rs — the `tmux -C` control-mode wire format, parsed without any IO.
 //
 // Everything here is pure: `ProtocolParser::feed` takes bytes and returns
 // `Parsed` values, so each rule in ADR 0010 §D2 and arch.md §7 can be tested

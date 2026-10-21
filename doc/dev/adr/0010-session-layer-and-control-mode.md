@@ -60,8 +60,8 @@ the workspace, which is where it always belonged.
 ### D2 — tmux is reached through control mode, with one link per session
 
 ```
-tmux -L <sock> -CC attach -t <session>          # local
-ssh <args> <dest> tmux -L <sock> -CC attach -t <session>   # remote
+tmux -L <sock> -C attach -t <session>           # local
+ssh <args> <dest> tmux -L <sock> -C attach -t <session>    # remote
 ```
 
 That process is the session's **single link**: the connection to the *server*,
@@ -86,9 +86,11 @@ Measured on tmux 3.5a with a private socket, not assumed:
 | writes are literal | `send-keys -l` delivered `;` `"` `$` and backticks unchanged |
 | nothing is replayed | output before attach is absent from the stream |
 
-`-CC` rather than `-C`: they differ only in disabling terminal echo, which a
-pipe-based client does not have. `-CC` is the form iTerm2 uses, so it is the one
-people recognise.
+`-C`, not `-CC`. Measured on 3.5a: `-CC` disables echo by calling
+`tcgetattr` on the client's terminal, so a pipe client dies at once —
+`tcgetattr failed: Inappropriate ioctl for device`. The same pipeline with `-C`
+returns `%begin … @0 … %end`. `-CC` is for clients that own a real terminal
+(iTerm2 allocates a pty); a pipe client wants `-C`.
 
 ### D3 — Exclusivity is per link kind
 

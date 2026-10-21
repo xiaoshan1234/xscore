@@ -2,7 +2,7 @@
 //
 // One process per managed session, and it is the session's single link:
 //
-//   [prefix...] tmux [-L <name> | -S <path>] -CC attach -t <session>
+//   [prefix...] tmux [-L <name> | -S <path>] -C attach -t <session>
 //
 // `prefix` is empty locally and `["ssh", "-o", "BatchMode=yes", ..., <dest>]`
 // remotely, so remote is one extra segment in the same argv, not a second
@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
@@ -51,10 +51,12 @@ pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String
     let mut argv = prefix.to_vec();
     argv.push("tmux".to_string());
     argv.extend(socket_args(socket));
-    // `-CC` rather than `-C`: they differ only in disabling terminal echo,
-    // which a pipe-based client does not have, and `-CC` is the form people
-    // recognise from iTerm2 (ADR 0010 §D2).
-    argv.extend(["-CC".to_string(), "attach".to_string(), "-t".to_string(), session.to_string()]);
+    // `-C`, not `-CC`: `-CC` disables echo by calling `tcgetattr` on the
+    // client's terminal, so with pipes it dies immediately with
+    // "tcgetattr failed: Inappropriate ioctl for device" (measured on 3.5a).
+    // That form is for clients that own a real terminal, like iTerm2; a pipe
+    // client gets the identical protocol from `-C` (ADR 0010 §D2).
+    argv.extend(["-C".to_string(), "attach".to_string(), "-t".to_string(), session.to_string()]);
     argv
 }
 
@@ -71,8 +73,13 @@ pub fn socket_args(socket: &TmuxSocket) -> Vec<String> {
 
 /// Shared between this handle and the reader thread.
 struct Shared {
-    /// Command `num` → the waiter for its `%begin…%end` block.
-    pending: Mutex<HashMap<u64, PendingReply>>,
+    /// Waiters in **send order**. tmux assigns `num` itself (a counter that
+    /// starts in the hundreds and has nothing to do with our counting), so the
+    /// only correspondence available to us is order: it answers commands one at
+    /// a time, and the reply to our nth command is the nth block that *starts
+    /// after the attach handshake*. Measured on 3.5a: the attach reply came as
+    /// `%begin … 271 0`, our first command as `%begin … 276 1`.
+    waiters: Mutex<std::collections::VecDeque<PendingReply>>,
     events: Mutex<Vec<UnboundedSender<TmuxEvent>>>,
     /// Pane handle (`"%3"`) → subscribers. Normally one per pane (ADR 0010
     /// §D3); a `Vec` keeps a re-subscribe from silently stealing the channel.
@@ -83,7 +90,7 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
-            pending: Mutex::new(HashMap::new()),
+            waiters: Mutex::new(std::collections::VecDeque::new()),
             events: Mutex::new(Vec::new()),
             panes: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
@@ -113,24 +120,24 @@ impl Shared {
         }
     }
 
-    /// Resolve one command's wait, by `<num>` — never by order (ADR 0010 §D2).
-    fn finish(&self, num: u64, reply: Result<Vec<String>>) {
-        if let Some(tx) = lock(&self.pending).remove(&num) {
-            let _ = tx.send(reply);
-        }
+    /// Hand the next waiter to the reader, which owns the `num` → waiter map
+    /// for the blocks that are open. `None` means the block answers something
+    /// we did not send (the attach handshake), and is ignored.
+    fn take_waiter(&self) -> Option<PendingReply> {
+        lock(&self.waiters).pop_front()
     }
 
     /// The client is gone: fail every waiter and end every subscription, so no
     /// caller is left awaiting a reply that can never arrive.
     fn shutdown(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        lock(&self.pending).clear();
+        lock(&self.waiters).clear();
         lock(&self.events).clear();
         lock(&self.panes).clear();
     }
 }
 
-/// A live `tmux -CC` client for one session.
+/// A live `tmux -C` control client for one session.
 pub struct TmuxControl {
     /// Kept for `kill`/`wait`. Locked only for a syscall, never across an await.
     child: Mutex<Child>,
@@ -139,8 +146,6 @@ pub struct TmuxControl {
     writer: Mutex<Option<UnboundedSender<String>>>,
     reader: Mutex<Option<JoinHandle<()>>>,
     shared: Arc<Shared>,
-    /// Command numbers start at 1 and only need to be unique per client.
-    next_num: AtomicU64,
 }
 
 impl TmuxControl {
@@ -210,7 +215,6 @@ impl TmuxControl {
             writer: Mutex::new(Some(write_tx)),
             reader: Mutex::new(Some(reader)),
             shared,
-            next_num: AtomicU64::new(1),
         })
     }
 
@@ -219,18 +223,19 @@ impl TmuxControl {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(Error::Sink(CLOSED.into()));
         }
-        let num = self.next_num.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        // Register *before* writing: the reply can be read before `send` gets
-        // back anything, and there is no ordering between the two.
-        lock(&self.shared.pending).insert(num, tx);
+        // Queue *before* writing: the reply can be read before `send` gets back
+        // anything, and there is no ordering between the two.
+        lock(&self.shared.waiters).push_back(tx);
 
         let queued = match lock(&self.writer).as_ref() {
             Some(writer) => writer.send(format!("{command}\n")).is_ok(),
             None => false,
         };
         if !queued {
-            lock(&self.shared.pending).remove(&num);
+            // The writer is gone; drop our waiter so it cannot be matched by a
+            // block that will never come.
+            lock(&self.shared.waiters).pop_back();
             return Err(Error::Sink(CLOSED.into()));
         }
 
@@ -297,7 +302,7 @@ impl TmuxControl {
 }
 
 impl Drop for TmuxControl {
-    /// A control client never outlives its handle: a stray `tmux -CC` would keep
+    /// A control client never outlives its handle: a stray `tmux -C` would keep
     /// a client attached to the user's session with no reader.
     fn drop(&mut self) {
         drop(lock(&self.writer).take());
@@ -327,6 +332,13 @@ fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
     // this thread touches them, so they need no lock.
     let mut open: Option<u64> = None;
     let mut blocks: HashMap<u64, Vec<String>> = HashMap::new();
+    // Which open blocks a waiter is waiting for. A block that is not in here is
+    // the attach handshake's own reply: tmux emits it before `%session-changed`
+    // and it answers nothing we sent.
+    let mut claimed: HashMap<u64, PendingReply> = HashMap::new();
+    // Only start matching waiters once the attach reply has completed, or a
+    // command sent immediately after `spawn` would steal the handshake block.
+    let mut handshake_done = false;
     let mut reader = BufReader::new(stdout);
     let mut line: Vec<u8> = Vec::new();
 
@@ -346,13 +358,21 @@ fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
                 Parsed::Begin { num, .. } => {
                     blocks.insert(num, Vec::new());
                     open = Some(num);
+                    if handshake_done {
+                        if let Some(waiter) = shared.take_waiter() {
+                            claimed.insert(num, waiter);
+                        }
+                    }
                 }
                 Parsed::End { num } => {
                     let output = blocks.remove(&num).unwrap_or_default();
                     if open == Some(num) {
                         open = None;
                     }
-                    shared.finish(num, Ok(output));
+                    if let Some(waiter) = claimed.remove(&num) {
+                        let _ = waiter.send(Ok(output));
+                    }
+                    handshake_done = true;
                 }
                 Parsed::Error { num, message } => {
                     blocks.remove(&num);
@@ -364,7 +384,10 @@ fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
                     } else {
                         message
                     };
-                    shared.finish(num, Err(Error::Sink(message)));
+                    if let Some(waiter) = claimed.remove(&num) {
+                        let _ = waiter.send(Err(Error::Sink(message)));
+                    }
+                    handshake_done = true;
                 }
                 Parsed::Output { pane, bytes } => shared.deliver_output(&pane, bytes),
                 Parsed::Event(event) => {
@@ -382,9 +405,13 @@ fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
                     if text.starts_with('%') {
                         continue;
                     }
+                    // Only collect output for a block someone is waiting on:
+                    // the handshake block's text is not a command's reply.
                     if let Some(num) = open {
-                        if let Some(output) = blocks.get_mut(&num) {
-                            output.push(text);
+                        if claimed.contains_key(&num) {
+                            if let Some(output) = blocks.get_mut(&num) {
+                                output.push(text);
+                            }
                         }
                     }
                 }
@@ -421,7 +448,7 @@ mod tests {
     #[test]
     fn argv_is_the_measured_shape() {
         let local = argv(&[], &TmuxSocket::Default, "work");
-        assert_eq!(local, ["tmux", "-CC", "attach", "-t", "work"]);
+        assert_eq!(local, ["tmux", "-C", "attach", "-t", "work"]);
 
         // Remote adds one segment in front; nothing else changes (arch.md §6).
         let prefix: Vec<String> =
@@ -430,23 +457,25 @@ mod tests {
         assert_eq!(
             remote,
             [
-                "ssh", "-o", "BatchMode=yes", "devbox", "tmux", "-L", "xscore", "-CC", "attach",
+                "ssh", "-o", "BatchMode=yes", "devbox", "tmux", "-L", "xscore", "-C", "attach",
                 "-t", "work"
             ]
         );
     }
 
-    /// A fake `tmux` that answers the first command with one framed block, with
-    /// a pane write interleaved inside it, then idles until stdin closes.
+    /// A fake `tmux` that behaves like the real thing in the two ways that
+    /// matter: it answers `attach` first (its own `num`, `flags 0`), and then
+    /// numbers our commands with **its own** counter (275) rather than ours.
+    /// A fake that echoed back `1` hid a real bug: `send` used to wait for its
+    /// own num and hung against a live server.
     const FAKE_TMUX: &str = r#"#!/bin/sh
-# Fake `tmux -CC` for the protocol tests. `read` first so the reply cannot
-# arrive before the client has registered its waiter (real tmux answers a
-# command, it does not greet).
+printf '%%begin 1700000000 270 0\r\n'
+printf '%%end 1700000000 270 0\r\n'
 read -r _line
-printf '%%begin 1700000000 1 0\r\n'
+printf '%%begin 1700000000 275 1\r\n'
 printf 'window 0\r\n'
 printf '%%output %%0 tick\\012\r\n'
-printf '%%end 1700000000 1 0\r\n'
+printf '%%end 1700000000 275 1\r\n'
 while read -r _more; do :; done
 "#;
 

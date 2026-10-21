@@ -401,7 +401,7 @@ that a session is fed by **one long-lived control client**, remote is one extra
 segment in that client's command, not a second mechanism:
 
 ```
-ssh -o BatchMode=yes <args...> <destination> tmux -L <sock> -CC attach -t work
+ssh -o BatchMode=yes <args...> <destination> tmux -L <sock> -C attach -t work
 ```
 
 stdin and stdout of that `ssh` process are the control channel. Control
@@ -409,11 +409,17 @@ commands go in as lines; `%output`, `%begin/%end` and every notification come
 back on the same channel. One connection per managed session, in both
 directions.
 
-`-CC`, the same invocation iTerm2 uses. It differs from `-C` only in disabling
-terminal echo, which a pipe-based client does not have, so the two are
-equivalent here — we take `-CC` because it is the form people already recognise
-as "integrate with tmux". (Verified on 3.5a that a control client works with
-stdin/stdout as pipes.)
+`-C`, not `-CC`. `-CC` additionally disables echo by calling `tcgetattr` on the
+client's terminal, which fails outright when stdin/stdout are pipes:
+
+```
+$ printf 'list-windows\n' | tmux -L probe -CC attach -t work
+tcgetattr failed: Inappropriate ioctl for device
+```
+
+`-CC` is for clients that own a real terminal (iTerm2 allocates a pty). A pipe
+client gets the identical protocol from `-C` — verified on 3.5a, where the same
+pipeline returns `%begin … @0 … %end`.
 
 ### Why this is not the `ThroughTransport` mistake
 
@@ -440,8 +446,8 @@ from chatter — the same failure that killed `ThroughTransport`.
 So the control link's transport is always a freshly spawned process:
 
 ```
-local : tmux     -L <sock> -CC attach -t <session>
-remote: ssh <args> <dest> tmux -L <sock> -CC attach -t <session>
+local : tmux     -L <sock> -C attach -t <session>
+remote: ssh <args> <dest> tmux -L <sock> -C attach -t <session>
 ```
 
 If the goal is to avoid a second TCP connection, the place to do it is OpenSSH's
@@ -869,7 +875,7 @@ silently converted (same policy as v0.4.0). The one-time migration:
 | D9 | Does xscore pass `ControlMaster=auto` by default, or only when the user asks? | **Pass it**, overridable via `--ssh-arg`. Without it a burst of commands pays a full handshake each time; with it xscore writes no pooling code. |
 | D10 | Should `ssh://` links move to the system `ssh` too, leaving one SSH mechanism? | **Not in this change.** `russh` gives a byte stream and in-process control; a link is not an exec client. Revisit only if storing password auth becomes a liability. |
 | D11 | Is control mode the only tmux integration, or do one-shot execs stay? | **Both, split by job** (§6): a control client for a managed session, one exec for enumeration. |
-| D12 | `-C` or `-CC`? | **Decided: `-CC`** — the iTerm2 form. It only adds "disable echo", which a pipe client does not have, so it is equivalent to `-C` and better recognised. |
+| D12 | `-C` or `-CC`? | **Decided: `-C`.** `-CC` calls `tcgetattr` to disable echo and dies with a pipe (`tcgetattr failed: Inappropriate ioctl for device`, measured on 3.5a); it is for clients that own a terminal. `-C` gives the same protocol to a pipe client. |
 | D13 | Is "-CC compatibility" consuming tmux's control protocol, or exposing one of our own? | **Decided: consuming.** xscore is the control client. An `xscore control` surface for GUI frontends is additive and can land later without changing this model. |
 
 ## 13. What this does not solve
