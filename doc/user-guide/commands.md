@@ -203,7 +203,7 @@ tmux control clients, plus both kinds of pane buffer.
 
 | Command | Usage | Notes |
 |---|---|---|
-| `daemon serve` | `xscore daemon serve` | Foreground daemon. Auto-start uses this; you rarely run it by hand. |
+| `daemon serve` | `xscore daemon serve` | Foreground daemon: stays up until `daemon stop`, Ctrl-C or SIGTERM, and cleans up its socket on the way out. The copy that auto-start spawns adds `--idle-exit`, so it also leaves after 5 s with nothing to supervise; a bare `serve` deliberately does not. |
 | `daemon status` | `xscore daemon status` | JSON on stdout (`pid`, `links`, `panes`, `tmux[]` with name / alive / panes / buffered), plus a human line per tmux session on stderr. Exits non-zero when no daemon is running. |
 | `daemon stop` | `xscore daemon stop` | Closes transports and control clients and removes the socket. Buffers are memory, so they go; `state.json` and the tmux server survive. |
 

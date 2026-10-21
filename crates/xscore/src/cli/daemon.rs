@@ -17,9 +17,15 @@ pub enum DaemonCmd {
     ///
     /// Holds every live transport, every tmux session's control client and
     /// every pane's byte buffer, so they survive the CLI process that
-    /// created them. Exits after `daemon stop`, or after 5 s idle with no
-    /// links and no tmux control clients.
-    Serve,
+    /// created them. Stays up until `xscore daemon stop`, Ctrl-C or SIGTERM;
+    /// the auto-started copy additionally leaves once it has nothing left to
+    /// supervise, which is what `--idle-exit` selects.
+    Serve {
+        /// Exit after 5 s with no links and no tmux clients (the mode
+        /// auto-start uses; a bare `serve` is expected to stay up).
+        #[arg(long)]
+        idle_exit: bool,
+    },
 
     /// Print the daemon's status as JSON (pid, links, panes + buffered
     /// byte counts, and one entry per tmux session). Exits non-zero if no
@@ -34,8 +40,8 @@ pub enum DaemonCmd {
 
 pub async fn run(cmd: DaemonCmd) -> anyhow::Result<()> {
     match cmd {
-        DaemonCmd::Serve => {
-            crate::daemon::server::run().await?;
+        DaemonCmd::Serve { idle_exit } => {
+            crate::daemon::server::run(idle_exit).await?;
         }
         DaemonCmd::Status => {
             let resp = client::send(&Request::Status).await?;

@@ -118,6 +118,11 @@ daemon. That is why `data write` in one terminal and `data read` in the next
 work, and why `daemon stop` loses buffered bytes while leaving `state.json` and
 the tmux server untouched.
 
+The daemon starts on demand, and the copy that auto-start spawns in the
+background leaves after 5 s with nothing to hold. A `xscore daemon serve` you
+run yourself is the opposite: it stays up until `daemon stop`, Ctrl-C or
+SIGTERM.
+
 ## tmux through control mode
 
 `session new --tmux` runs `tmux -L <sock> new-session -d`, then attaches one

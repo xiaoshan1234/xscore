@@ -65,6 +65,17 @@ const READ_WAIT: Duration = Duration::from_millis(200);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_TICK: Duration = Duration::from_millis(100);
 
+/// The idle window, overridable so a test does not have to wait 5 s to prove
+/// that a foreground `daemon serve` ignores it. Not a user-facing setting: it
+/// only ever shortens the window for the auto-started copy.
+fn idle_timeout() -> Duration {
+    std::env::var("XSCORE_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(IDLE_TIMEOUT)
+}
+
 struct PaneSlot {
     /// Currently attached link, if any. Cleared by Detach/DeleteLink —
     /// the buffer survives either way (that is the point of a pane).
@@ -191,6 +202,7 @@ impl DaemonState {
             !self.links.lock().await.is_empty(),
             !self.tmux.lock().await.is_empty(),
             idle,
+            idle_timeout(),
         )
     }
 
@@ -821,10 +833,11 @@ fn spawn_exit_watcher(control: Arc<TmuxControl>, alive: Arc<AtomicBool>) -> Join
 }
 
 /// Exit only when nothing is left to serve: no native links, no tmux control
-/// slots, and `IDLE_TIMEOUT` of quiet. Split out so the gate itself is
-/// testable without spawning a client.
-fn idle_ready(has_links: bool, has_tmux: bool, idle: Duration) -> bool {
-    !has_links && !has_tmux && idle >= IDLE_TIMEOUT
+/// slots, and `timeout` of quiet. Split out so the gate itself is testable
+/// without spawning a client. Note that *whether* the gate applies at all is
+/// the caller's decision: only the auto-started daemon passes `--idle-exit`.
+fn idle_ready(has_links: bool, has_tmux: bool, idle: Duration, timeout: Duration) -> bool {
+    !has_links && !has_tmux && idle >= timeout
 }
 
 /// Bind the socket and serve until told to stop.
@@ -837,13 +850,13 @@ fn idle_ready(has_links: bool, has_tmux: bool, idle: Duration) -> bool {
 /// and both processes holding links forever. The lock makes "who binds"
 /// a single winner, and a crashed daemon's lock is detected and taken
 /// over (its socket no longer answers).
-pub async fn run() -> Result<()> {
+pub async fn run(idle_exit: bool) -> Result<()> {
     // Ignore SIGHUP: the daemon may have been started by a `link add`
     // that ran in a terminal which is since closed. Dropping every live
     // direct link because a terminal went away is never what the user
     // wants — links are only torn down explicitly (`link del`) or when
-    // the daemon is idle. SIGTERM/SIGINT are left alone so `daemon stop`
-    // and a deliberate Ctrl-C on `daemon serve` still work.
+    // the daemon is idle. SIGINT/SIGTERM are handled further down, through
+    // the same shutdown path as `daemon stop`.
     {
         use tokio::signal::unix::{signal, SignalKind};
         if let Ok(mut hup) = signal(SignalKind::hangup()) {
@@ -905,6 +918,25 @@ pub async fn run() -> Result<()> {
     let state = Arc::new(DaemonState::new());
     let shutdown = Arc::new(Notify::new());
 
+    // Ctrl-C and SIGTERM on a foreground `serve` wind down through the same
+    // path as `daemon stop`, so the socket and lock are removed instead of
+    // left behind for the next start to detect and unlink.
+    {
+        let sd = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+            }
+            sd.notify_one();
+        });
+    }
+
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -918,7 +950,11 @@ pub async fn run() -> Result<()> {
                 }
             }
             _ = shutdown.notified() => break,
-            _ = tokio::time::sleep(IDLE_TICK) => {
+            // Only the auto-started daemon leaves on its own. A foreground
+            // `xscore daemon serve` is an explicit "stay up": it waits for
+            // `daemon stop`, Ctrl-C or SIGTERM rather than exiting after 5 s
+            // with nothing to supervise, which looks exactly like a crash.
+            _ = tokio::time::sleep(IDLE_TICK), if idle_exit => {
                 if state.should_exit_idle().await {
                     tracing::info!("daemon exiting: idle with no links and no tmux clients");
                     break;
@@ -1307,10 +1343,10 @@ mod tests {
     async fn a_tmux_slot_blocks_idle_exit() {
         // The gate is "no links AND no control slots": a managed session must
         // keep the daemon (and therefore its buffers) alive.
-        assert!(idle_ready(false, false, IDLE_TIMEOUT));
-        assert!(!idle_ready(true, false, IDLE_TIMEOUT), "a link must hold the daemon");
-        assert!(!idle_ready(false, true, IDLE_TIMEOUT), "a control slot must hold the daemon");
-        assert!(!idle_ready(false, false, IDLE_TIMEOUT / 2), "not idle long enough yet");
+        assert!(idle_ready(false, false, IDLE_TIMEOUT, IDLE_TIMEOUT));
+        assert!(!idle_ready(true, false, IDLE_TIMEOUT, IDLE_TIMEOUT), "a link must hold the daemon");
+        assert!(!idle_ready(false, true, IDLE_TIMEOUT, IDLE_TIMEOUT), "a control slot must hold the daemon");
+        assert!(!idle_ready(false, false, IDLE_TIMEOUT / 2, IDLE_TIMEOUT), "not idle long enough yet");
     }
 
     #[tokio::test]

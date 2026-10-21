@@ -121,7 +121,7 @@ fn spawn_serve() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
     let spawn = |cmd: &mut std::process::Command| {
-        cmd.args(["daemon", "serve"])
+        cmd.args(["daemon", "serve", "--idle-exit"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

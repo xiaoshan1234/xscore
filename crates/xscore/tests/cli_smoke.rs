@@ -979,6 +979,57 @@ fn xscore_daemon_status_lists_link() {
     cleanup_daemon(name);
 }
 
+/// `daemon serve` typed by a human is an explicit "stay up". It used to exit
+/// after five quiet seconds — the idle gate that belongs to the auto-started
+/// copy — so the prompt came back and the next command said "no daemon",
+/// which reads exactly like a crash. Shortening the window to 300 ms makes
+/// the old behaviour reproduce in about a second.
+#[test]
+fn xscore_daemon_serve_stays_up_until_stopped() {
+    let name = "daemon_serve_stays";
+    let xscore = || xscore_for(name);
+    cleanup_daemon(name);
+
+    let mut child = xscore()
+        .env("XSCORE_IDLE_TIMEOUT_MS", "300")
+        .args(["daemon", "serve"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn `daemon serve`");
+
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    if let Some(status) = child.try_wait().expect("try_wait") {
+        panic!("`daemon serve` exited on its own ({status}); a foreground serve must stay up");
+    }
+
+    let status = xscore().args(["daemon", "status"]).output().unwrap();
+    assert!(
+        ok(&status),
+        "status must reach a foreground serve: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+
+    let stop = xscore().args(["daemon", "stop"]).output().unwrap();
+    assert!(ok(&stop), "daemon stop failed: {}", String::from_utf8_lossy(&stop.stderr));
+    let exit = child.wait().expect("wait");
+    assert!(exit.success(), "a stopped daemon exits cleanly, got {exit}");
+
+    // The auto-started copy keeps the idle gate.
+    let start = std::time::Instant::now();
+    let quick = xscore()
+        .env("XSCORE_IDLE_TIMEOUT_MS", "300")
+        .args(["daemon", "serve", "--idle-exit"])
+        .output()
+        .unwrap();
+    assert!(ok(&quick), "idle-exit daemon failed: {}", String::from_utf8_lossy(&quick.stderr));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "--idle-exit must still leave on its own (took {:?})",
+        start.elapsed()
+    );
+}
+
 /// Test 3 — `link show`'s `connected` is a live daemon probe.
 #[test]
 fn xscore_daemon_link_show_connected_true() {

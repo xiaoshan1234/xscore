@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `xscore daemon serve` no longer exits five seconds after being started. The
+  idle gate ("no links, no control slots") belongs to the copy that auto-start
+  spawns in the background; applying it to a foreground `serve` made it look
+  like the command had crashed, and the next command reported `no daemon at
+  …/daemon.sock`. Auto-start now passes `--idle-exit` explicitly, and a
+  foreground `serve` runs until `daemon stop`, Ctrl-C or SIGTERM — which now
+  removes the socket and lock instead of leaving them for the next start.
+
 ## [0.6.0] - 2026-10-21
 
 **The session tier and tmux through control mode.** `Session` becomes the
