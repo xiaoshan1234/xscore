@@ -1,10 +1,10 @@
-# Architecture — target design
+# Architecture — as built (v0.6.0)
 
-**Status: design only.** This describes the architecture for **v0.6.0**. The
-code at `HEAD` is v0.5.1 and does not match it yet — see
-[§11 Delta](#11-delta-from-v051) for the gap and the migration.
+**Status: as-built for v0.6.0.** This describes the architecture the code
+implements; the design rationale is [ADR 0010](../adr/0010-session-layer-and-control-mode.md),
+and [§11 Delta](#11-delta-from-v051) records what changed from v0.5.1.
 
-For the as-built description of v0.5.1:
+For the v0.5.1 design (Link × Window × Pane, `?tmux=on`):
 
 ```bash
 git show v0.5.1:doc/dev/arch/arch.md

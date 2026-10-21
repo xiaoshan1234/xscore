@@ -25,7 +25,7 @@ pub mod window;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "xscore", version, about = "Manage SSH / shell / serial sessions as Link × Window × Pane (ADR 0006)")]
+#[command(name = "xscore", version, about = "Manage shell / ssh / serial / tmux sessions as Session → Window → Pane → Link (ADR 0010)")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -36,19 +36,19 @@ pub enum Commands {
     /// Inspect / create / kill sessions (the workspace that owns windows, panes and links)
     #[command(subcommand)]
     Session(session::SessionCmd),
-    /// Inspect / create / close / open / remove links (physical connections)
+    /// Inspect / create / remove links (one connection each: a pipe, or a session's control client)
     #[command(subcommand)]
     Link(link::LinkCmd),
-    /// Inspect / create / close / open / remove windows (tmux sessions inside links, per ADR 0006)
+    /// Inspect / create / remove windows (layout containers inside a session; a tmux window is mirrored)
     #[command(subcommand)]
     Window(window::WindowCmd),
-    /// Inspect / create / close / open / remove panes (views into windows)
+    /// Inspect / create / remove panes (a buffer with a viewport; its bytes come from its link)
     #[command(subcommand)]
     Pane(pane::PaneCmd),
     /// Read / write / resize data on a pane
     #[command(subcommand)]
     Data(data::DataCmd),
-    /// Inspect / stop the resident daemon that keeps direct links alive
+    /// Inspect / stop the resident daemon that owns every live connection
     #[command(subcommand)]
     Daemon(daemon::DaemonCmd),
     /// Inspect / migrate the on-disk state schema

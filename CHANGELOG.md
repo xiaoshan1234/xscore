@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-21
+
+**The session tier and tmux through control mode.** `Session` becomes the
+workspace that owns windows, panes and links; tmux stops being a per-link
+option and becomes a backend, driven through one `tmux -C` client whose pane
+output is a byte stream rather than a screen snapshot. The daemon now owns tmux
+control clients as well as native transports, so pane data survives the CLI
+process. Breaking: `?tmux=on|auto|local|remote`, `SinkConfig`, `Sink`,
+`WindowLayout`, `link open|close|sync` and `window set-layout` are gone. Run
+`xscore state migrate` once — it converts old tmux links into control-mode
+sessions instead of dropping them.
+
 ### Added
 
 - **tmux-backed sessions over the control client.** `xscore session new <name>
