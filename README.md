@@ -160,6 +160,7 @@ Measured on tmux 3.5a, and the reasons the details matter:
 
 Full flag-by-flag reference: [`doc/user-guide/commands.md`](doc/user-guide/commands.md).
 A guided tour (build → first session → tmux → recipes): [`doc/user-guide/getting-started.md`](doc/user-guide/getting-started.md).
+On Windows, run it inside WSL — see [`doc/user-guide/wsl.md`](doc/user-guide/wsl.md) for what crosses the boundary and what does not.
 Below is the shape of the surface.
 
 ```bash

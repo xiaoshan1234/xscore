@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A `cwd` that does not exist is refused.** It used to be accepted and then
+  silently ignored — portable-pty falls back to `$HOME` when the child cannot
+  `chdir`, so `?cwd=/nope` produced a session in your home directory with no
+  error. On WSL a Windows path is translated first (`C:\Users\x` →
+  `/mnt/c/Users/x`, only when that drive is mounted), so the path a Windows user
+  copies out of Explorer works; anything else still has to exist.
+- **A tmux session whose client exited says so.** `data read` on a pane whose
+  session ended reported `sink error: control client closed`, which points at
+  the daemon rather than at the thing that is gone. It now reads
+  `tmux session `work` is gone: its control client exited …`.
+- **A Windows program as a link gets a warning.** `.exe`/`.bat`/`.cmd` targets
+  connect and then produce no output (WSL interop gives them no console behind a
+  pty), so the CLI says so instead of leaving an empty buffer.
 - **`session new` describes its first link with a URL.** The flags `--cmd`,
   `--cwd`, `--cols`, `--rows` and `--empty` are gone; the command, working
   directory and geometry are query parameters of the link URL, so the flags

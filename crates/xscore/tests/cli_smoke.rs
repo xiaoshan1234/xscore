@@ -1295,6 +1295,54 @@ fn xscore_session_new_url_carries_cwd_and_geometry() {
 }
 
 #[test]
+fn xscore_session_new_refuses_a_missing_cwd() {
+    let name = "session_new_bad_cwd";
+    let xscore = || xscore_for(name);
+
+    let out = xscore()
+        .args(["session", "new", "dev", "shell:///bin/bash?cwd=/definitely-not-here"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "a cwd that does not exist must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("is not a directory"), "got: {err}");
+
+    // Refused before anything was created.
+    let ls = xscore().args(["session", "ls"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&ls.stdout).lines().count(),
+        1,
+        "only the header should be there"
+    );
+
+    cleanup_daemon(name);
+}
+
+/// A Windows path is translated to its WSL mount, and the error names what it
+/// looked for. Only meaningful where `/mnt/c` exists.
+#[test]
+fn xscore_session_new_translates_a_windows_cwd() {
+    if !std::path::Path::new("/mnt/c").is_dir() {
+        return; // not WSL (or no C: drive) — nothing to assert
+    }
+    let name = "session_new_win_cwd";
+    let xscore = || xscore_for(name);
+
+    let out = xscore()
+        .args(["session", "new", "dev", r"shell:///bin/bash?cwd=C:\no-such-dir-xyz"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("/mnt/c/no-such-dir-xyz"),
+        "the translated path should be named: {err}"
+    );
+
+    cleanup_daemon(name);
+}
+
+#[test]
 fn xscore_session_new_from_a_link_config() {
     let name = "session_new_config";
     let xscore = || xscore_for(name);

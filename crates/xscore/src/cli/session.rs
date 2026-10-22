@@ -195,6 +195,11 @@ async fn new_tmux(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Res
         );
     }
     let target = crate::url::parse_tmux_target(args.url.as_deref().unwrap_or(""))?;
+    if let Some(dir) = target.cwd.as_deref() {
+        // tmux would report a bad `-c` itself, but only after creating the
+        // session; check first so nothing is left behind.
+        crate::util::require_dir(dir)?;
+    }
     let socket = resolve_socket(args.socket.as_deref());
     let sid = mgr
         .create_tmux_session_with(

@@ -223,7 +223,12 @@ fn query_map(query: &str) -> HashMap<String, String> {
 
 fn take_pane_params(pairs: &mut HashMap<String, String>) -> Result<PaneParams> {
     let mut pane = PaneParams {
-        cwd: pairs.remove("cwd").filter(|s| !s.is_empty()),
+        // `C:\Users` is what a WSL user copies out of Explorer; translate it
+        // before anything tries to chdir there.
+        cwd: pairs
+            .remove("cwd")
+            .filter(|s| !s.is_empty())
+            .map(|s| crate::util::to_linux_path(&s)),
         cols: None,
         rows: None,
     };
@@ -234,7 +239,10 @@ fn take_pane_params(pairs: &mut HashMap<String, String>) -> Result<PaneParams> {
 
 fn take_tmux_params(pairs: &mut HashMap<String, String>, target: &mut TmuxTarget) -> Result<()> {
     target.cmd = pairs.remove("cmd").filter(|s| !s.trim().is_empty());
-    target.cwd = pairs.remove("cwd").filter(|s| !s.is_empty());
+    target.cwd = pairs
+        .remove("cwd")
+        .filter(|s| !s.is_empty())
+        .map(|s| crate::util::to_linux_path(&s));
     target.cols = take_dim(pairs, "cols")?;
     target.rows = take_dim(pairs, "rows")?;
     if pairs.remove("socket").is_some() {

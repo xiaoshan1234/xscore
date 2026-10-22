@@ -39,9 +39,13 @@ use crate::model::TmuxSocket;
 
 use super::protocol::{Parsed, ProtocolParser, TmuxEvent};
 
-/// The one error `send` reports once the client is gone. Also what a `close`
-/// makes every in-flight and later command see.
-const CLOSED: &str = "control client closed";
+/// The error `send` reports once the client is gone. Also what a `close`
+/// makes every in-flight and later command see. It names the session, because
+/// "control client closed" sent the reader looking at the daemon instead of at
+/// the tmux session that had ended.
+fn gone(session: &str) -> Error {
+    Error::TmuxSessionGone(session.to_string())
+}
 
 type PendingReply = oneshot::Sender<Result<Vec<String>>>;
 
@@ -139,6 +143,8 @@ impl Shared {
 
 /// A live `tmux -C` control client for one session.
 pub struct TmuxControl {
+    /// The tmux session this client is attached to; names it in errors.
+    session: String,
     /// Kept for `kill`/`wait`. Locked only for a syscall, never across an await.
     child: Mutex<Child>,
     /// `None` after `close`: the writer thread then drains and drops the
@@ -211,6 +217,7 @@ impl TmuxControl {
             .map_err(|e| Error::Sink(format!("tmux control: reader thread: {e}")))?;
 
         Ok(TmuxControl {
+            session: session.to_string(),
             child: Mutex::new(child),
             writer: Mutex::new(Some(write_tx)),
             reader: Mutex::new(Some(reader)),
@@ -221,7 +228,7 @@ impl TmuxControl {
     /// Send one command and return the lines of its `%begin…%end` block.
     pub async fn send(&self, command: &str) -> Result<Vec<String>> {
         if self.shared.closed.load(Ordering::SeqCst) {
-            return Err(Error::Sink(CLOSED.into()));
+            return Err(gone(&self.session));
         }
         let (tx, rx) = oneshot::channel();
         // Queue *before* writing: the reply can be read before `send` gets back
@@ -236,14 +243,14 @@ impl TmuxControl {
             // The writer is gone; drop our waiter so it cannot be matched by a
             // block that will never come.
             lock(&self.shared.waiters).pop_back();
-            return Err(Error::Sink(CLOSED.into()));
+            return Err(gone(&self.session));
         }
 
         match rx.await {
             Ok(reply) => reply,
             // The sender was dropped without replying: the reader hit EOF or
             // `%exit`, or `close` cleared the map.
-            Err(_) => Err(Error::Sink(CLOSED.into())),
+            Err(_) => Err(gone(&self.session)),
         }
     }
 
@@ -523,10 +530,11 @@ while read -r _more; do :; done
 
         control.close().await.expect("close");
 
-        // After close, a command must fail loudly instead of hanging forever.
+        // After close, a command must fail loudly instead of hanging forever,
+        // and it must name the session rather than blaming the client.
         match control.send("display -p again").await {
-            Err(Error::Sink(message)) => assert_eq!(message, CLOSED),
-            other => panic!("expected `{CLOSED}`, got {other:?}"),
+            Err(Error::TmuxSessionGone(session)) => assert_eq!(session, "probe"),
+            other => panic!("expected TmuxSessionGone, got {other:?}"),
         }
 
         // Closing twice is not an error (the child is already reaped).

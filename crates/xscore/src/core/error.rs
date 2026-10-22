@@ -137,6 +137,12 @@ pub enum Error {
     #[error("url parse error: {0}")]
     Url(String),
 
+    /// The control client of a tmux session exited: the session ended, the
+    /// server went away, or someone killed it. The rows may still be there, so
+    /// this is what a pane operation reports instead of a socket error.
+    #[error("tmux session `{0}` is gone: its control client exited (the tmux session ended, or the server went away)")]
+    TmuxSessionGone(String),
+
     #[error("transport error: {0}")]
     Transport(String),
 

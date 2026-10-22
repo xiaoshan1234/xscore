@@ -204,22 +204,37 @@ pub(crate) fn resolve_link_input(
     crate::core::LinkAddress,
     crate::url::PaneParams,
 )> {
-    match (url, config_name) {
+    let parsed = match (url, config_name) {
         (None, None) => anyhow::bail!("provide either <url> or -c CONFIG"),
-        (Some(u), None) => Ok(crate::url::parse_with_pane(u)?),
+        (Some(u), None) => crate::url::parse_with_pane(u)?,
         (None, Some(c)) => {
             let template_path = crate::config::link_config_path(c);
             let spec = crate::config::load_connect_spec(&template_path)?;
             let address = spec.address.clone();
-            Ok((spec, address, crate::url::PaneParams::default()))
+            (spec, address, crate::url::PaneParams::default())
         }
         (Some(u), Some(c)) => {
             let template_path = crate::config::link_config_path(c);
             let base_spec = crate::config::load_connect_spec(&template_path)?;
             let (cli_spec, cli_addr, pane) = crate::url::parse_with_pane(u)?;
-            Ok((merge_specs(base_spec, cli_spec), cli_addr, pane))
+            (merge_specs(base_spec, cli_spec), cli_addr, pane)
+        }
+    };
+    // A cwd that is not a directory is silently ignored by the pty layer (the
+    // child just starts in $HOME), so check it before anything is spawned.
+    if let crate::model::TransportConfig::Shell { cwd: Some(dir), .. } = &parsed.0.transport {
+        crate::util::require_dir(dir)?;
+    }
+    if let crate::model::TransportConfig::Shell { command, .. } = &parsed.0.transport {
+        if crate::util::paths::looks_like_windows_program(command) {
+            eprintln!(
+                "warning: `{command}` is a Windows program. WSL interop gives it no \
+                 console behind a pty, so it typically produces no output; run it \
+                 from inside a WSL shell pane instead."
+            );
         }
     }
+    Ok(parsed)
 }
 
 fn merge_specs(template: crate::model::ConnectSpec, cli: crate::model::ConnectSpec) -> crate::model::ConnectSpec {
