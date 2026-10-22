@@ -20,10 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       xscore session new work --tmux 'ssh://box'  # tmux on another host
       xscore session new work --tmux '?cmd=htop'  # local tmux, first command
 
-  With `--tmux` the URL names the host rather than a pipe (`ssh://[user@]host`),
-  which replaces `--ssh`. A session always gets a link, window and pane, so
-  `--empty` no longer exists. `link add` accepts the same parameters, and an
-  unknown query key is now an error instead of being ignored.
+  With `--tmux` the URL names the host and the **scheme is the link**:
+  `shell://` (or nothing) is the local tmux server, `ssh://[user@]host[:port]`
+  is one reached over ssh, and the control link records which —
+  `link list` prints `control/shell` / `control/ssh` instead of a bare
+  `control`, and `link show` carries the matching address. A session always
+  gets a link, window and pane, so `--empty` no longer exists. `link add`
+  accepts the same parameters, and an unknown query key is now an error instead
+  of being ignored.
 
 ### Fixed
 

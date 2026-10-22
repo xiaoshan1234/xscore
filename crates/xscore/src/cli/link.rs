@@ -149,7 +149,7 @@ async fn list(mgr: Arc<SessionManager>, args: LinkListArgs) -> anyhow::Result<()
         Some(name) => Some(mgr.resolve_session(Some(name)).await?),
         None => None,
     };
-    println!("{:<36}  {:<36}  {:<8}", "LINK ID", "NAME", "KIND");
+    println!("{:<36}  {:<36}  {:<16}", "LINK ID", "NAME", "KIND");
     for link in mgr.links.list().await {
         let info = &link.info;
         if let Some(sid) = only {
@@ -157,8 +157,10 @@ async fn list(mgr: Arc<SessionManager>, args: LinkListArgs) -> anyhow::Result<()
                 continue;
             }
         }
+        // `control/shell` vs `control/ssh` matters: it is how a tmux session
+        // says whether its server is local or reached over ssh.
         let kind = if info.is_control() { "control" } else { "pipe" };
-        println!("{:<36}  {:<36}  {:<8}", info.id, info.name, kind);
+        println!("{:<36}  {:<36}  {:<16}", info.id, info.name, format!("{kind}/{}", info.address.kind()));
     }
     Ok(())
 }

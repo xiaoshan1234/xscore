@@ -821,9 +821,11 @@ Notes:
 - `--cmd` / `--cwd` / `--cols` / `--rows` are **URL query parameters**, not
   flags: the first link and the pane that shows it are described by one string
   (`shell:///bin/bash?cwd=/var/log&cols=120&rows=40`). With `--tmux` the same
-  string names the server (`ssh://[user@]host[:port]`, or a bare `?cmd=…` for
-  the local one), so `session new` keeps only `--tmux` and `--socket`. Unknown
-  keys are refused rather than ignored.
+  string names the server (`shell://` for the local one, `ssh://[user@]host`
+  for a remote one), so `session new` keeps only `--tmux` and `--socket`.
+  Unknown keys are refused rather than ignored. The chosen scheme is stored on
+  the control link's address (`Shell` vs `Ssh`), which is what lets `link list`
+  say `control/shell` or `control/ssh` instead of flattening both to `shell`.
 - `session new` starts the workspace with **one window, one link, one pane**
   so the common path stays a single command; there is no empty-workspace form
   (`--empty` is gone) and a URL is optional (`$SHELL` at 80x24).

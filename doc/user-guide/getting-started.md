@@ -211,6 +211,25 @@ xscore ran `tmux new-session -d -s work`, then attached **one** `tmux -C`
 client, which is the session's single link. Every pane's bytes arrive on that
 one connection and are demultiplexed by `%output %N`.
 
+That link says how it reaches the server, and you can see it:
+
+```console
+$ xscore link list --session work
+LINK ID   NAME      KIND
+01a1628e  work-ctl  control/shell
+```
+
+`control/shell` means the client is a local `tmux` process. Ask for a server on
+another machine with an `ssh://` URL and the same link reads `control/ssh`:
+
+```bash
+xscore session new build --tmux 'ssh://dev@box:2222?identity=~/.ssh/id_ed25519'
+xscore link list --session build        # control/ssh
+xscore link show --id <lid>             # address: { ssh: { host, port, user, identity } }
+```
+
+`shell://` is the explicit way to say "local"; nothing at all means the same.
+
 `session ls` shows the backend, including where it lives:
 
 ```console

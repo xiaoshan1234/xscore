@@ -817,14 +817,13 @@ impl SessionManager {
         };
         let link_id = LinkId::new();
         // The link is the connection to the *server*, so the process is the
-        // connection: `address` records the argv that spawned it (readable in
-        // `link show`), while the live client is the `TmuxControl` handle in
-        // `control`/`tmux_controls`. Neither a transport nor a sink is ever
-        // used to move these bytes — the endpoints's kind says so.
-        let argv = crate::tmux::argv(&crate::tmux::host_prefix(&host), &socket, &session);
-        let mut words = argv.into_iter();
-        let command = words.next().unwrap_or_else(|| "tmux".to_string());
-        let args: Vec<String> = words.collect();
+        // connection: `address` records how the tmux protocol is carried (a
+        // local `tmux` process, or an `ssh` invocation), while the live client
+        // is the `TmuxControl` handle in `control`. Neither a transport nor a
+        // sink is ever used to move these bytes — the endpoint says so.
+        let prefix = crate::tmux::host_prefix(&host);
+        let argv = crate::tmux::argv(&prefix, &socket, &session);
+        let address = control_link_address(&host, &argv[prefix.len()..]);
 
         let link = Link {
             id: link_id,
@@ -833,7 +832,7 @@ impl SessionManager {
                 session_id: id,
                 name: format!("{session}-ctl"),
                 created_at: chrono::Utc::now(),
-                address: LinkAddress::Shell { command, args },
+                address,
                 endpoint: EndpointRef::Control,
             },
             transport: Arc::new(NoopTransport),
@@ -2467,5 +2466,104 @@ fn pipe_transport(info: &crate::model::LinkInfo) -> Result<TransportConfig> {
             "link {} is a control link and has no transport of its own",
             info.id
         ))),
+    }
+}
+
+/// How a tmux session's control link reaches the server: a local `tmux`
+/// process (`LinkAddress::Shell`) or an `ssh` invocation
+/// (`LinkAddress::Ssh`). `tmux_argv` is the argv *after* the host prefix.
+///
+/// Splitting the full argv instead would label every remote session `shell`
+/// with `command: "ssh"`, which is how `link show` used to lie about it. The
+/// host config is the authority here; the address is its readable projection.
+fn control_link_address(host: &TmuxHostConfig, tmux_argv: &[String]) -> LinkAddress {
+    match host {
+        TmuxHostConfig::Local => {
+            let mut words = tmux_argv.iter().cloned();
+            let command = words.next().unwrap_or_else(|| "tmux".to_string());
+            LinkAddress::Shell { command, args: words.collect() }
+        }
+        TmuxHostConfig::Ssh { destination, args } => {
+            // `ssh [-p N] [-i key] [destination]`: with no user in the
+            // destination ssh uses the local one, and so does this record.
+            let (user, host) = match destination.rsplit_once('@') {
+                Some((user, host)) => (user.to_string(), host.to_string()),
+                None => (std::env::var("USER").unwrap_or_default(), destination.clone()),
+            };
+            let mut port: u16 = 22;
+            let mut identity = None;
+            let mut it = args.iter();
+            while let Some(arg) = it.next() {
+                match arg.as_str() {
+                    "-p" => {
+                        if let Some(v) = it.next() {
+                            port = v.parse().unwrap_or(22);
+                        }
+                    }
+                    "-i" => identity = it.next().cloned(),
+                    _ => {}
+                }
+            }
+            LinkAddress::Ssh { host, port, user, identity, proxy: None }
+        }
+    }
+}
+
+#[cfg(test)]
+mod control_address_tests {
+    use super::*;
+    use crate::model::{TmuxHostConfig, TmuxSocket};
+
+    fn argv_of(host: &TmuxHostConfig) -> (Vec<String>, Vec<String>) {
+        let prefix = crate::tmux::host_prefix(host);
+        let argv = crate::tmux::argv(&prefix, &TmuxSocket::Default, "work");
+        (prefix.clone(), argv[prefix.len()..].to_vec())
+    }
+
+    #[test]
+    fn a_local_control_link_is_a_shell() {
+        let host = TmuxHostConfig::Local;
+        let (_, tmux_argv) = argv_of(&host);
+        match control_link_address(&host, &tmux_argv) {
+            LinkAddress::Shell { command, args } => {
+                assert_eq!(command, "tmux");
+                assert!(args.iter().any(|a| a == "attach"), "{args:?}");
+            }
+            other => panic!("a local tmux link must be a shell link, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_remote_control_link_is_ssh_not_shell() {
+        let host = TmuxHostConfig::Ssh {
+            destination: "dev@box".into(),
+            args: vec!["-p".into(), "2222".into(), "-i".into(), "~/.ssh/id_ed25519".into()],
+        };
+        let (_, tmux_argv) = argv_of(&host);
+        let addr = control_link_address(&host, &tmux_argv);
+        assert_eq!(addr.kind(), "ssh", "a remote tmux session is reached over ssh: {addr:?}");
+        assert_eq!(
+            addr,
+            LinkAddress::Ssh {
+                host: "box".into(),
+                port: 2222,
+                user: "dev".into(),
+                identity: Some("~/.ssh/id_ed25519".into()),
+                proxy: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_destination_without_a_user_still_reads_as_ssh() {
+        let host = TmuxHostConfig::Ssh { destination: "box".into(), args: vec![] };
+        let (_, tmux_argv) = argv_of(&host);
+        match control_link_address(&host, &tmux_argv) {
+            LinkAddress::Ssh { host, port, .. } => {
+                assert_eq!(host, "box");
+                assert_eq!(port, 22);
+            }
+            other => panic!("expected ssh, got {other:?}"),
+        }
     }
 }

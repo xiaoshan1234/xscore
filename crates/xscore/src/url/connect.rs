@@ -131,12 +131,13 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
 
 /// Parse the positional argument of `session new --tmux`.
 ///
-/// Three accepted shapes, because a tmux session's "URL" describes a server
-/// rather than a pipe:
+/// Four accepted shapes. The scheme is what says how the tmux protocol is
+/// carried — that is the link:
 ///
-///   * omitted           → the local default server
+///   * omitted                → the local default server
+///   * `shell://[?cmd=…]`     → the local server, explicitly
 ///   * `ssh://[user@]host[:port][?identity=…&cmd=…&cwd=…&cols=…&rows=…]`
-///   * `?cmd=…&cols=…`   → local server, options only
+///   * `?cmd=…&cols=…`        → local server, options only (shorthand)
 ///
 /// `--socket` stays a flag (it also has an environment fallback), so a socket
 /// name in the query is refused rather than silently competing with it.
@@ -144,6 +145,27 @@ pub fn parse_tmux_target(s: &str) -> Result<TmuxTarget> {
     let s = s.trim();
     if s.is_empty() {
         return Ok(TmuxTarget::default());
+    }
+
+    // `shell://` — the local server, named explicitly. No path: a command for
+    // the first window is `cmd=…`, never a path, so `shell:///bin/sh` is a
+    // mistake worth reporting.
+    if let Some(rest) = s.strip_prefix("shell://") {
+        let (path, query) = match rest.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (rest, None),
+        };
+        if !path.is_empty() && path != "/" {
+            return Err(Error::Url(
+                "shell:// takes no path for a tmux session; the first window's command is `cmd=…`"
+                    .into(),
+            ));
+        }
+        let mut pairs = query.map(query_map).unwrap_or_default();
+        let mut target = TmuxTarget::default();
+        take_tmux_params(&mut pairs, &mut target)?;
+        reject_unknown(&pairs)?;
+        return Ok(target);
     }
 
     // Options without a host: `?cmd=cat`.
@@ -370,8 +392,24 @@ mod tests {
     }
 
     #[test]
-    fn tmux_target_refuses_a_pipe_scheme() {
+    fn tmux_target_shell_scheme_is_local() {
+        let t = parse_tmux_target("shell://").unwrap();
+        assert_eq!(t.host, TmuxHostConfig::Local);
+        let t = parse_tmux_target("shell://?cmd=cat&cols=90").unwrap();
+        assert_eq!(t.host, TmuxHostConfig::Local);
+        assert_eq!(t.cmd.as_deref(), Some("cat"));
+        assert_eq!(t.cols, Some(90));
+    }
+
+    #[test]
+    fn tmux_target_shell_scheme_takes_no_path() {
         let err = parse_tmux_target("shell:///bin/bash").unwrap_err().to_string();
+        assert!(err.contains("takes no path"), "{err}");
+    }
+
+    #[test]
+    fn tmux_target_refuses_a_pipe_scheme() {
+        let err = parse_tmux_target("serial:///dev/ttyS0?baud=9600").unwrap_err().to_string();
         assert!(err.contains("names the tmux host"), "{err}");
     }
 

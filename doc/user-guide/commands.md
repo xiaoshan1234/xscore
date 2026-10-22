@@ -66,9 +66,16 @@ With `--tmux` the positional is one of:
 
 ```
 (omitted)                      the local default server
+shell://[?cmd=…&cols=…]        the local server, said explicitly
 ssh://[user@]host[:port][?identity=…&cmd=…&cwd=…&cols=…&rows=…]
 ?cmd=…&cols=…&rows=…           local server, options only
 ```
+
+The **scheme is the link**: `shell://` means the control client runs locally,
+`ssh://host` means it is `ssh … tmux -C attach`. That distinction is stored on
+the control link, so `link list` shows `control/shell` or `control/ssh`, and
+`link show` prints the corresponding address (`Shell { tmux … }` or
+`Ssh { host, port, user, identity }`).
 
 | Key | Applies to | Meaning |
 |---|---|---|
@@ -93,7 +100,8 @@ xscore session new hw  'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30'
 xscore session new dev -c local                         # from a saved template
 
 xscore session new work --tmux                          # local tmux server
-xscore session new work --tmux '?cmd=htop'              # local, first window runs htop
+xscore session new work --tmux 'shell://'               # same, said explicitly
+xscore session new work --tmux 'shell://?cmd=htop'      # local, first window runs htop
 xscore session new work --tmux 'ssh://box?cols=120&rows=40'
 xscore session new work --tmux 'ssh://dev@box:2222?identity=~/.ssh/id_ed25519'
 
@@ -113,7 +121,7 @@ serial). A tmux session's control link is created with the session, not with
 | `link add` | `xscore link add [OPTIONS] [URL]` | Creates the link plus its first window and pane. Omit the URL when using `-c`. |
 | `link del` | `xscore link del --id <ID>` | Pipe links only: closes the transport and orphans every attached pane (their buffers are kept). Refused for a session's control link — use `session kill` / `session forget`. |
 | `link show` | `xscore link show --id <ID>` | `LinkInfo` as JSON, including `connected`. |
-| `link list` | `xscore link list [--session <NAME>]` | Columns: id, name, kind (`pipe` / `control`). |
+| `link list` | `xscore link list [--session <NAME>]` | Columns: id, name, kind — `control/shell`, `control/ssh` for a session's control client, `pipe/shell`, `pipe/serial`, `pipe/ssh` for a pipe link. |
 | `link config add` | `xscore link config add <NAME> <URL>` | Saves a URL template under `~/.config/xscore/links/`. |
 | `link config remove` | `xscore link config remove <NAME>` | |
 | `link config show` | `xscore link config show <NAME>` | |

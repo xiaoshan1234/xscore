@@ -1333,14 +1333,24 @@ fn xscore_session_new_url_errors_are_specific() {
     assert!(err.contains("unknown URL parameter"), "got: {err}");
     assert!(err.contains("col"), "the message should name the key: {err}");
 
-    // With --tmux the URL names a host, not a pipe.
+    // With --tmux the URL names a host, not a device. `shell://` is the local
+    // server, and a local server still cannot be given a command in the path —
+    // that is `cmd=…`.
     let wrong = xscore()
+        .args(["session", "new", "work", "--tmux", "serial:///dev/ttyS0?baud=9600"])
+        .output()
+        .unwrap();
+    assert!(!wrong.status.success(), "--tmux must reject a device URL");
+    let err = String::from_utf8_lossy(&wrong.stderr);
+    assert!(err.contains("names the tmux host"), "got: {err}");
+
+    let pathy = xscore()
         .args(["session", "new", "work", "--tmux", "shell:///bin/bash"])
         .output()
         .unwrap();
-    assert!(!wrong.status.success(), "--tmux must reject a pipe URL");
-    let err = String::from_utf8_lossy(&wrong.stderr);
-    assert!(err.contains("names the tmux host"), "got: {err}");
+    assert!(!pathy.status.success(), "a tmux shell:// URL takes no path");
+    let err = String::from_utf8_lossy(&pathy.stderr);
+    assert!(err.contains("takes no path"), "got: {err}");
 
     // Nothing was created by either failure.
     let ls = xscore().args(["session", "ls"]).output().unwrap();
