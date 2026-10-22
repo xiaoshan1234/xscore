@@ -85,7 +85,7 @@ same multiplicity from tmux, which additionally owns the layout.
 
 `session new` creates initial content so the common path stays one step — one
 window plus one link and one pane, mirroring what tmux does — but that is a
-convenience, not a limit. Grow it with `window new`, `link add`, `pane new`.
+convenience, not a limit. Grow it with `window add`, `link add`, `pane add`.
 
 ## 1. Session
 
@@ -830,7 +830,7 @@ Notes:
 - `session new` creates a *workspace*, not one viewport. A native session can
   hold several windows and links of mixed kinds (shell + ssh + serial) at the
   same time — see §0.
-- For a tmux session, `pane new` is atomic: `split-window`, read `%N`, insert a
+- For a tmux session, `pane add` is atomic: `split-window`, read `%N`, insert a
   pane row carrying `link_key = %N` on the session's existing link. No link is
   created — a tmux session has exactly one (§4).
 - `link add` is rejected inside a tmux session for the same reason; `link ls
@@ -875,7 +875,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `ControlBridge` | a pane's view of its session's control client: buffer reads, `send-keys` writes |
 | `tmux::TmuxHost` (`Local`, `Ssh`) | argv-prefix runner: local `tmux`, or `ssh <dest> tmux` once per command (§6) |
 | `session adopt` / `session forget` | manage sessions xscore did not create; stop managing without destroying |
-| `pane new --window` on a tmux session | splits the tmux window and inserts the pane row with `link_key = %N` on the session's one link |
+| `pane add --window` on a tmux session | splits the tmux window and inserts the pane row with `link_key = %N` on the session's one link |
 
 ### Changed
 

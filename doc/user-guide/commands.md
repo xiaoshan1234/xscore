@@ -318,8 +318,8 @@ xscore session kill dev
 **A tmux session that mirrors what tmux shows**
 
 ```bash
-xscore session new work --tmux --cols 100 --rows 30
-tmux -L "$XSCORE_SOCKET" new-window -t work      # outside xscore
+xscore session new work --tmux '?cols=100&rows=30'
+tmux new-window -t work                          # outside xscore
 xscore window list --session work                # two rows, @0 and @1
 xscore session show work                         # ids for both windows/panes
 xscore session kill work                         # takes the tmux session down
