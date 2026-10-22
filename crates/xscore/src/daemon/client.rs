@@ -17,12 +17,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::net::UnixStream;
 
 use crate::core::{Error, LinkAddress, LinkId, PaneId, Result, SessionId};
 use crate::model::{TmuxHostConfig, TmuxSocket, TransportConfig};
 use crate::transport::Transport;
 
+use super::ipc;
 use super::protocol::{self, Request, Response, Status, TmuxStructure};
 
 /// How long `ensure_daemon` waits for a spawned daemon to accept.
@@ -47,10 +47,10 @@ pub fn socket_path_from(xdg_runtime_dir: Option<&std::ffi::OsStr>) -> PathBuf {
     crate::config::paths::config_dir().join("run").join("daemon.sock")
 }
 
-/// Is something accepting on our socket right now? Connect-only: this is
+/// Is something accepting on our local endpoint right now? Connect-only: this is
 /// used by `ensure_daemon`'s poll loop and must never *start* a daemon.
 pub async fn probe() -> bool {
-    UnixStream::connect(socket_path()).await.is_ok()
+    ipc::probe(&socket_path()).await
 }
 
 /// Send one request to a **running** daemon. IO failures (including "no
@@ -64,13 +64,16 @@ pub async fn send(req: &Request) -> Result<Response> {
 /// `send` against an explicit path — used by tests (and by nothing else)
 /// so "no daemon there" can be exercised without touching the env.
 pub async fn send_to(path: &std::path::Path, req: &Request) -> Result<Response> {
-    let mut stream = UnixStream::connect(path).await.map_err(|e| {
-        Error::Daemon(format!("no daemon at {} ({e})", path.display()))
+    let mut stream = ipc::connect(path).await.map_err(|e| {
+        Error::Daemon(format!(
+            "no daemon at {} ({e})",
+            ipc::display_address(path)
+        ))
     })?;
-    protocol::write_frame(&mut stream, req)
+    protocol::write_frame(&mut *stream, req)
         .await
         .map_err(|e| Error::Daemon(format!("write request: {e}")))?;
-    let resp: Response = protocol::read_frame(&mut stream)
+    let resp: Response = protocol::read_frame(&mut *stream)
         .await
         .map_err(|e| Error::Daemon(format!("read response: {e}")))?
         .ok_or_else(|| Error::Daemon("daemon closed the connection".into()))?;
@@ -93,9 +96,9 @@ pub async fn ensure_daemon() -> Result<()> {
         tokio::time::sleep(START_POLL).await;
     }
     Err(Error::Daemon(format!(
-        "daemon did not start within {}ms (socket: {})",
+        "daemon did not start within {}ms ({})",
         START_TIMEOUT.as_millis(),
-        socket_path().display()
+        ipc::display_address(&socket_path())
     )))
 }
 
@@ -117,6 +120,7 @@ pub async fn ensure_daemon() -> Result<()> {
 /// `setsid` ships with util-linux on every Linux distro we target. If it
 /// is somehow missing we fall back to a plain spawn: still functional,
 /// just not session-isolated.
+#[cfg(unix)]
 fn spawn_serve() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
@@ -139,6 +143,26 @@ fn spawn_serve() -> Result<()> {
 
     let mut plain = std::process::Command::new(&exe);
     spawn(&mut plain).map_err(|e| Error::Daemon(format!("spawn daemon: {e}")))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_serve() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let exe =
+        std::env::current_exe().map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
+    std::process::Command::new(exe)
+        .args(["daemon", "serve", "--idle-exit"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+        .spawn()
+        .map_err(|e| Error::Daemon(format!("spawn daemon: {e}")))?;
     Ok(())
 }
 

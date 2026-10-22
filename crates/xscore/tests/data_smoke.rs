@@ -23,6 +23,8 @@
 // The cli_smoke tests don't have this problem because they use
 // `Command::env(...)` per Command.
 
+#![cfg(unix)]
+
 use std::time::Duration;
 use xscore::core::{SessionManager, TmuxCreateOptions};
 use xscore::model::{TmuxHostConfig, TmuxSocket};

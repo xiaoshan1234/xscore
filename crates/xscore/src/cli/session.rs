@@ -61,7 +61,8 @@ pub struct SessionNewArgs {
     ///   serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30
     ///   ssh://user@host:22?identity=~/.ssh/id_ed25519&cols=120
     ///
-    /// Omitted: a shell on $SHELL (then /bin/sh) at 80x24.
+    /// Omitted: `$SHELL` on Unix/WSL, or the default WSL distribution on
+    /// native Windows.
     ///
     /// With --tmux the URL names the tmux host instead — `ssh://[user@]host`,
     /// or just `?cmd=…` for the local server (see `--tmux`).
@@ -177,7 +178,14 @@ async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<(
     Ok(())
 }
 
+/// The platform's default interactive shell.
+#[cfg(windows)]
+fn default_shell_url() -> String {
+    "shell:///wsl".into()
+}
+
 /// `shell://<absolute path>` for $SHELL, falling back to /bin/sh.
+#[cfg(not(windows))]
 fn default_shell_url() -> String {
     let shell = std::env::var("SHELL")
         .ok()

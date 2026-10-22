@@ -1,9 +1,9 @@
 // transport/factory.rs
 //
 // Dispatches a `TransportConfig` to the corresponding concrete `Transport`
-// impl. The match arms are exhaustive over `TransportConfig` (3 variants:
-// Shell, Serial, Ssh) — adding a new transport kind requires both a new
-// variant in `model::TransportConfig` AND a new arm here.
+// impl. The match arms are exhaustive over `TransportConfig` (Shell, Serial,
+// Ssh). Shell-family launchers such as WSL and PowerShell are normalized into
+// the Shell variant by `launcher`.
 
 use crate::core::Result;
 use crate::model::TransportConfig;

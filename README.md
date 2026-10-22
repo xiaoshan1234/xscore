@@ -26,6 +26,12 @@ Both backends end in the same place — a per-pane ring buffer in the daemon —
 > control clients too, which is why pane data survives the CLI process.
 > `link sync`, `link open/close`, `WindowLayout` and the `Sink` layer are gone.
 
+There are two supported Windows shapes. The native `xscore.exe` can own a WSL,
+PowerShell or `pwsh` shell through `shell:///...`, and bridges the daemon over a
+Windows named pipe. Every shell-family URL is the same PTY/ConPTY Shell
+transport with a different program and argv. Running xscore itself inside WSL
+remains the way to manage local or remote tmux sessions on the WSL side.
+
 ## 5-minute demo
 
 ```bash
@@ -75,6 +81,27 @@ tmux split-window -t work
 # 8. Kill the session: the only cascade in the model. For a tmux session
 #    that means `kill-session`, and the control client goes with it.
 ./target/release/xscore session kill work
+```
+
+### Windows quick start
+
+Run this from PowerShell when `wsl.exe` is installed:
+
+```powershell
+cargo build --release
+.\target\release\xscore.exe session new dev 'shell:///wsl?cols=120&rows=40'
+
+# Use the pane id printed above. The shell runs in WSL; the daemon runs on
+# Windows and is reached over a per-user named pipe.
+'echo hi from WSL' | .\target\release\xscore.exe data write --pane <pid>
+.\target\release\xscore.exe data read --pane <pid>
+
+# Pick a distribution, shell and WSL directory explicitly.
+.\target\release\xscore.exe session new ubuntu 'shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src'
+
+# Native Windows PowerShell 5.1 or PowerShell 7
+.\target\release\xscore.exe session new ps 'shell:///powershell?cwd=C:/src'
+.\target\release\xscore.exe session new ps7 'shell:///pwsh?cwd=C:/src'
 ```
 
 ## The model
@@ -160,7 +187,9 @@ Measured on tmux 3.5a, and the reasons the details matter:
 
 Full flag-by-flag reference: [`doc/user-guide/commands.md`](doc/user-guide/commands.md).
 A guided tour (build → first session → tmux → recipes): [`doc/user-guide/getting-started.md`](doc/user-guide/getting-started.md).
-On Windows, run it inside WSL — see [`doc/user-guide/wsl.md`](doc/user-guide/wsl.md) for what crosses the boundary and what does not.
+On Windows, `session new` defaults to the active WSL distribution. See
+[`doc/user-guide/wsl.md`](doc/user-guide/wsl.md) for named distributions,
+PowerShell quoting, path handling and the tmux boundary.
 Below is the shape of the surface.
 
 ```bash
@@ -219,12 +248,23 @@ xscore state migrate        # v2 → v3, and old tmux links → control sessions
 
 | Scheme | Form | Example |
 |---|---|---|
-| `shell://` | local child in a pty | `shell:///bin/bash` |
+| `shell://` | a program path or recognized launcher in a PTY/ConPTY | `shell:///bin/bash` |
+| `shell:///wsl` | WSL shell | `shell:///wsl?distro=Ubuntu&shell=/bin/bash` |
+| `shell:///powershell` | Windows PowerShell 5.1 | `shell:///powershell?cwd=C:/src` |
+| `shell:///pwsh` | PowerShell 7 | `shell:///pwsh?cwd=C:/src` |
 | `serial://` | serial device | `serial:///dev/ttyUSB0?baud=115200&data_bits=8&parity=n&stop_bits=1` |
 | `ssh://` | SSH channel (key auth) | `ssh://user@host:22?identity=~/.ssh/id_ed25519` |
 
 tmux is not a URL scheme. A tmux session is a workspace: `session new --tmux`
 (or `session adopt`), not `link add`.
+
+All shell-family URLs normalize to `TransportConfig::Shell { command, args,
+cwd }`; WSL and PowerShell do not add transport variants. The path after
+`shell:///` is always the program path or a recognized program name. For
+`shell:///wsl`, optional query parameters are `distro`, `shell`, `cwd`, `cols`,
+`rows` and `name`. Omitting the inner `shell` starts the distribution's
+configured default shell. `shell:///powershell` and `shell:///pwsh` accept
+`cwd`, `cols`, `rows` and `name`.
 
 ## Architecture
 
@@ -237,8 +277,11 @@ CLI (one process per command)                    daemon (resident)
     ├ PaneRegistry      (pane_id → PaneInfo)
     └ state.json        (rows only, no bytes)
             │
-            └── unix socket, length-prefixed JSON ──┘
+            └── local IPC, length-prefixed JSON ──┘
 ```
+
+The local IPC endpoint is a Unix socket on Linux and a per-user Windows named
+pipe on Windows. The request protocol and daemon state machine are shared.
 
 The CLI owns metadata and is the only writer of `state.json`. The daemon owns
 every live connection — pipe transports *and* tmux control clients — and the
@@ -270,6 +313,8 @@ A pane reaches its bytes through a `PaneBridge`:
   control-mode sessions instead of dropping them.
 - URL parsing, `link config` templates, Q1 (one pane per pipe link), pane geometry,
   per-session filters on every list.
+- Native Windows daemon IPC over named pipes, plus WSL and PowerShell shells
+  launched through ConPTY. `session new` defaults to the active WSL distribution.
 
 **Implemented but not exercised by the suite:** `serial://` (needs hardware) and
 `ssh://` links (needs a server; key auth only, `check_server_key` accepts any key).
@@ -278,6 +323,8 @@ A pane reaches its bytes through a `PaneBridge`:
 
 **Known limits:**
 
+- Native Windows supports WSL and PowerShell shell links. Local tmux on the
+  Windows side is not supported; manage WSL tmux by running xscore inside WSL.
 - Pane buffers live in daemon memory: `daemon stop` loses them (metadata and tmux
   survive). Direct link transports die with the daemon too; `link show` reports
   `connected: false` and `pane attach` rebuilds one.
@@ -292,14 +339,17 @@ A pane reaches its bytes through a `PaneBridge`:
 ## Tests
 
 ```bash
-cargo test -p xscore --lib                                  # 90: units + protocol
-cargo test -p xscore --test cli_smoke -- --test-threads=1   # 43: one process per step
-cargo test -p xscore --test data_smoke -- --test-threads=1  # 11: in-process, no daemon
-cargo test -p xscore --test tmux_control_smoke -- --ignored #  1: against a live tmux
+cargo test --workspace --all-targets -- --test-threads=1
+cargo test -p xscore --test tmux_control_smoke -- --ignored # live tmux, Unix only
 ```
 
-`cli_smoke` is deliberately cross-process: create in A, write in B, read in C.
-`data_smoke` runs without a daemon on purpose, to keep `DirectBridge` honest.
+Windows runs the library suite, a named-pipe protocol test, a ConPTY test and
+`windows_smoke` for daemon status/stop. The Unix shell and tmux integration files
+are platform-gated; run them on Linux or inside WSL.
+
+On Unix, `cli_smoke` is deliberately cross-process: create in A, write in B,
+read in C. `data_smoke` runs without a daemon on purpose, to keep
+`DirectBridge` honest.
 `tmux_control_smoke` is ignored by default because it needs `tmux` on `PATH`; it
 uses a private socket and kills it on the way out.
 
@@ -312,17 +362,18 @@ crates/xscore/src/
                buffer (per-pane ring buffer)
   model/       SessionInfo, SessionBackend, TmuxHostConfig, TmuxSocket,
                LinkInfo, EndpointRef, WindowInfo, WindowBackend, PaneInfo
-  transport/   Transport trait, shell (pty), serial, ssh, factory, Noop
+  transport/   Transport trait, shell (pty), launcher, serial, ssh, factory,
+               Noop
   tmux/        control (the -C client), protocol (parser), format (-F parsers,
                send_keys_literal, structure queries)
   backends/    PaneBridge trait, DaemonBridge / DirectBridge / ControlBridge
-  daemon/      protocol, server (slot map, pumps, idle gate), client
+  daemon/      protocol, server (slot map, pumps, idle gate), client, IPC
   url/         URL parser
   util/        socket name resolution
   config/      link templates
   cli/         session, link, window, pane, data, daemon, state
 crates/xscore/tests/
-  cli_smoke.rs, data_smoke.rs, tmux_control_smoke.rs
+  cli_smoke.rs, data_smoke.rs, tmux_control_smoke.rs, windows_smoke.rs
 ```
 
 ## Release process

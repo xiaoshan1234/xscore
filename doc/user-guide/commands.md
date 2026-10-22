@@ -57,7 +57,10 @@ The first link is described by **one URL**, so there are only two flags left:
 ### URL grammar
 
 ```
-shell://<command>[?cwd=…&cols=…&rows=…&name=…]
+shell:///<program>[?cwd=…&cols=…&rows=…&name=…]
+shell:///wsl?[distro=…&shell=…&cwd=…&cols=…&rows=…&name=…]
+shell:///powershell?[cwd=…&cols=…&rows=…&name=…]
+shell:///pwsh?[cwd=…&cols=…&rows=…&name=…]
 serial://<device>?baud=<rate>[&data_bits=…&parity=…&stop_bits=…&cols=…&rows=…]
 ssh://<user>@<host>[:port][?identity=…&proxy=…&cols=…&rows=…]
 ```
@@ -80,6 +83,8 @@ the control link, so `link list` shows `control/shell` or `control/ssh`, and
 | Key | Applies to | Meaning |
 |---|---|---|
 | `cwd` | `shell://`, `--tmux` | Working directory of the first pane. Refused for serial/ssh links, which have no shell of their own. |
+| `distro` | `shell:///wsl` | WSL distribution name. Omit it to use the default distribution. |
+| `shell` | `shell:///wsl` | Linux shell executable inside the selected distribution. Omit it to use the distribution's configured login shell. |
 | `cols`, `rows` | everything | First pane size (default `80` × `24`). |
 | `name` | pipe links | Link name. |
 | `cmd` | `--tmux` | Command line for the first window, run through `sh -c`. |
@@ -96,6 +101,9 @@ silently give you 80 columns.
 ```bash
 xscore session new dev                                  # $SHELL at 80x24
 xscore session new dev 'shell:///bin/bash?cwd=/var/log&cols=120&rows=40'
+xscore session new win 'shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src&cols=120&rows=40'
+xscore session new ps  'shell:///powershell?cwd=C:/src'  # Windows PowerShell 5.1
+xscore session new ps7 'shell:///pwsh?cwd=C:/src'        # PowerShell 7
 xscore session new hw  'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30'
 xscore session new dev -c local                         # from a saved template
 
@@ -136,14 +144,16 @@ serial). A tmux session's control link is created with the session, not with
 | `--pane <PANE_ID>` | Bind an existing *orphan* pane instead of creating one. Refused if the pane is already attached, or if tmux owns it (`%N`). |
 | `--session <NAME>` | Put the link in this session. Omitted: the only session if there is exactly one, else a session named `default` (created on demand). |
 
-URL forms: `shell://` (local child in a pty), `serial://` (device, needs
-`?baud=…`), `ssh://` (channel, key auth). tmux is **not** a URL scheme.
+URL forms: `shell://` (a program path or recognized `wsl`/`powershell`/`pwsh`
+launcher), `serial://` (device, needs `?baud=…`), `ssh://` (channel, key auth).
+tmux is **not** a URL scheme.
 
 The same query parameters `session new` uses work here, because both parse one
 grammar: `cwd` (shell only), `cols`, `rows`, `name`. An unknown key is an error.
 
 ```bash
 xscore link add shell:///bin/bash --session dev
+xscore link add 'shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me' --session dev
 xscore link add 'serial:///dev/ttyUSB0?baud=115200' --session hw
 xscore link config add logs 'ssh://deploy@host:22?identity=~/.ssh/id_ed25519'
 xscore link add -c logs --session ops

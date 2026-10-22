@@ -225,13 +225,15 @@ pub(crate) fn resolve_link_input(
     if let crate::model::TransportConfig::Shell { cwd: Some(dir), .. } = &parsed.0.transport {
         crate::util::require_dir(dir)?;
     }
-    if let crate::model::TransportConfig::Shell { command, .. } = &parsed.0.transport {
-        if crate::util::paths::looks_like_windows_program(command) {
-            eprintln!(
-                "warning: `{command}` is a Windows program. WSL interop gives it no \
-                 console behind a pty, so it typically produces no output; run it \
-                 from inside a WSL shell pane instead."
-            );
+    if !cfg!(windows) {
+        if let crate::model::TransportConfig::Shell { command, .. } = &parsed.0.transport {
+            if crate::util::paths::looks_like_windows_program(command) {
+                eprintln!(
+                    "warning: `{command}` is a Windows program. WSL interop gives it no \
+                     console behind a pty, so it typically produces no output; run it \
+                     from inside a WSL shell pane instead."
+                );
+            }
         }
     }
     Ok(parsed)

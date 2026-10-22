@@ -478,6 +478,7 @@ mod tests {
     /// numbers our commands with **its own** counter (275) rather than ours.
     /// A fake that echoed back `1` hid a real bug: `send` used to wait for its
     /// own num and hung against a live server.
+    #[cfg(unix)]
     const FAKE_TMUX: &str = r#"#!/bin/sh
 printf '%%begin 1700000000 270 0\r\n'
 printf '%%end 1700000000 270 0\r\n'

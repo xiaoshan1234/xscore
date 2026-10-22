@@ -2,13 +2,23 @@
 use std::path::PathBuf;
 
 pub fn config_dir() -> PathBuf {
-    // Standard XDG-style location for per-user config: `~/.config/xscore/`.
-    // Fall back to `./.xscore/` if HOME is unset (e.g. running in a container).
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".config").join("xscore")
-    } else {
-        PathBuf::from(".xscore")
-    }
+    // Keep one state layout on Linux, WSL and native Windows. HOME wins so
+    // tests and containers can isolate state; Windows falls back to the user
+    // profile when a POSIX-style HOME is not present.
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                std::env::var_os("USERPROFILE").filter(|value| !value.is_empty())
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        });
+    home.map(|home| PathBuf::from(home).join(".config").join("xscore"))
+        .unwrap_or_else(|| PathBuf::from(".xscore"))
 }
 
 pub fn links_dir() -> PathBuf { config_dir().join("links") }

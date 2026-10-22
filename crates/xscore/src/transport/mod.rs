@@ -12,6 +12,7 @@ pub trait Transport: Send + Sync + std::fmt::Debug {
     async fn close(&self) -> Result<()>;
 }
 
+pub mod launcher;
 pub mod factory;
 pub mod serial;
 pub mod shell;

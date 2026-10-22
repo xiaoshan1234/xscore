@@ -26,6 +26,8 @@
 // `link_key`, keeps its windows in `WindowBackend::Tmux`, refuses `link add`
 // and `pane detach`, and loses all of it to `session kill`.
 
+#![cfg(unix)]
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;

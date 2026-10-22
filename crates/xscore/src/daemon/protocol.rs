@@ -1,6 +1,7 @@
 // daemon/protocol.rs (v0.5.0 — resident daemon, ADR 0009)
 //
-// Wire format: Unix socket, **length-prefixed JSON**:
+// Wire format: local IPC (Unix socket or Windows named pipe),
+// **length-prefixed JSON**:
 //
 //     [u32 little-endian body length][JSON UTF-8 body]
 //
@@ -273,7 +274,7 @@ pub fn from_hex(s: &str) -> Result<Vec<u8>> {
 /// Write one length-prefixed JSON frame.
 pub async fn write_frame<W, T>(w: &mut W, value: &T) -> std::io::Result<()>
 where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + ?Sized,
     T: Serialize,
 {
     let body = serde_json::to_vec(value)?;
@@ -294,7 +295,7 @@ where
 /// connections this protocol uses).
 pub async fn read_frame<R, T>(r: &mut R) -> std::io::Result<Option<T>>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + ?Sized,
     T: serde::de::DeserializeOwned,
 {
     let mut len_buf = [0u8; 4];

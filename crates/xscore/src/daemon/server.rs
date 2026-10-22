@@ -29,14 +29,25 @@
 //   * 5 s of idleness **with no links and no control slots** (so tests and
 //     one-off sessions never leave a daemon behind; a daemon holding
 //     either must stay up, because that connection is the whole point).
+// The state machine is shared across platforms. Only the endpoint differs:
+// a Unix socket on Unix, a named pipe on Windows.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{
+    NamedPipeServer, PipeMode, ServerOptions,
+};
+use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::core::buffer::{RingBuffer, DIRECT_BUFFER_CAPACITY};
@@ -46,6 +57,7 @@ use crate::tmux::{self, TmuxControl, TmuxEvent};
 use crate::transport::{factory as transport_factory, Transport};
 
 use super::client::socket_path;
+use super::ipc;
 use super::protocol::{
     self, PaneStatus, Request, Response, Status, TmuxPaneRow, TmuxStatus, TmuxStructure,
     TmuxWindowRow,
@@ -850,6 +862,7 @@ fn idle_ready(has_links: bool, has_tmux: bool, idle: Duration, timeout: Duration
 /// and both processes holding links forever. The lock makes "who binds"
 /// a single winner, and a crashed daemon's lock is detected and taken
 /// over (its socket no longer answers).
+#[cfg(unix)]
 pub async fn run(idle_exit: bool) -> Result<()> {
     // Ignore SIGHUP: the daemon may have been started by a `link add`
     // that ran in a terminal which is since closed. Dropping every live
@@ -971,6 +984,104 @@ pub async fn run(idle_exit: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn next_pipe(name: &str, first: bool) -> Result<NamedPipeServer> {
+    let mut options = ServerOptions::new();
+    options
+        .pipe_mode(PipeMode::Byte)
+        .max_instances(32)
+        .first_pipe_instance(first);
+    options
+        .create(name)
+        .map_err(|e| Error::Daemon(format!("create named pipe {name}: {e}")))
+}
+
+/// Windows uses one named-pipe instance per client. The daemon creates the
+/// next instance immediately after accepting one, so a concurrent CLI never
+/// sees a gap while another request is being handled.
+#[cfg(windows)]
+pub async fn run(idle_exit: bool) -> Result<()> {
+    let path = socket_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Error::Daemon(format!("mkdir {}: {e}", dir.display())))?;
+    }
+
+    // An endpoint can still be alive after its lock file was removed. Check it
+    // first so two auto-started daemons never fight over `first_pipe_instance`.
+    if ipc::probe(&path).await {
+        return Ok(());
+    }
+
+    let lock_path = path.with_extension("lock");
+    if !acquire_startup_lock(&lock_path, &path).await? {
+        return Ok(());
+    }
+
+    let name = ipc::display_address(&path);
+    let mut server = match next_pipe(&name, true) {
+        Ok(server) => server,
+        Err(e) => {
+            let _ = std::fs::remove_file(&lock_path);
+            return Err(e);
+        }
+    };
+    tracing::info!("xscore daemon listening on {name}");
+
+    let state = Arc::new(DaemonState::new());
+    let shutdown = Arc::new(Notify::new());
+    {
+        let sd = Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            sd.notify_one();
+        });
+    }
+
+    loop {
+        tokio::select! {
+            connected = server.connect() => {
+                if let Err(e) = connected {
+                    tracing::warn!("daemon accept failed: {e}");
+                    continue;
+                }
+                let stream = server;
+                server = match next_pipe(&name, false) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        tracing::error!("daemon could not create next pipe instance: {e}");
+                        break;
+                    }
+                };
+                let st = Arc::clone(&state);
+                let sd = Arc::clone(&shutdown);
+                tokio::spawn(async move { serve_conn(stream, st, sd).await });
+            }
+            _ = shutdown.notified() => break,
+            _ = tokio::time::sleep(IDLE_TICK), if idle_exit => {
+                if state.should_exit_idle().await {
+                    tracing::info!("daemon exiting: idle with no links and no tmux clients");
+                    break;
+                }
+            }
+        }
+    }
+
+    state.shutdown().await;
+    let _ = std::fs::remove_file(&lock_path);
+    Ok(())
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub async fn run(_idle_exit: bool) -> Result<()> {
+    Err(Error::Daemon(DISCLAIMER.to_string()))
+}
+
+/// The message used by targets with neither Unix sockets nor named pipes.
+#[cfg(all(not(unix), not(windows)))]
+pub(crate) const DISCLAIMER: &str =
+    "the xscore daemon requires Unix sockets or Windows named pipes on this target";
+
 /// Take the single-instance lock. `Ok(false)` means a live daemon owns it
 /// (this process should just exit); `Ok(true)` means we may bind.
 ///
@@ -987,7 +1098,7 @@ async fn acquire_startup_lock(lock_path: &Path, socket: &Path) -> Result<bool> {
             Ok(_) => return Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 for _ in 0..5 {
-                    if UnixStream::connect(socket).await.is_ok() {
+                    if ipc::probe(socket).await {
                         return Ok(false);
                     }
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1011,7 +1122,10 @@ async fn acquire_startup_lock(lock_path: &Path, socket: &Path) -> Result<bool> {
 /// One connection: read requests until EOF. The CLI opens one connection
 /// per request, but looping keeps a long-lived client (a future TUI) from
 /// needing protocol changes.
-async fn serve_conn(mut stream: UnixStream, state: Arc<DaemonState>, shutdown: Arc<Notify>) {
+async fn serve_conn<S>(mut stream: S, state: Arc<DaemonState>, shutdown: Arc<Notify>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     loop {
         let req: Request = match protocol::read_frame(&mut stream).await {
             Ok(Some(req)) => req,

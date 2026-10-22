@@ -1,6 +1,7 @@
 // url/connect.rs
 use crate::core::{Error, LinkAddress, Result};
 use crate::model::{ConnectSpec, TmuxHostConfig, TransportConfig};
+use crate::transport::launcher::ShellLaunch;
 use std::collections::HashMap;
 
 /// Settings that describe the *pane* the link is first shown in, rather than
@@ -47,16 +48,40 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
     let mut pane = take_pane_params(&mut pairs)?;
 
     let (transport, address) = match scheme {
-        "shell" | "sh" => {
+        "shell" => {
+            if host.is_some() || user.is_some() || url.port().is_some() {
+                return Err(Error::Url(
+                    "shell URL takes its program in the path; use \
+                     shell:///wsl, not shell://wsl"
+                        .into(),
+                ));
+            }
             let command = url.path().to_string();
-            if command.is_empty() {
+            if command.is_empty() || command == "/" {
                 return Err(Error::Url("shell URL needs command".into()));
             }
-            let cwd = pane.cwd.clone();
-            (
-                TransportConfig::Shell { command: command.clone(), args: vec![], cwd },
-                LinkAddress::Shell { command, args: vec![] },
-            )
+            match command.trim_start_matches('/').to_ascii_lowercase().as_str() {
+                "wsl" | "wsl.exe" => {
+                    let distribution = pairs.remove("distro").filter(|value| !value.is_empty());
+                    let shell = pairs.remove("shell").filter(|value| !value.is_empty());
+                    let launch = ShellLaunch::wsl(distribution, shell, pane.cwd.clone());
+                    pane.cwd = None;
+                    (launch.transport(), launch.address())
+                }
+                "powershell" | "powershell.exe" => {
+                    let launch = ShellLaunch::powershell(None, pane.cwd.clone())?;
+                    (launch.transport(), launch.address())
+                }
+                "pwsh" | "pwsh.exe" => {
+                    let launch = ShellLaunch::powershell(Some("pwsh"), pane.cwd.clone())?;
+                    (launch.transport(), launch.address())
+                }
+                _ => {
+                    let cwd = pane.cwd.clone();
+                    let launch = ShellLaunch::local(command, Vec::new(), cwd);
+                    (launch.transport(), launch.address())
+                }
+            }
         }
         "serial" => {
             let path = url.path().to_string();
@@ -307,6 +332,105 @@ mod tests {
     fn parse_shell_url_yields_shell_address() {
         let (_, addr) = parse("shell:///bin/bash").unwrap();
         assert_eq!(addr, LinkAddress::Shell { command: "/bin/bash".into(), args: vec![] });
+    }
+
+    #[test]
+    fn parse_wsl_url_with_distribution_shell_and_cwd() {
+        let (spec, addr, pane) =
+            parse_with_pane(
+                "shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src&cols=120",
+            )
+                .unwrap();
+        assert_eq!(
+            spec.transport,
+            TransportConfig::Shell {
+                command: "wsl.exe".into(),
+                args: vec![
+                    "--distribution".into(),
+                    "Ubuntu".into(),
+                    "--cd".into(),
+                    "/home/me/src".into(),
+                    "--exec".into(),
+                    "/bin/bash".into(),
+                ],
+                cwd: None,
+            }
+        );
+        assert_eq!(
+            addr,
+            LinkAddress::Shell {
+                command: "wsl.exe".into(),
+                args: vec![
+                    "--distribution".into(),
+                    "Ubuntu".into(),
+                    "--cd".into(),
+                    "/home/me/src".into(),
+                    "--exec".into(),
+                    "/bin/bash".into(),
+                ],
+            }
+        );
+        assert_eq!(pane.cwd, None);
+        assert_eq!(pane.cols, Some(120));
+    }
+
+    #[test]
+    fn parse_wsl_url_defaults_to_default_distribution_and_shell() {
+        let (spec, addr, _) = parse_with_pane("shell:///wsl").unwrap();
+        assert_eq!(
+            spec.transport,
+            TransportConfig::Shell {
+                command: "wsl.exe".into(),
+                args: vec![],
+                cwd: None,
+            }
+        );
+        assert_eq!(
+            addr,
+            LinkAddress::Shell {
+                command: "wsl.exe".into(),
+                args: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn shell_url_refuses_authority_and_unknown_wsl_options() {
+        let err = parse("shell://wsl").unwrap_err().to_string();
+        assert!(err.contains("shell:///wsl"), "{err}");
+        assert!(parse("shell:///wsl?frontend=foo").is_err());
+    }
+
+    #[test]
+    fn powershell_schemes_normalize_to_shell() {
+        let (legacy, address, pane) =
+            parse_with_pane("shell:///powershell?cwd=/tmp&cols=120").unwrap();
+        assert_eq!(
+            legacy.transport,
+            TransportConfig::Shell {
+                command: "powershell.exe".into(),
+                args: vec!["-NoLogo".into()],
+                cwd: Some("/tmp".into()),
+            }
+        );
+        assert_eq!(address.kind(), "shell");
+        assert_eq!(pane.cwd, None);
+
+        let (modern, _, _) = parse_with_pane("shell:///pwsh").unwrap();
+        assert_eq!(
+            modern.transport,
+            TransportConfig::Shell {
+                command: "pwsh.exe".into(),
+                args: vec!["-NoLogo".into()],
+                cwd: None,
+            }
+        );
+    }
+
+    #[test]
+    fn powershell_refuses_unknown_options() {
+        assert!(parse("shell:///powershell?edition=8").is_err());
+        assert!(parse("shell:///pwsh?shell=/bin/bash").is_err());
     }
 
     #[test]

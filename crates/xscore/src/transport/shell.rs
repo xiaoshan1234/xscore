@@ -264,6 +264,7 @@ mod tests {
         seen
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn shell_link_gets_a_tty() {
         let mut t = ShellTransport::new(
@@ -280,6 +281,7 @@ mod tests {
         t.close().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn shell_transport_roundtrip() {
         let mut t = ShellTransport::new("cat".into(), vec![], None).await.unwrap();
@@ -290,6 +292,7 @@ mod tests {
         t.close().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resize_reaches_the_pty() {
         let mut t = ShellTransport::new(
@@ -306,11 +309,32 @@ mod tests {
         t.close().await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn write_after_close_fails() {
         let mut t = ShellTransport::new("cat".into(), vec![], None).await.unwrap();
         t.open().await.unwrap();
         t.close().await.unwrap();
         assert!(t.write(b"x").await.is_err());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_conpty_roundtrip() {
+        let mut t = ShellTransport::new(
+            "cmd.exe".into(),
+            vec!["/Q".into(), "/K".into()],
+            None,
+        )
+        .await
+        .unwrap();
+        t.open().await.unwrap();
+        t.write(b"echo XSCORE_WINDOWS_PTY\r\n").await.unwrap();
+        let out = read_until(&t, "XSCORE_WINDOWS_PTY").await;
+        assert!(
+            out.contains("XSCORE_WINDOWS_PTY"),
+            "ConPTY output missing: {out:?}"
+        );
+        t.close().await.unwrap();
     }
 }

@@ -1923,6 +1923,21 @@ impl SessionManager {
         }
 
         if info.link_id == Some(lid) {
+            // `pane attach` is also the reconnect verb. The metadata can say
+            // "attached" while the daemon was stopped or restarted and no
+            // longer owns this link's transport.
+            if let Some(client) = &self.daemon {
+                if client.attach(pid, lid).await.is_err() {
+                    client.ensure().await?;
+                    client
+                        .create_link(lid, pipe_transport(&arc_link.info)?)
+                        .await?;
+                    client.attach(pid, lid).await?;
+                }
+                let bridge: Arc<dyn PaneBridge> =
+                    Arc::new(DaemonBridge::new(Arc::clone(client), pid));
+                self.pane_bridges.lock().await.insert(pid, bridge);
+            }
             return Ok(());
         }
         if let Some(existing) = info.link_id {

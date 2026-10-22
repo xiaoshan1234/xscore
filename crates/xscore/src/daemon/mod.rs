@@ -18,6 +18,7 @@
 // tmux-backed links do NOT go through the daemon: tmux already is a
 // resident server, so `TmuxBridge` keeps driving `tmux` commands directly.
 pub mod client;
+pub mod ipc;
 pub mod protocol;
 pub mod server;
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Native Windows shell sessions.** `shell:///wsl`,
+  `shell:///powershell` and `shell:///pwsh` start their selected process through
+  Windows ConPTY. The path after `shell:///` is always a program path or
+  recognized program name; WSL settings live in query parameters. All shell
+  profiles normalize to the existing `TransportConfig::Shell`.
+  `session new` defaults to `shell:///wsl` on Windows, and the resident daemon
+  uses a per-user Windows named pipe instead of a Unix socket.
+
 ### Changed
 
 - **A `cwd` that does not exist is refused.** It used to be accepted and then
@@ -44,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`pane attach` reconnects an already-bound pipe pane.** It used to return
+  immediately when metadata still said `link_id = Some(..)`, even if the daemon
+  had stopped and no transport remained. It now recreates the transport from
+  the persisted spec before reporting success.
 - **`pane add` in a tmux session no longer invents an unreachable row.** With no
   `--window` it created a hollow pane — and in a tmux session nothing can ever
   attach it (`link add` and `pane attach` are both refused there), so it was a

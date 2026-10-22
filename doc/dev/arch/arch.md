@@ -413,9 +413,16 @@ three panes. Across ssh (§6) the same link is one channel; nothing else changes
 The control slot lives in the **daemon** (ADR 0009 §1): the client, its
 `%output` subscriptions and every pane buffer are daemon state, so a CLI
 invocation that ends does not end the stream. The CLI's `Read`/`Write` are
-requests over the socket, keyed by pane id; `Structure` and `TmuxCommand` are
+requests over the local IPC endpoint, keyed by pane id; `Structure` and
+`TmuxCommand` are
 the two ways it ever touches the client. In the no-daemon build (tests, an
 embedding caller) the same slot sits in the manager instead.
+
+On Unix the endpoint is a private Unix socket. On native Windows it is a
+per-user named pipe derived from the same config path; both carry the same
+length-prefixed JSON protocol. `shell:///wsl`, `shell:///powershell` and
+`shell:///pwsh` are launch profiles that normalize to the same Shell transport,
+which preserves the daemon and pane buffer model.
 
 ## 6. tmux over SSH
 
@@ -692,11 +699,12 @@ crates/xscore/src/
   backends/    PaneBridge: DirectBridge (a pipe's pump + buffer),
                DaemonBridge (the daemon owns both), ControlBridge (a pane on
                its session's control client)
-  transport/   Transport trait, shell, serial, ssh, NoopTransport, DaemonTransport
+  transport/   Transport trait, shell, launcher (WSL/PowerShell argv), serial,
+               ssh, NoopTransport, DaemonTransport
   tmux/        TmuxControl (spawn, reader/writer threads, correlation),
                protocol (pure parsing), format (the -F parsers and the command
                lines: send-keys, new-window, split-window, resize-pane)
-  daemon/      protocol, server, client
+  daemon/      protocol, server, client, IPC (Unix socket / named pipe)
   url/         URL parser
   config/      link templates
   cli/         session, window, pane, link, data, daemon, state

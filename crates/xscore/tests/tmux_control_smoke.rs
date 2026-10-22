@@ -16,6 +16,8 @@
 //! It uses a private socket and kills it on the way out, so it never touches
 //! the user's tmux server.
 
+#![cfg(unix)]
+
 use xscore::model::TmuxSocket;
 use xscore::tmux::TmuxControl;
 
