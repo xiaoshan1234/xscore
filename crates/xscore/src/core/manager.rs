@@ -1757,6 +1757,47 @@ impl SessionManager {
     ) -> Result<PaneId> {
         self.require_session(session).await?;
 
+        // In a tmux session, a pane with no window would be a row no byte could
+        // ever reach: `link add` and `pane attach` are both refused there. So
+        // "no window" means "the one tmux is showing", exactly like
+        // `split-window` with no target.
+        let window = match window {
+            Some(w) => Some(w),
+            None => {
+                if let SessionBackend::Tmux { session: name, .. } =
+                    self.get_session(session).await?.backend
+                {
+                    let lines = self
+                        .tmux_send(
+                            session,
+                            &format!("display-message -p -t {name} '#{{window_id}}'"),
+                        )
+                        .await?;
+                    let handle = tmux_handle_from(&lines, '@').ok_or_else(|| {
+                        Error::Sink(format!(
+                            "tmux did not report the current window: {lines:?}"
+                        ))
+                    })?;
+                    let wid = self
+                        .windows
+                        .list_all()
+                        .await
+                        .into_iter()
+                        .find(|w| {
+                            w.info.session_id == session
+                                && w.info.backend.tmux_handle() == Some(handle.as_str())
+                        })
+                        .map(|w| w.info.id)
+                        .ok_or_else(|| {
+                            Error::Sink(format!("tmux window {handle} is not a row"))
+                        })?;
+                    Some(wid)
+                } else {
+                    None
+                }
+            }
+        };
+
         // A tmux window's panes are tmux's: split it and adopt what tmux
         // creates, rather than inventing a hollow row that no byte could reach.
         if let Some(wid) = window {

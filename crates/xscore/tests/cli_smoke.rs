@@ -359,18 +359,32 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
     );
 
     // `--pane` must not make it legal, and the refusal must leave the pane
-    // exactly where it was.
-    let orphan = parse_id_from_stdout(
-        &xscore().args(["pane", "add"]).output().unwrap().stdout,
+    // exactly where it was. In a tmux session `pane add` yields a real tmux
+    // pane (one that is already on the control link), so the invariant is
+    // "unchanged", not "orphan".
+    let split = parse_id_from_stdout(
+        &xscore()
+            .args(["pane", "add", "--session", "work"])
+            .output()
+            .unwrap()
+            .stdout,
         "pane",
     );
+    let before = json(&xscore().args(["pane", "show", "--id", &split]).output().unwrap().stdout);
     let with_pane = xscore()
-        .args(["link", "add", "shell:///bin/cat", "--session", "work", "--pane", &orphan])
+        .args(["link", "add", "shell:///bin/cat", "--session", "work", "--pane", &split])
         .output()
         .unwrap();
     assert!(!with_pane.status.success(), "`--pane` must not bypass the one-link rule");
-    let pane = json(&xscore().args(["pane", "show", "--id", &orphan]).output().unwrap().stdout);
-    assert!(pane["link_id"].is_null(), "a rejected add must leave the pane orphan: {pane}");
+    let after = json(&xscore().args(["pane", "show", "--id", &split]).output().unwrap().stdout);
+    assert_eq!(
+        before["link_id"], after["link_id"],
+        "a rejected add must not rebind the pane: {after}"
+    );
+    assert_eq!(
+        before["link_key"], after["link_key"],
+        "and must not touch its %N: {after}"
+    );
 
     // And the session still has exactly one link, as the filter reports.
     let ls = xscore().args(["link", "list", "--session", "work"]).output().unwrap();
@@ -381,7 +395,7 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
     assert!(listing.contains(&lid), "the control link is the one: {listing}");
     assert!(listing.contains("control"), "and it is reported as such: {listing}");
 
-    let _ = xscore().args(["pane", "del", "--id", &orphan]).output();
+    let _ = xscore().args(["pane", "del", "--id", &split]).output();
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
 }
@@ -1606,6 +1620,43 @@ fn xscore_session_new_tmux_creates_window_and_pane() {
     assert!(!again.status.success(), "a duplicate tmux session must be refused");
 
     let _ = xscore().args(["session", "kill", "work"]).output();
+    cleanup_tmux(name);
+}
+
+#[test]
+fn xscore_pane_add_in_a_tmux_session_splits_the_current_window() {
+    let name = "tmux_pane_add_splits";
+    let xscore = || xscore_for(name);
+    cleanup_tmux(name);
+
+    let created = xscore()
+        .args(["session", "new", "w", "--tmux", "shell://"])
+        .output()
+        .unwrap();
+    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    let first = parse_id_from_stdout(&created.stdout, "pane");
+
+    // No --window: this used to make a hollow row that no byte could reach
+    // (`link add` / `pane attach` are refused in a tmux session), so "no
+    // window" has to mean the window tmux is showing.
+    let added = xscore().args(["pane", "add", "--session", "w"]).output().unwrap();
+    assert!(ok(&added), "pane add failed: {}", String::from_utf8_lossy(&added.stderr));
+    let second = parse_id_from_stdout(&added.stdout, "pane");
+    assert_ne!(second, first, "the split must produce a new pane row");
+
+    let panes = tmux_stdout(name, &["list-panes", "-t", "w", "-F", "#{pane_id}"]);
+    assert_eq!(panes.lines().count(), 2, "tmux must have two real panes: {panes:?}");
+
+    // Both rows address themselves with their own %N on the one control link.
+    let a = json(&xscore().args(["pane", "show", "--id", &first]).output().unwrap().stdout);
+    let b = json(&xscore().args(["pane", "show", "--id", &second]).output().unwrap().stdout);
+    for pane in [&a, &b] {
+        let key = pane["link_key"].as_str().expect("link_key");
+        assert!(key.starts_with('%'), "tmux pane key: {pane}");
+    }
+    assert_ne!(a["link_key"], b["link_key"], "each pane has its own %N: {a} {b}");
+
+    let _ = xscore().args(["session", "kill", "w"]).output();
     cleanup_tmux(name);
 }
 

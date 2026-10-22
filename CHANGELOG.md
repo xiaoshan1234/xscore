@@ -44,6 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`pane add` in a tmux session no longer invents an unreachable row.** With no
+  `--window` it created a hollow pane — and in a tmux session nothing can ever
+  attach it (`link add` and `pane attach` are both refused there), so it was a
+  row that could never carry a byte. It now splits the window tmux is showing
+  (`display-message -p '#{window_id}'`, then `split-window`), which is what
+  `tmux split-window` does with no target. Found while driving a real remote
+  tmux over ssh: the row carried `link_id: null` while the host still had a
+  single pane.
 - `xscore daemon serve` no longer exits five seconds after being started. The
   idle gate ("no links, no control slots") belongs to the copy that auto-start
   spawns in the background; applying it to a foreground `serve` made it look
