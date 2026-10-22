@@ -17,7 +17,7 @@ cargo build --release          # Rust 1.95+; the binary lands in target/release/
 ```
 
 - **tmux 3.0+** on `PATH` — only for tmux-backed sessions.
-- **`ssh` on `PATH`** — only for `--ssh` sessions.
+- **`ssh` on `PATH`** — only for tmux sessions on another host (`--tmux 'ssh://box'`).
 - Nothing else. No config file is required to start; `state.json` is created on
   first use.
 
@@ -54,7 +54,7 @@ Two rules carry most of the weight:
 ## 1. Your first session
 
 ```console
-$ xscore session new dev --cmd /bin/bash
+$ xscore session new dev 'shell:///bin/bash'
 session: 01a15e7f-eaa8-707f-a23b-59da7c89a6dc
 link:    01a15e7f-eaaa-7545-ba94-71587c3ddbe1
 window:  01a15e7f-eac2-7071-9999-7b77e17c4fb0
@@ -87,11 +87,19 @@ SESSION ID                            NAME     BACKEND  WINDOWS  PANES  LINKS
 01a15e7f-eaa8-707f-a23b-59da7c89a6dc  dev      native   1        1      1
 ```
 
-Want a bare workspace with nothing in it — no shell, no window, no pane?
+The URL is how you say what the first link is. A few shapes, then the two
+sections that follow use them:
 
 ```bash
-xscore session new scratch --empty
+xscore session new dev 'shell:///bin/bash?cwd=/var/log&cols=120&rows=40'
+xscore session new hw  'serial:///dev/ttyUSB0?baud=115200'
 ```
+
+Every session always has a link, a window and a pane — there is no
+empty-workspace form. To get one later, delete its children (`pane del`,
+`link del`, `window del`); the workspace stays.
+
+A saved template replaces the URL: `xscore session new dev -c local`.
 
 ---
 
@@ -192,7 +200,7 @@ detached: 01a15e7f-…df49
 Same four verbs, one flag:
 
 ```console
-$ xscore session new work --tmux --cols 100 --rows 30
+$ xscore session new work --tmux '?cols=100&rows=30'
 session: 01a15e7f-ecdd-7101-94e6-cb782efae43b
 link:    01a15e7f-ecde-74ad-a927-3a30733b3e3a
 window:  01a15e7f-ece2-72b0-bca0-f485800462de
@@ -280,7 +288,7 @@ xscore link config list
 ```
 
 `ssh://` uses key auth through `russh`. For tmux over ssh, don't use a link at
-all — `xscore session new work --tmux --ssh box` execs the real `ssh`, so
+all — `xscore session new work --tmux 'ssh://box'` execs the real `ssh`, so
 `~/.ssh/config`, `ProxyJump` and your agent apply.
 
 ---

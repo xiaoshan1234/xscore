@@ -775,8 +775,10 @@ Two notes that survive from v0.5.1:
 ```bash
 # Session — the workspace
 xscore session ls [--all] [--host H] [--refresh]
-xscore session new <name> [--tmux [--ssh DEST] [--socket S]] [--empty]
-                          [--cmd C] [--cwd D] [--cols N --rows N]
+xscore session new <name> [URL] [-c CONFIG] [--tmux] [--socket S]
+                          # URL: shell://cmd?cwd=…&cols=…&rows=…
+                          #      serial://dev?baud=…   ssh://user@host?…
+                          # --tmux: the URL names the host (ssh://…), or ?cmd=…
 xscore session adopt <name> [--ssh DEST] [--socket S]   # take over an existing tmux session
 xscore session show <ref>                    # its windows / panes / links
 xscore session attach <ref>                  # tmux: exec tmux attach; native: unsupported
@@ -785,19 +787,18 @@ xscore session forget <ref>                  # drop xscore rows, leave backend r
 xscore session rename <ref> <new>
 
 # Window — scoped to a session
-xscore window ls   --session <s>
-xscore window new  --session <s> [--name N] [--cmd C] [--cwd D]
-xscore window kill <w>
-xscore window rename <w> <new>
+xscore window list --session <s>
+xscore window add  --session <s> [--name N] [--cols N --rows N]
+xscore window del  --id <w>                  # panes survive as orphans
 
 # Pane — scoped to a session
-xscore pane ls   [--session <s>] [--window <w>]
-xscore pane new  --session <s> [--window <w>] [--cmd C] [--cwd D] [--cols N --rows N]
-xscore pane kill <p>
-xscore pane attach --pane <p> --link <l>     # native only
-xscore pane detach --pane <p>                # native only
-xscore pane move   --pane <p> --window <w>   # within the session
-xscore pane screen <p> [--history N]         # rendered grid via capture-pane, not bytes
+xscore pane list [--session <s>] [--window <w>] [--link <l>]
+xscore pane add  --session <s> [--window <w>] [--cols N --rows N]
+xscore pane del  --id <p>
+xscore pane attach --pane <p> --link <l>     # pipe links only
+xscore pane detach --pane <p>                # pipe links only
+xscore pane move   --pane <p> --x X --y Y    # within the window
+xscore pane screen <p> [--history N]         # rendered grid (not implemented)
 
 # Link — native sessions
 xscore link add <url> --session <s>
@@ -817,14 +818,15 @@ Notes:
   can each have `work`, so names are not globally unique — see §6.
 - Every `<ref>`-taking verb resolves the host first and then contacts only that
   host. No command ever fans out across hosts.
-- `--cmd` / `--cwd` belong to the verbs that **start a process** (`session new`,
-  `window new`, `pane new`). URLs only say how to connect. This is where the
-  command that v0.5.1 silently dropped (`?tmux=on` ignored the URL's command)
-  now lives.
+- `--cmd` / `--cwd` / `--cols` / `--rows` are **URL query parameters**, not
+  flags: the first link and the pane that shows it are described by one string
+  (`shell:///bin/bash?cwd=/var/log&cols=120&rows=40`). With `--tmux` the same
+  string names the server (`ssh://[user@]host[:port]`, or a bare `?cmd=…` for
+  the local one), so `session new` keeps only `--tmux` and `--socket`. Unknown
+  keys are refused rather than ignored.
 - `session new` starts the workspace with **one window, one link, one pane**
-  so the common path stays a single command. `--empty` skips that for a native
-  session (bare workspace); it is a no-op for `--tmux`, where tmux always
-  creates at least one pane.
+  so the common path stays a single command; there is no empty-workspace form
+  (`--empty` is gone) and a URL is optional (`$SHELL` at 80x24).
 - `session new` creates a *workspace*, not one viewport. A native session can
   hold several windows and links of mixed kinds (shell + ssh + serial) at the
   same time — see §0.

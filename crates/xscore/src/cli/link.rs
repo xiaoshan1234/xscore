@@ -6,7 +6,7 @@
 // §4/§D5). The old open/close/reconcile verbs are gone with the old tmux path:
 // those jobs belong to the session verbs and to control-mode events.
 use crate::core::{Error, LinkId, PaneId, SessionManager};
-use crate::url;
+
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
@@ -90,7 +90,8 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
 }
 
 async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
-    let (spec, address) = resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
+    let (spec, address, pane_params) =
+        resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let supplied_id = match args.id.as_deref() {
         Some(s) => Some(LinkId::parse(s)?),
         None => None,
@@ -106,6 +107,16 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
         println!("window: {wid}");
     }
     println!("pane:  {}", result.pane_id);
+    // Geometry rides in the URL (`?cols=120&rows=40`) so `session new` and
+    // `link add` accept the same string.
+    if pane_params.cols.is_some() || pane_params.rows.is_some() {
+        mgr.resize_pane(
+            result.pane_id,
+            pane_params.cols.unwrap_or(80),
+            pane_params.rows.unwrap_or(24),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -183,24 +194,28 @@ async fn config_cmd(cmd: LinkConfigCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_link_input(
+pub(crate) fn resolve_link_input(
     url: Option<&str>,
     config_name: Option<&str>,
-) -> anyhow::Result<(crate::model::ConnectSpec, crate::core::LinkAddress)> {
+) -> anyhow::Result<(
+    crate::model::ConnectSpec,
+    crate::core::LinkAddress,
+    crate::url::PaneParams,
+)> {
     match (url, config_name) {
         (None, None) => anyhow::bail!("provide either <url> or -c CONFIG"),
-        (Some(u), None) => Ok(url::parse(u)?),
+        (Some(u), None) => Ok(crate::url::parse_with_pane(u)?),
         (None, Some(c)) => {
             let template_path = crate::config::link_config_path(c);
             let spec = crate::config::load_connect_spec(&template_path)?;
             let address = spec.address.clone();
-            Ok((spec, address))
+            Ok((spec, address, crate::url::PaneParams::default()))
         }
         (Some(u), Some(c)) => {
             let template_path = crate::config::link_config_path(c);
             let base_spec = crate::config::load_connect_spec(&template_path)?;
-            let (cli_spec, cli_addr) = url::parse(u)?;
-            Ok((merge_specs(base_spec, cli_spec), cli_addr))
+            let (cli_spec, cli_addr, pane) = crate::url::parse_with_pane(u)?;
+            Ok((merge_specs(base_spec, cli_spec), cli_addr, pane))
         }
     }
 }

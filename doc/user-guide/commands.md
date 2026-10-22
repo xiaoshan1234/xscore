@@ -37,7 +37,7 @@ xscore
 | Command | Usage | Notes |
 |---|---|---|
 | `session ls` | `xscore session ls` | One row per session: id, name, backend, and how many windows / panes / links it owns. |
-| `session new` | `xscore session new [OPTIONS] <NAME>` | Creates a **native** session by default. Unless `--empty`, it also creates the first link, window and pane, so the usual case is one command. |
+| `session new` | `xscore session new [OPTIONS] <NAME> [URL]` | Creates a **native** session by default, always with its first link, window and pane. The URL says what that link is and how its pane looks; omit it for a shell on `$SHELL`. |
 | `session adopt` | `xscore session adopt [OPTIONS] <NAME>` | Takes over a tmux session that already exists. The tmux name is used as the xscore session name. |
 | `session show` | `xscore session show <NAME>` | Prints the backend and the ids of every link / window / pane it owns. |
 | `session kill` | `xscore session kill <NAME>` | Destroys the session and everything in it — the only cascade in the model. For a tmux session this runs `kill-session`. |
@@ -46,26 +46,58 @@ xscore
 
 ### `session new` options
 
+The first link is described by **one URL**, so there are only two flags left:
+
 | Flag | Default | Meaning |
 |---|---|---|
-| `--empty` | – | Bare workspace: no link, no window, no pane. |
-| `--cmd <CMD>` | `$SHELL`, then `/bin/sh` | Command for the first pane. With `--tmux` it is a shell command line, run through `sh -c`. |
-| `--cwd <DIR>` | – | Working directory for the first pane. |
-| `--cols <COLS>` | `80` | First pane width in cells. |
-| `--rows <ROWS>` | `24` | First pane height in cells. |
-| `--tmux` | off | Make this a tmux session; xscore creates it and drives it through one `tmux -C` client. The tmux session is named after the xscore session. |
+| `-c, --config <CONFIG>` | – | Use a saved link template (`link config add`). A URL given as well overrides the template field by field. |
+| `--tmux` | off | Make this a tmux session; xscore creates it and drives it through one `tmux -C` client. The tmux session is named after the xscore session. **With this flag the URL names the tmux host**, not a pipe. |
 | `--socket <NAME>` | `$XSCORE_SOCKET`, then the default server | tmux server socket (`tmux -L <NAME>`). An explicit flag wins over the environment. |
-| `--ssh <DEST>` | – | Create the tmux session on this ssh host (implies `--tmux`). The system `ssh` is used, so `~/.ssh/config`, `ProxyJump` and your agent apply. |
+
+### URL grammar
+
+```
+shell://<command>[?cwd=…&cols=…&rows=…&name=…]
+serial://<device>?baud=<rate>[&data_bits=…&parity=…&stop_bits=…&cols=…&rows=…]
+ssh://<user>@<host>[:port][?identity=…&proxy=…&cols=…&rows=…]
+```
+
+With `--tmux` the positional is one of:
+
+```
+(omitted)                      the local default server
+ssh://[user@]host[:port][?identity=…&cmd=…&cwd=…&cols=…&rows=…]
+?cmd=…&cols=…&rows=…           local server, options only
+```
+
+| Key | Applies to | Meaning |
+|---|---|---|
+| `cwd` | `shell://`, `--tmux` | Working directory of the first pane. Refused for serial/ssh links, which have no shell of their own. |
+| `cols`, `rows` | everything | First pane size (default `80` × `24`). |
+| `name` | pipe links | Link name. |
+| `cmd` | `--tmux` | Command line for the first window, run through `sh -c`. |
+| `identity`, `proxy` | `ssh://` | As `link add`. |
+| `baud`, `data_bits`, `parity`, `stop_bits` | `serial://` | As `link add`. |
+
+Unknown keys are an error, not ignored — a typo like `col=120` would otherwise
+silently give you 80 columns.
 
 ### `session adopt` options
 
 `--socket <NAME>` and `--ssh <DEST>`, with the same meaning as above.
 
 ```bash
-xscore session new dev --cmd /bin/bash          # native, one command
-xscore session new work --tmux --cols 100 --rows 30
-xscore session new notes --empty                # a workspace with nothing in it
-xscore session adopt build --socket scratch     # take over an existing tmux session
+xscore session new dev                                  # $SHELL at 80x24
+xscore session new dev 'shell:///bin/bash?cwd=/var/log&cols=120&rows=40'
+xscore session new hw  'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30'
+xscore session new dev -c local                         # from a saved template
+
+xscore session new work --tmux                          # local tmux server
+xscore session new work --tmux '?cmd=htop'              # local, first window runs htop
+xscore session new work --tmux 'ssh://box?cols=120&rows=40'
+xscore session new work --tmux 'ssh://dev@box:2222?identity=~/.ssh/id_ed25519'
+
+xscore session adopt build --socket scratch             # take over an existing tmux session
 ```
 
 ---
@@ -98,6 +130,9 @@ serial). A tmux session's control link is created with the session, not with
 
 URL forms: `shell://` (local child in a pty), `serial://` (device, needs
 `?baud=…`), `ssh://` (channel, key auth). tmux is **not** a URL scheme.
+
+The same query parameters `session new` uses work here, because both parse one
+grammar: `cwd` (shell only), `cols`, `rows`, `name`. An unknown key is an error.
 
 ```bash
 xscore link add shell:///bin/bash --session dev
@@ -270,7 +305,7 @@ Exact messages, so `grep`-ing a log works:
 **A native session, then read and write its pane**
 
 ```bash
-out=$(xscore session new dev --cmd /bin/bash); echo "$out"
+out=$(xscore session new dev 'shell:///bin/bash'); echo "$out"
 pid=$(printf '%s\n' "$out" | awk '/^pane:/{print $NF}')
 
 printf 'pwd; echo "it works"\n' | xscore data write --pane "$pid"

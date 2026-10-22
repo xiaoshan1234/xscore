@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`session new` describes its first link with a URL.** The flags `--cmd`,
+  `--cwd`, `--cols`, `--rows` and `--empty` are gone; the command, working
+  directory and geometry are query parameters of the link URL, so the flags
+  that remain are `--tmux` and `--socket`, plus `-c` for a saved template:
+
+      xscore session new dev 'shell:///bin/bash?cwd=/var/log&cols=120&rows=40'
+      xscore session new dev                      # $SHELL at 80x24
+      xscore session new dev -c local             # from `link config add`
+      xscore session new work --tmux 'ssh://box'  # tmux on another host
+      xscore session new work --tmux '?cmd=htop'  # local tmux, first command
+
+  With `--tmux` the URL names the host rather than a pipe (`ssh://[user@]host`),
+  which replaces `--ssh`. A session always gets a link, window and pane, so
+  `--empty` no longer exists. `link add` accepts the same parameters, and an
+  unknown query key is now an error instead of being ignored.
+
 ### Fixed
 
 - `xscore daemon serve` no longer exits five seconds after being started. The

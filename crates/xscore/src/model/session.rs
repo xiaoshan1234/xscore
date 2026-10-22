@@ -214,9 +214,10 @@ pub enum SessionBackend {
 }
 
 /// Where the tmux server runs (ADR 0010 §6).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TmuxHostConfig {
+    #[default]
     Local,
     Ssh { destination: String, args: Vec<String> },
 }

@@ -33,8 +33,9 @@ Both backends end in the same place — a per-pane ring buffer in the daemon —
 cargo build --release
 
 # 2. A native session: one command, and it has a shell link, a window,
-#    a pane, and a 64 KiB buffer fed by a real pty.
-./target/release/xscore session new dev --cmd /bin/bash
+#    a pane, and a 64 KiB buffer fed by a real pty. The URL says what the
+#    link is; omit it for $SHELL.
+./target/release/xscore session new dev 'shell:///bin/bash?cwd=/tmp&cols=120&rows=40'
 # stdout:
 #   session: 0192...a1
 #   link:    0192...a2
@@ -162,9 +163,15 @@ A guided tour (build → first session → tmux → recipes): [`doc/user-guide/g
 Below is the shape of the surface.
 
 ```bash
-# Sessions — the workspace
-xscore session new <name> [--tmux [--socket S] [--ssh DEST]] [--empty]
-                          [--cmd C] [--cwd D] [--cols N --rows N]
+# Sessions — the workspace. The first link is one URL; pane settings
+# (cwd, cols, rows) ride in its query.
+xscore session new <name> [URL] [-c CONFIG] [--tmux] [--socket S]
+#   URL: shell:///bin/bash?cwd=/var/log&cols=120&rows=40
+#        serial:///dev/ttyUSB0?baud=115200
+#        ssh://user@host:22?identity=~/.ssh/id_ed25519
+#   --tmux: the URL names the tmux host instead
+#        xscore session new work --tmux 'ssh://box?cols=120'
+#        xscore session new work --tmux '?cmd=htop'
 xscore session adopt <name> [--socket S] [--ssh DEST]   # take over an existing tmux session
 xscore session ls                                       # windows / panes / links per session
 xscore session show <name>                              # the ids it owns
@@ -173,7 +180,7 @@ xscore session forget <name>                            # drop the rows, leave t
 xscore session rename <old> <new>
 
 # Windows — layout containers
-xscore window add --session <s> [--name N] [--cmd C] [--cwd D] [--cols C --rows R]
+xscore window add --session <s> [--name N] [--cols C --rows R]
 xscore window list [--session <s>]
 xscore window show --id <wid>
 xscore window del --id <wid>                            # panes survive as orphans
