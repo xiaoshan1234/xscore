@@ -185,11 +185,17 @@ Measured on tmux 3.5a, and the reasons the details matter:
 
 ## Commands
 
-Full flag-by-flag reference: [`doc/user-guide/commands.md`](doc/user-guide/commands.md).
-A guided tour (build → first session → tmux → recipes): [`doc/user-guide/getting-started.md`](doc/user-guide/getting-started.md).
-On Windows, `session new` defaults to the active WSL distribution. See
-[`doc/user-guide/wsl.md`](doc/user-guide/wsl.md) for named distributions,
-PowerShell quoting, path handling and the tmux boundary.
+Choose the guide for your runtime:
+
+- [`doc/user-guide/windows.md`](doc/user-guide/windows.md): native
+  `xscore.exe`, PowerShell 5.1/7, WSL shells, ConPTY and the Windows named-pipe
+  daemon.
+- [`doc/user-guide/linux.md`](doc/user-guide/linux.md): Linux or xscore running
+  inside WSL, including native shells, tmux, serial, SSH and the Unix-socket
+  daemon.
+
+Both guides include the current URL grammar, pane read/write commands and
+troubleshooting. Use `xscore <command> --help` for every remaining flag.
 Below is the shape of the surface.
 
 ```bash

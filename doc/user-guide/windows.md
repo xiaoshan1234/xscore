@@ -1,0 +1,300 @@
+# xscore on Windows
+
+This guide uses the native Windows `xscore.exe`. It can manage:
+
+- a WSL shell through `shell:///wsl`;
+- Windows PowerShell 5.1 through `shell:///powershell`;
+- PowerShell 7 through `shell:///pwsh`.
+
+All three use the same Shell transport over Windows ConPTY. The resident daemon
+runs as a Windows process and is reached through a per-user named pipe.
+
+For Linux, WSL-local tmux, serial devices and the Unix socket daemon, read
+[`linux.md`](linux.md).
+
+## Requirements
+
+- Windows 10 or Windows 11 with ConPTY.
+- Rust 1.95 or newer to build from source.
+- WSL is optional and is needed only for `shell:///wsl`.
+- `pwsh.exe` is optional and is needed only for `shell:///pwsh`.
+
+Check the programs you intend to use:
+
+```powershell
+wsl.exe --status
+powershell.exe -NoProfile -Command '$PSVersionTable.PSVersion'
+pwsh.exe -NoProfile -Command '$PSVersionTable.PSVersion'
+```
+
+## Build
+
+From the repository root:
+
+```powershell
+cargo build --release
+.\target\release\xscore.exe --help
+```
+
+Optionally install it into a directory on `PATH`:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\bin" | Out-Null
+Copy-Item .\target\release\xscore.exe "$env:USERPROFILE\bin\xscore.exe"
+```
+
+The examples below use `.\target\release\xscore.exe`; replace it with
+`xscore.exe` after installation.
+
+## Model
+
+```text
+Session  a workspace
+  Window a grouping container
+  Pane   a byte buffer and geometry; this is what you read and write
+  Link   one connection to a shell
+```
+
+`session new` creates a session with one window, one link and one pane. The
+daemon owns the live shell and pane buffer, so data survives across separate
+CLI invocations.
+
+## URL syntax
+
+There is one public shell scheme:
+
+```text
+shell:///<program-or-launcher>[?options]
+```
+
+Everything after `shell:///` is a path. The launchers used on Windows are:
+
+```text
+shell:///powershell
+shell:///pwsh
+shell:///wsl
+```
+
+Use three slashes. `shell://powershell` puts `powershell` in the URL authority
+and is rejected.
+
+### PowerShell
+
+```powershell
+# Windows PowerShell 5.1
+.\target\release\xscore.exe session new ps `
+  'shell:///powershell?cwd=C:/src&cols=120&rows=40'
+
+# PowerShell 7
+.\target\release\xscore.exe session new ps7 `
+  'shell:///pwsh?cwd=C:/src&cols=120&rows=40'
+```
+
+Use forward slashes in the URL. Single-quote the complete URL in PowerShell so
+that `&` is not interpreted by the shell.
+
+### WSL
+
+```powershell
+# Default distribution and its configured default shell
+.\target\release\xscore.exe session new wsl 'shell:///wsl'
+
+# Named distribution and inner Linux shell
+.\target\release\xscore.exe session new ubuntu `
+  'shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src'
+```
+
+WSL query parameters:
+
+| Key | Meaning |
+|---|---|
+| `distro` | WSL distribution. Omitted means the default distribution. |
+| `shell` | Linux shell inside WSL. Omitted means the distribution's default shell. |
+| `cwd` | Linux working directory, or a Windows path understood by `wsl.exe --cd`. |
+| `cols`, `rows` | Initial terminal size. |
+| `name` | Link display name. |
+
+`shell:///wsl?distro=Ubuntu&shell=/bin/bash` becomes:
+
+```text
+wsl.exe --distribution Ubuntu --exec /bin/bash
+```
+
+WSL can also be the default. On native Windows, running `session new` without a
+URL uses `shell:///wsl`.
+
+## Create and find a session
+
+```powershell
+$out = .\target\release\xscore.exe session new dev 'shell:///powershell'
+$out
+
+$pane = ($out -match '^pane:')[0] -replace '^pane:\s*', ''
+$link = ($out -match '^link:')[0] -replace '^link:\s*', ''
+```
+
+The same ids can be recovered later:
+
+```powershell
+.\target\release\xscore.exe session show dev
+.\target\release\xscore.exe pane list --session dev
+```
+
+`pane list` prints a `PANE ID` column. Copy that value for data operations.
+
+## Read from a pane
+
+```powershell
+.\target\release\xscore.exe data read --pane $pane --bytes 4096
+```
+
+Reading is non-destructive. It returns a snapshot of the newest requested bytes
+from the pane ring buffer; it does not drain or acknowledge the stream.
+
+The output is terminal bytes, not clean text. It can contain:
+
+- echoed input;
+- ANSI escape sequences;
+- `\r` line endings;
+- a PowerShell prompt.
+
+If no bytes have arrived, the command prints nothing.
+
+## Write to a pane
+
+In PowerShell, piping a string adds a line ending and executes it:
+
+```powershell
+'Get-Date' | .\target\release\xscore.exe data write --pane $pane
+.\target\release\xscore.exe data read --pane $pane --bytes 8192
+```
+
+Send multiple commands:
+
+```powershell
+'$PSVersionTable.PSVersion'
+'Get-Location'
+'Get-ChildItem' | .\target\release\xscore.exe data write --pane $pane
+```
+
+PowerShell turns the pipeline into newline-separated text before it reaches
+`xscore`.
+
+For exact bytes, use a file:
+
+```powershell
+Set-Content -Encoding ascii `
+  .\commands.txt `
+  -Value 'Get-Date', 'Get-Location'
+
+.\target\release\xscore.exe data write `
+  --pane $pane `
+  --from-file .\commands.txt
+```
+
+Without a line ending, a console shell receives the text but does not execute
+it as a command.
+
+### Control keys
+
+Control characters are ordinary bytes:
+
+```powershell
+[IO.File]::WriteAllBytes("$env:TEMP\ctrl-c.bin", [byte[]](3))
+.\target\release\xscore.exe data write `
+  --pane $pane `
+  --from-file "$env:TEMP\ctrl-c.bin"
+```
+
+This writes `Ctrl-C` (`0x03`). Use `0x04` for Ctrl-D.
+
+## Resize
+
+```powershell
+.\target\release\xscore.exe data resize --pane $pane --cols 120 --rows 40
+```
+
+The resize reaches the ConPTY and the child shell.
+
+## Daemon
+
+The daemon starts on demand:
+
+```powershell
+.\target\release\xscore.exe daemon status
+.\target\release\xscore.exe daemon stop
+```
+
+`daemon status` prints JSON to stdout. A stopped daemon:
+
+- loses all in-memory pane buffers;
+- closes live shell processes;
+- keeps session metadata in `state.json`.
+
+Reconnect a pipe pane after a daemon restart:
+
+```powershell
+.\target\release\xscore.exe pane attach --pane $pane --link $link
+```
+
+`pane attach` is also the reconnect operation. It recreates the saved shell
+transport when the daemon no longer holds it.
+
+## State locations
+
+| Item | Location |
+|---|---|
+| Session metadata | `%USERPROFILE%\.config\xscore\state\state.json` |
+| Link templates | `%USERPROFILE%\.config\xscore\links\` |
+| Daemon IPC | Per-user Windows named pipe derived from the config path |
+
+If `HOME` is set, it takes precedence over `USERPROFILE` for compatibility with
+tests and isolated environments.
+
+## Windows limitations
+
+- Local Windows tmux is not supported. Run xscore inside WSL for WSL-local tmux.
+- The native runner manages shell byte streams; it does not launch an extra
+  Windows Terminal window.
+- A pipe link serves one pane at a time. Attaching another pane auto-detaches
+  the previous one.
+- `cmd.exe` is not a documented launcher. Use PowerShell, `pwsh` or WSL.
+- `daemon stop` loses buffered output.
+
+## Troubleshooting
+
+### WSL reports `E_ACCESSDENIED`
+
+Run the command from a normal Windows Terminal or PowerShell session. Restricted
+execution sandboxes can prevent the WSL service from creating a Linux instance.
+
+### `pwsh.exe` is not found
+
+Install PowerShell 7 or use `shell:///powershell`.
+
+### The pane is empty
+
+Check that the child is still alive:
+
+```powershell
+.\target\release\xscore.exe daemon status
+.\target\release\xscore.exe pane show --id $pane
+```
+
+For a shell command, include a line ending or pipe a string through PowerShell.
+
+### The link reports that its transport died
+
+The daemon restarted or was stopped. Reconnect:
+
+```powershell
+.\target\release\xscore.exe pane attach --pane $pane --link $link
+```
+
+### Need exact command flags
+
+```powershell
+.\target\release\xscore.exe --help
+.\target\release\xscore.exe session new --help
+.\target\release\xscore.exe data write --help
+```
