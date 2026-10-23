@@ -181,7 +181,11 @@ async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<(
 /// The platform's default interactive shell.
 #[cfg(windows)]
 fn default_shell_url() -> String {
-    "shell:///wsl".into()
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let system_root = system_root
+        .trim_end_matches(['\\', '/'])
+        .replace('\\', "/");
+    format!("shell:///{system_root}/System32/wsl.exe")
 }
 
 /// `shell://<absolute path>` for $SHELL, falling back to /bin/sh.

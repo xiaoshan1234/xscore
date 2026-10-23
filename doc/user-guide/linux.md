@@ -4,7 +4,7 @@ This guide covers xscore running in Linux or inside WSL. The CLI owns session
 metadata, while a resident Unix-socket daemon owns live PTYs, serial devices,
 SSH channels, tmux control clients and pane buffers.
 
-For the native Windows executable, `shell:///powershell`, `shell:///pwsh` and
+For the native Windows executable, full PowerShell/WSL executable paths and
 the Windows named-pipe daemon, read [`windows.md`](windows.md).
 
 ## Requirements
@@ -59,13 +59,13 @@ xscore session new dev \
 ```
 
 When xscore itself runs inside WSL, `shell:///bin/bash` starts a shell in that
-same WSL instance. `shell:///wsl` is the native Windows launcher and is not
-needed from inside WSL.
+same WSL instance. The Windows path to `wsl.exe` belongs to the native Windows
+guide and is not needed from inside WSL.
 
 ### URL syntax
 
 ```text
-shell:///<program>[?cwd=...&cols=...&rows=...&name=...]
+shell:///<program>[?arg=...&cwd=...&cols=...&rows=...&name=...]
 serial:///<device>?baud=<rate>[&data_bits=...&parity=...&stop_bits=...]
 ssh://<user>@<host>[:port][?identity=...&proxy=...]
 ```
@@ -74,11 +74,18 @@ The path after `shell:///` is the shell program. Shell query parameters:
 
 | Key | Meaning |
 |---|---|
+| `arg` | One child-process argument. Repeat it for each argument. |
 | `cwd` | Working directory of the child process. |
 | `cols`, `rows` | Initial terminal size. |
 | `name` | Link display name. |
 
 Unknown query keys are errors.
+
+A login Bash shell:
+
+```bash
+xscore session new login 'shell:///bin/bash?arg=-l'
+```
 
 ## Find session and pane ids
 

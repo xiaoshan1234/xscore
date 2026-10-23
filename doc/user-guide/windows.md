@@ -2,9 +2,9 @@
 
 This guide uses the native Windows `xscore.exe`. It can manage:
 
-- a WSL shell through `shell:///wsl`;
-- Windows PowerShell 5.1 through `shell:///powershell`;
-- PowerShell 7 through `shell:///pwsh`.
+- a WSL shell through `shell:///C:/Windows/System32/wsl.exe`;
+- Windows PowerShell 5.1 through the full `powershell.exe` path;
+- PowerShell 7 through the full `pwsh.exe` path.
 
 All three use the same Shell transport over Windows ConPTY. The resident daemon
 runs as a Windows process and is reached through a per-user named pipe.
@@ -16,8 +16,8 @@ For Linux, WSL-local tmux, serial devices and the Unix socket daemon, read
 
 - Windows 10 or Windows 11 with ConPTY.
 - Rust 1.95 or newer to build from source.
-- WSL is optional and is needed only for `shell:///wsl`.
-- `pwsh.exe` is optional and is needed only for `shell:///pwsh`.
+- WSL is optional and is needed only for the `wsl.exe` launcher.
+- `pwsh.exe` is optional.
 
 Check the programs you intend to use:
 
@@ -64,15 +64,16 @@ CLI invocations.
 There is one public shell scheme:
 
 ```text
-shell:///<program-or-launcher>[?options]
+shell:///<executable-path>[?options]
 ```
 
-Everything after `shell:///` is a path. The launchers used on Windows are:
+`shell` is the protocol. Everything after `shell:///` is the executable path.
+There are no launcher keywords hidden in the path.
 
 ```text
-shell:///powershell
-shell:///pwsh
-shell:///wsl
+shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+shell:///C:/Program%20Files/PowerShell/7/pwsh.exe
+shell:///C:/Windows/System32/wsl.exe
 ```
 
 Use three slashes. `shell://powershell` puts `powershell` in the URL authority
@@ -83,11 +84,11 @@ and is rejected.
 ```powershell
 # Windows PowerShell 5.1
 .\target\release\xscore.exe session new ps `
-  'shell:///powershell?cwd=C:/src&cols=120&rows=40'
+  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40'
 
 # PowerShell 7
 .\target\release\xscore.exe session new ps7 `
-  'shell:///pwsh?cwd=C:/src&cols=120&rows=40'
+  'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40'
 ```
 
 Use forward slashes in the URL. Single-quote the complete URL in PowerShell so
@@ -97,36 +98,38 @@ that `&` is not interpreted by the shell.
 
 ```powershell
 # Default distribution and its configured default shell
-.\target\release\xscore.exe session new wsl 'shell:///wsl'
+.\target\release\xscore.exe session new wsl `
+  'shell:///C:/Windows/System32/wsl.exe'
 
 # Named distribution and inner Linux shell
 .\target\release\xscore.exe session new ubuntu `
-  'shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src'
+  'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash'
 ```
 
-WSL query parameters:
+Shell query parameters:
 
 | Key | Meaning |
 |---|---|
-| `distro` | WSL distribution. Omitted means the default distribution. |
-| `shell` | Linux shell inside WSL. Omitted means the distribution's default shell. |
-| `cwd` | Linux working directory, or a Windows path understood by `wsl.exe --cd`. |
+| `arg` | One child-process argument. Repeat it for every argument. |
+| `cwd` | Host process working directory. |
 | `cols`, `rows` | Initial terminal size. |
 | `name` | Link display name. |
 
-`shell:///wsl?distro=Ubuntu&shell=/bin/bash` becomes:
+For WSL, change the Linux directory through an explicit `--cd` argument rather
+than the host-process `cwd`. The named-distribution example expands to:
 
 ```text
-wsl.exe --distribution Ubuntu --exec /bin/bash
+wsl.exe --distribution Ubuntu --cd /home/me/src --exec /bin/bash
 ```
 
 WSL can also be the default. On native Windows, running `session new` without a
-URL uses `shell:///wsl`.
+URL uses `shell:///C:/Windows/System32/wsl.exe`.
 
 ## Create and find a session
 
 ```powershell
-$out = .\target\release\xscore.exe session new dev 'shell:///powershell'
+$out = .\target\release\xscore.exe session new dev `
+  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo'
 $out
 
 $pane = ($out -match '^pane:')[0] -replace '^pane:\s*', ''
@@ -270,7 +273,7 @@ execution sandboxes can prevent the WSL service from creating a Linux instance.
 
 ### `pwsh.exe` is not found
 
-Install PowerShell 7 or use `shell:///powershell`.
+Install PowerShell 7 or use the full Windows PowerShell executable path.
 
 ### The pane is empty
 

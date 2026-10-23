@@ -2561,6 +2561,7 @@ dependencies = [
  "clap",
  "dirs",
  "mockall",
+ "percent-encoding",
  "portable-pty",
  "russh",
  "russh-keys",

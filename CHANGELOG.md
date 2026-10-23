@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Native Windows shell sessions.** `shell:///wsl`,
-  `shell:///powershell` and `shell:///pwsh` start their selected process through
-  Windows ConPTY. The path after `shell:///` is always a program path or
-  recognized program name; WSL settings live in query parameters. All shell
-  profiles normalize to the existing `TransportConfig::Shell`.
-  `session new` defaults to `shell:///wsl` on Windows, and the resident daemon
-  uses a per-user Windows named pipe instead of a Unix socket.
+- **Native Windows shell sessions.** `shell://` is the protocol and the path
+  after `shell:///` is always the child executable path. `wsl.exe`,
+  `powershell.exe` and `pwsh.exe` are ordinary programs, not special launcher
+  keywords. Repeat the `arg=` query parameter to pass their arguments; all
+  shell-family URLs normalize to the existing `TransportConfig::Shell`.
+  `session new` defaults to the standard `wsl.exe` path on Windows, and the
+  resident daemon uses a per-user Windows named pipe instead of a Unix socket.
 
 ### Changed
 

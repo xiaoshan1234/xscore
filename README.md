@@ -89,7 +89,8 @@ Run this from PowerShell when `wsl.exe` is installed:
 
 ```powershell
 cargo build --release
-.\target\release\xscore.exe session new dev 'shell:///wsl?cols=120&rows=40'
+.\target\release\xscore.exe session new dev `
+  'shell:///C:/Windows/System32/wsl.exe?cols=120&rows=40'
 
 # Use the pane id printed above. The shell runs in WSL; the daemon runs on
 # Windows and is reached over a per-user named pipe.
@@ -97,11 +98,14 @@ cargo build --release
 .\target\release\xscore.exe data read --pane <pid>
 
 # Pick a distribution, shell and WSL directory explicitly.
-.\target\release\xscore.exe session new ubuntu 'shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src'
+.\target\release\xscore.exe session new ubuntu `
+  'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash'
 
 # Native Windows PowerShell 5.1 or PowerShell 7
-.\target\release\xscore.exe session new ps 'shell:///powershell?cwd=C:/src'
-.\target\release\xscore.exe session new ps7 'shell:///pwsh?cwd=C:/src'
+.\target\release\xscore.exe session new ps `
+  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src'
+.\target\release\xscore.exe session new ps7 `
+  'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src'
 ```
 
 ## The model
@@ -254,10 +258,10 @@ xscore state migrate        # v2 → v3, and old tmux links → control sessions
 
 | Scheme | Form | Example |
 |---|---|---|
-| `shell://` | a program path or recognized launcher in a PTY/ConPTY | `shell:///bin/bash` |
-| `shell:///wsl` | WSL shell | `shell:///wsl?distro=Ubuntu&shell=/bin/bash` |
-| `shell:///powershell` | Windows PowerShell 5.1 | `shell:///powershell?cwd=C:/src` |
-| `shell:///pwsh` | PowerShell 7 | `shell:///pwsh?cwd=C:/src` |
+| `shell://` | an executable path in a PTY/ConPTY | `shell:///bin/bash` |
+| `shell:///C:/Windows/System32/wsl.exe` | WSL shell | `shell:///C:/Windows/System32/wsl.exe` |
+| `shell:///.../powershell.exe` | Windows PowerShell 5.1 | `shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe` |
+| `shell:///.../pwsh.exe` | PowerShell 7 | `shell:///C:/Program%20Files/PowerShell/7/pwsh.exe` |
 | `serial://` | serial device | `serial:///dev/ttyUSB0?baud=115200&data_bits=8&parity=n&stop_bits=1` |
 | `ssh://` | SSH channel (key auth) | `ssh://user@host:22?identity=~/.ssh/id_ed25519` |
 
@@ -266,11 +270,10 @@ tmux is not a URL scheme. A tmux session is a workspace: `session new --tmux`
 
 All shell-family URLs normalize to `TransportConfig::Shell { command, args,
 cwd }`; WSL and PowerShell do not add transport variants. The path after
-`shell:///` is always the program path or a recognized program name. For
-`shell:///wsl`, optional query parameters are `distro`, `shell`, `cwd`, `cols`,
-`rows` and `name`. Omitting the inner `shell` starts the distribution's
-configured default shell. `shell:///powershell` and `shell:///pwsh` accept
-`cwd`, `cols`, `rows` and `name`.
+`shell:///` is always the child executable path. Repeat `arg=` to pass
+child-process arguments; use `cwd`, `cols`, `rows` and `name` for generic pane
+and process settings. For WSL, pass `wsl.exe` options through repeated `arg=`
+parameters, including `--distribution`, `--exec` and `--cd`.
 
 ## Architecture
 
@@ -368,8 +371,8 @@ crates/xscore/src/
                buffer (per-pane ring buffer)
   model/       SessionInfo, SessionBackend, TmuxHostConfig, TmuxSocket,
                LinkInfo, EndpointRef, WindowInfo, WindowBackend, PaneInfo
-  transport/   Transport trait, shell (pty), launcher, serial, ssh, factory,
-               Noop
+  transport/   Transport trait, shell (pty), Shell argv builder, serial, ssh,
+               factory, Noop
   tmux/        control (the -C client), protocol (parser), format (-F parsers,
                send_keys_literal, structure queries)
   backends/    PaneBridge trait, DaemonBridge / DirectBridge / ControlBridge

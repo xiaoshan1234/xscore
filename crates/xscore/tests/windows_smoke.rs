@@ -112,7 +112,12 @@ fn powershell_session_roundtrips_through_shell_transport() {
     let created = command(
         &exe,
         home.path(),
-        &["session", "new", "ps", "shell:///powershell"],
+        &[
+            "session",
+            "new",
+            "ps",
+            "shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo",
+        ],
     )
     .output()
     .expect("create PowerShell session");

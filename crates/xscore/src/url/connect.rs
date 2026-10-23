@@ -2,6 +2,7 @@
 use crate::core::{Error, LinkAddress, Result};
 use crate::model::{ConnectSpec, TmuxHostConfig, TransportConfig};
 use crate::transport::launcher::ShellLaunch;
+use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 
 /// Settings that describe the *pane* the link is first shown in, rather than
@@ -40,8 +41,19 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
     let host = url.host_str().map(|s| s.to_string());
     let user = (!url.username().is_empty()).then(|| url.username().to_string());
 
+    let args: Vec<String> = url
+        .query_pairs()
+        .filter(|(key, _)| key == "arg")
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    if scheme != "shell" && !args.is_empty() {
+        return Err(Error::Url(
+            "the `arg` query parameter applies only to shell:// URLs".into(),
+        ));
+    }
     let mut pairs: HashMap<String, String> = url
         .query_pairs()
+        .filter(|(key, _)| key != "arg")
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
     let name = pairs.remove("name").unwrap_or_default();
@@ -52,36 +64,16 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
             if host.is_some() || user.is_some() || url.port().is_some() {
                 return Err(Error::Url(
                     "shell URL takes its program in the path; use \
-                     shell:///wsl, not shell://wsl"
+                     shell:///<executable-path>, not shell://executable"
                         .into(),
                 ));
             }
-            let command = url.path().to_string();
+            let command = decode_shell_path(url.path());
             if command.is_empty() || command == "/" {
                 return Err(Error::Url("shell URL needs command".into()));
             }
-            match command.trim_start_matches('/').to_ascii_lowercase().as_str() {
-                "wsl" | "wsl.exe" => {
-                    let distribution = pairs.remove("distro").filter(|value| !value.is_empty());
-                    let shell = pairs.remove("shell").filter(|value| !value.is_empty());
-                    let launch = ShellLaunch::wsl(distribution, shell, pane.cwd.clone());
-                    pane.cwd = None;
-                    (launch.transport(), launch.address())
-                }
-                "powershell" | "powershell.exe" => {
-                    let launch = ShellLaunch::powershell(None, pane.cwd.clone())?;
-                    (launch.transport(), launch.address())
-                }
-                "pwsh" | "pwsh.exe" => {
-                    let launch = ShellLaunch::powershell(Some("pwsh"), pane.cwd.clone())?;
-                    (launch.transport(), launch.address())
-                }
-                _ => {
-                    let cwd = pane.cwd.clone();
-                    let launch = ShellLaunch::local(command, Vec::new(), cwd);
-                    (launch.transport(), launch.address())
-                }
-            }
+            let launch = ShellLaunch::new(command, args.clone(), pane.cwd.clone());
+            (launch.transport(), launch.address())
         }
         "serial" => {
             let path = url.path().to_string();
@@ -246,6 +238,23 @@ fn query_map(query: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// A URL path is percent-encoded. Windows drive paths appear as `/C:/...`
+/// inside `shell:///`; remove only that transport slash before handing the
+/// program to the Windows process spawner.
+fn decode_shell_path(path: &str) -> String {
+    let decoded = percent_decode_str(path).decode_utf8_lossy().into_owned();
+    let bytes = decoded.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+    {
+        decoded[1..].to_string()
+    } else {
+        decoded
+    }
+}
+
 fn take_pane_params(pairs: &mut HashMap<String, String>) -> Result<PaneParams> {
     let mut pane = PaneParams {
         // `C:\Users` is what a WSL user copies out of Explorer; translate it
@@ -335,16 +344,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_wsl_url_with_distribution_shell_and_cwd() {
-        let (spec, addr, pane) =
-            parse_with_pane(
-                "shell:///wsl?distro=Ubuntu&shell=/bin/bash&cwd=/home/me/src&cols=120",
-            )
-                .unwrap();
+    fn parse_wsl_executable_with_repeated_args() {
+        let (spec, addr, pane) = parse_with_pane(
+            "shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu\
+             &arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash&cols=120",
+        )
+        .unwrap();
         assert_eq!(
             spec.transport,
             TransportConfig::Shell {
-                command: "wsl.exe".into(),
+                command: "C:/Windows/System32/wsl.exe".into(),
                 args: vec![
                     "--distribution".into(),
                     "Ubuntu".into(),
@@ -359,7 +368,7 @@ mod tests {
         assert_eq!(
             addr,
             LinkAddress::Shell {
-                command: "wsl.exe".into(),
+                command: "C:/Windows/System32/wsl.exe".into(),
                 args: vec![
                     "--distribution".into(),
                     "Ubuntu".into(),
@@ -370,17 +379,17 @@ mod tests {
                 ],
             }
         );
-        assert_eq!(pane.cwd, None);
         assert_eq!(pane.cols, Some(120));
     }
 
     #[test]
-    fn parse_wsl_url_defaults_to_default_distribution_and_shell() {
-        let (spec, addr, _) = parse_with_pane("shell:///wsl").unwrap();
+    fn parse_wsl_executable_without_args() {
+        let (spec, addr, _) =
+            parse_with_pane("shell:///C:/Windows/System32/wsl.exe").unwrap();
         assert_eq!(
             spec.transport,
             TransportConfig::Shell {
-                command: "wsl.exe".into(),
+                command: "C:/Windows/System32/wsl.exe".into(),
                 args: vec![],
                 cwd: None,
             }
@@ -388,49 +397,41 @@ mod tests {
         assert_eq!(
             addr,
             LinkAddress::Shell {
-                command: "wsl.exe".into(),
+                command: "C:/Windows/System32/wsl.exe".into(),
                 args: vec![],
             }
         );
     }
 
     #[test]
-    fn shell_url_refuses_authority_and_unknown_wsl_options() {
-        let err = parse("shell://wsl").unwrap_err().to_string();
-        assert!(err.contains("shell:///wsl"), "{err}");
-        assert!(parse("shell:///wsl?frontend=foo").is_err());
+    fn shell_url_refuses_authority_and_unknown_options() {
+        let err = parse("shell://bash").unwrap_err().to_string();
+        assert!(err.contains("shell:///"), "{err}");
+        assert!(parse("shell:///bin/bash?frontend=foo").is_err());
     }
 
     #[test]
-    fn powershell_schemes_normalize_to_shell() {
-        let (legacy, address, pane) =
-            parse_with_pane("shell:///powershell?cwd=/tmp&cols=120").unwrap();
+    fn shell_path_is_percent_decoded_and_args_are_preserved() {
+        let (spec, address, pane) = parse_with_pane(
+            "shell:///C:/Program%20Files/PowerShell/7/pwsh.exe\
+             ?arg=-NoLogo&arg=-NoProfile&cwd=/tmp&cols=120",
+        )
+        .unwrap();
         assert_eq!(
-            legacy.transport,
+            spec.transport,
             TransportConfig::Shell {
-                command: "powershell.exe".into(),
-                args: vec!["-NoLogo".into()],
+                command: "C:/Program Files/PowerShell/7/pwsh.exe".into(),
+                args: vec!["-NoLogo".into(), "-NoProfile".into()],
                 cwd: Some("/tmp".into()),
             }
         );
         assert_eq!(address.kind(), "shell");
         assert_eq!(pane.cwd, None);
-
-        let (modern, _, _) = parse_with_pane("shell:///pwsh").unwrap();
-        assert_eq!(
-            modern.transport,
-            TransportConfig::Shell {
-                command: "pwsh.exe".into(),
-                args: vec!["-NoLogo".into()],
-                cwd: None,
-            }
-        );
     }
 
     #[test]
-    fn powershell_refuses_unknown_options() {
-        assert!(parse("shell:///powershell?edition=8").is_err());
-        assert!(parse("shell:///pwsh?shell=/bin/bash").is_err());
+    fn argument_query_is_shell_only() {
+        assert!(parse("serial:///dev/ttyUSB0?baud=9600&arg=x").is_err());
     }
 
     #[test]

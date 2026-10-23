@@ -420,9 +420,10 @@ embedding caller) the same slot sits in the manager instead.
 
 On Unix the endpoint is a private Unix socket. On native Windows it is a
 per-user named pipe derived from the same config path; both carry the same
-length-prefixed JSON protocol. `shell:///wsl`, `shell:///powershell` and
-`shell:///pwsh` are launch profiles that normalize to the same Shell transport,
-which preserves the daemon and pane buffer model.
+length-prefixed JSON protocol. Windows WSL and PowerShell sessions use
+`shell:///<absolute executable path>` with repeated `arg=` parameters. They
+normalize to the same Shell transport, preserving the daemon and pane buffer
+model without special launcher path names.
 
 ## 6. tmux over SSH
 
@@ -699,8 +700,8 @@ crates/xscore/src/
   backends/    PaneBridge: DirectBridge (a pipe's pump + buffer),
                DaemonBridge (the daemon owns both), ControlBridge (a pane on
                its session's control client)
-  transport/   Transport trait, shell, launcher (WSL/PowerShell argv), serial,
-               ssh, NoopTransport, DaemonTransport
+  transport/   Transport trait, shell, Shell argv builder, serial, ssh,
+               NoopTransport, DaemonTransport
   tmux/        TmuxControl (spawn, reader/writer threads, correlation),
                protocol (pure parsing), format (the -F parsers and the command
                lines: send-keys, new-window, split-window, resize-pane)
