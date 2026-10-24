@@ -160,7 +160,7 @@ twice invites "this pane is a tmux pane but its link is a pty". The pane keeps
 | `?tmux=on\|auto\|local\|remote` | same, and it never worked for `remote` |
 | `Sink::capacity` / `grant` / `revoke`, `RawSink`, `TmuxSink: Sink` | keys are assigned by tmux |
 | `Link.active_pane` (Q1 ledger) | a `Pipe` link has one reader; a `Control` link addresses by key |
-| `link open` / `link close` | `session attach` / `session kill` / `session forget` |
+| `link open` / `link close` | `session attach` / `session kill` / `session detach` |
 | `link sync [--heal]` | events replace reconciliation |
 | `WindowLayout` | no consumer |
 | `WindowInfo.tmux_window_handle`, `PaneInfo.sink_handle`, `PaneBackend` | folded into `WindowBackend::Tmux` and `link_key` |
@@ -179,7 +179,7 @@ each existing raw link becomes a `Session{Native}`.
 
 - **`link del` is refused for a `Control` link.** Every pane in the session
   routes through it; deleting it would leave them with buffers and no way back.
-  Teardown is `session kill` (destroy) or `session forget` (stop managing).
+  Teardown is `session kill` (destroy) or `session detach` (stop managing).
 - **`link add` is rejected inside a tmux session**, and `link ls --session work`
   prints exactly one row. There is one connection to a server.
 - **`pane new` in a tmux session no longer creates a link** — it inserts a pane

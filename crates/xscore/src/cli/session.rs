@@ -1,6 +1,6 @@
 // cli/session.rs (v0.6.0 — the Session tier, ADR 0010 §1, §10)
 //
-// `xscore session {ls,new,show,adopt,kill,forget,rename}`: the workspace verbs.
+// `xscore session {list,new,attach,show,kill,detach,rename}`: the workspace verbs.
 //
 // `session new` is the one-command path. A native session immediately gets a
 // first link, window and pane so the common case is a single invocation
@@ -10,13 +10,13 @@
 // creates it (`new-session -d`), attaches the one control client that is its
 // link, and mirrors what tmux reports back; the URL then names the host.
 //
-// `session adopt` takes over a tmux session that already exists — the only
+// `session attach` takes over a tmux session that already exists — the only
 // difference from `new --tmux` is that the server side is not created, and is
 // therefore never destroyed on a failed attach.
 //
-// `kill` destroys the backend and the rows; `forget` only drops the rows and
+// `kill` destroys the backend and the rows; `detach` only drops the rows and
 // leaves tmux running. For a native session the two cannot differ — the daemon
-// IS the backend — so `forget` refuses.
+// IS the backend — so `detach` refuses.
 use crate::core::{Error, SessionId, SessionManager, TmuxCreateOptions};
 use crate::model::{SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket};
 use crate::util::resolve_socket;
@@ -26,7 +26,7 @@ use std::sync::Arc;
 #[derive(Subcommand)]
 pub enum SessionCmd {
     /// List sessions with the number of windows, panes and links each owns.
-    Ls,
+    List,
 
     /// Create a session. Native by default; `--tmux` makes it a real tmux
     /// session driven through one control client. The first link is described
@@ -34,8 +34,8 @@ pub enum SessionCmd {
     /// 80x24), so every session starts with a link, a window and a pane.
     New(SessionNewArgs),
 
-    /// Take over a tmux session that already exists.
-    Adopt(SessionAdoptArgs),
+    /// Attach to an existing tmux session.
+    Attach(SessionAttachArgs),
 
     /// Print a session and the ids of its windows, panes and links.
     Show { name: String },
@@ -43,8 +43,8 @@ pub enum SessionCmd {
     /// Destroy a session and everything in it (the only cascade in the model).
     Kill { name: String },
 
-    /// Drop xscore's rows for a tmux session and leave tmux running.
-    Forget { name: String },
+    /// Detach from a tmux session: drop xscore's rows and leave tmux running.
+    Detach { name: String },
 
     /// Rename a session.
     Rename { old: String, new: String },
@@ -88,7 +88,7 @@ pub struct SessionNewArgs {
 }
 
 #[derive(Args)]
-pub struct SessionAdoptArgs {
+pub struct SessionAttachArgs {
     /// The existing tmux session's name; also the xscore session name.
     pub name: String,
 
@@ -104,17 +104,17 @@ pub struct SessionAdoptArgs {
 
 pub async fn run(mgr: Arc<SessionManager>, cmd: SessionCmd) -> anyhow::Result<()> {
     match cmd {
-        SessionCmd::Ls => ls(mgr).await,
+        SessionCmd::List => list(mgr).await,
         SessionCmd::New(args) => new(mgr, args).await,
-        SessionCmd::Adopt(args) => adopt(mgr, args).await,
+        SessionCmd::Attach(args) => attach(mgr, args).await,
         SessionCmd::Show { name } => show(mgr, &name).await,
         SessionCmd::Kill { name } => kill(mgr, &name).await,
-        SessionCmd::Forget { name } => forget(mgr, &name).await,
+        SessionCmd::Detach { name } => detach(mgr, &name).await,
         SessionCmd::Rename { old, new } => rename(mgr, &old, &new).await,
     }
 }
 
-async fn ls(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
+async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
     println!(
         "{:<36}  {:<24}  {:<24}  {:<7}  {:<5}  {:<5}",
         "SESSION ID", "NAME", "BACKEND", "WINDOWS", "PANES", "LINKS"
@@ -228,7 +228,7 @@ async fn new_tmux(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Res
     Ok(())
 }
 
-async fn adopt(mgr: Arc<SessionManager>, args: SessionAdoptArgs) -> anyhow::Result<()> {
+async fn attach(mgr: Arc<SessionManager>, args: SessionAttachArgs) -> anyhow::Result<()> {
     let socket = resolve_socket(args.socket.as_deref());
     let host = host_from(args.ssh.as_deref());
     let sid = mgr.adopt_tmux_session(&args.name, host, socket).await?;
@@ -316,10 +316,10 @@ async fn kill(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn forget(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
+async fn detach(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
     let sid = resolve(&mgr, name).await?;
-    mgr.forget_session(sid).await?;
-    println!("forgot session: {sid}");
+    mgr.detach_session(sid).await?;
+    println!("detached session: {sid}");
     Ok(())
 }
 

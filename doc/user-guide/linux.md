@@ -7,6 +7,8 @@ SSH channels, tmux control clients and pane buffers.
 For the native Windows executable, full PowerShell/WSL executable paths and
 the Windows named-pipe daemon, read [`windows.md`](windows.md).
 
+For every command and flag, read [`commands.md`](commands.md).
+
 ## Requirements
 
 - Rust 1.95 or newer to build from source.
@@ -91,7 +93,7 @@ xscore session new login 'shell:///bin/bash?arg=-l'
 
 ```bash
 xscore session show dev
-xscore session ls
+xscore session list
 xscore pane list --session dev
 ```
 
@@ -214,7 +216,7 @@ Take over an existing tmux session:
 
 ```bash
 tmux new-session -d -s build
-xscore session adopt build
+xscore session attach build
 xscore pane list --session build
 ```
 
@@ -250,14 +252,14 @@ Choose a private tmux socket:
 
 ```bash
 xscore session new work --tmux --socket scratch
-XSCORE_SOCKET=scratch xscore session adopt work
+XSCORE_SOCKET=scratch xscore session attach work
 ```
 
 End a tmux session:
 
 ```bash
 xscore session kill work    # kills the tmux session
-xscore session forget work  # leaves tmux running, drops xscore rows
+xscore session detach work  # leaves tmux running, drops xscore rows
 ```
 
 Remote tmux uses the system `ssh` command, so `~/.ssh/config`, `ProxyJump` and
@@ -346,7 +348,7 @@ xscore state migrate
 ### `session not found`
 
 ```bash
-xscore session ls
+xscore session list
 ```
 
 ### The pane is not attached

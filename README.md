@@ -20,7 +20,7 @@ Both backends end in the same place — a per-pane ring buffer in the daemon —
 
 > **v0.6.0 — what changed.** There is a `Session` tier (a workspace that owns
 > windows, panes and links; ADR 0010). tmux is no longer a per-link option:
-> `?tmux=on` is gone, `session new --tmux` / `session adopt` make a tmux
+> `?tmux=on` is gone, `session new --tmux` / `session attach` make a tmux
 > session, and it is driven through **control mode** (`tmux -C`), so a pane is
 > a byte stream rather than a `capture-pane` snapshot. The daemon now owns tmux
 > control clients too, which is why pane data survives the CLI process.
@@ -141,7 +141,7 @@ another link, and `link del` is refused for a control link.
 |---|---|---|
 | session / window / pane / link rows, bindings | CLI → `state.json` | `session kill`, `link del`, `pane del` |
 | pipe transports (pty child / serial fd / ssh channel) | daemon | `link del`, `daemon stop` |
-| **tmux control client** (`tmux -C attach`) | daemon | `session kill/forget`, `daemon stop` |
+| **tmux control client** (`tmux -C attach`) | daemon | `session kill/detach`, `daemon stop` |
 | pane ring buffers (64 KiB, both kinds) | daemon | `pane del`, `daemon stop` (memory only) |
 | tmux structure (windows, panes, layout) | tmux | tmux |
 
@@ -198,8 +198,9 @@ Choose the guide for your runtime:
   inside WSL, including native shells, tmux, serial, SSH and the Unix-socket
   daemon.
 
-Both guides include the current URL grammar, pane read/write commands and
-troubleshooting. Use `xscore <command> --help` for every remaining flag.
+The complete command and flag reference is
+[`doc/user-guide/commands.md`](doc/user-guide/commands.md). The platform guides
+include setup, pane read/write examples and troubleshooting.
 Below is the shape of the surface.
 
 ```bash
@@ -212,11 +213,11 @@ xscore session new <name> [URL] [-c CONFIG] [--tmux] [--socket S]
 #   --tmux: the URL names the tmux host instead
 #        xscore session new work --tmux 'ssh://box?cols=120'
 #        xscore session new work --tmux '?cmd=htop'
-xscore session adopt <name> [--socket S] [--ssh DEST]   # take over an existing tmux session
-xscore session ls                                       # windows / panes / links per session
+xscore session attach <name> [--socket S] [--ssh DEST]   # attach to an existing tmux session
+xscore session list                                     # windows / panes / links per session
 xscore session show <name>                              # the ids it owns
 xscore session kill <name>                              # the only cascade
-xscore session forget <name>                            # drop the rows, leave tmux running
+xscore session detach <name>                            # drop the rows, leave tmux running
 xscore session rename <old> <new>
 
 # Windows — layout containers
@@ -266,7 +267,7 @@ xscore state migrate        # v2 → v3, and old tmux links → control sessions
 | `ssh://` | SSH channel (key auth) | `ssh://user@host:22?identity=~/.ssh/id_ed25519` |
 
 tmux is not a URL scheme. A tmux session is a workspace: `session new --tmux`
-(or `session adopt`), not `link add`.
+(or `session attach`), not `link add`.
 
 All shell-family URLs normalize to `TransportConfig::Shell { command, args,
 cwd }`; WSL and PowerShell do not add transport variants. The path after
@@ -315,7 +316,7 @@ A pane reaches its bytes through a `PaneBridge`:
   work, `data resize` reaches `TIOCSWINSZ`.
 - tmux sessions through control mode: one link per session, `%output %N` streamed
   into per-pane buffers, `send-keys` writes with exact escaping, structure read
-  from tmux on touch, `session adopt` for a session someone else created.
+  from tmux on touch, `session attach` for a session someone else created.
 - The daemon owns both kinds of live connection, so `data read` is a *stream*
   across CLI invocations (`daemon status` shows the tmux slot and its byte count).
 - `state migrate` upgrades a v2 file, and converts old `?tmux=on` links into

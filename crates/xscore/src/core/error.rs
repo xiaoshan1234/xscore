@@ -20,9 +20,9 @@ pub enum Error {
 
     /// A native session IS this process's backend (its links are daemon-owned
     /// pipes). There is nothing to "stop managing" without destroying it, so
-    /// `session forget` points at the truthful verb instead.
+    /// `session detach` points at the truthful verb instead.
     #[error("session {0} is native — this process owns it; use `session kill`")]
-    ForgetNativeSession(SessionId),
+    DetachNativeSession(SessionId),
 
     /// Invariant guard (arch.md §8): a child may only be bound to another child
     /// of the SAME session. Carries `what` ("pane", "window", "link") so the
@@ -101,8 +101,8 @@ pub enum Error {
 
     /// `session new --tmux` names the tmux session after the xscore session, so
     /// an existing tmux session of that name would be adopted by accident.
-    /// `session adopt` is the verb that says "this one already exists".
-    #[error("a tmux session named `{0}` already exists; use `xscore session adopt {0}` to manage it")]
+    /// `session attach` is the verb that says "this one already exists".
+    #[error("a tmux session named `{0}` already exists; use `xscore session attach {0}` to manage it")]
     TmuxSessionExists(String),
 
     /// The host was reachable but the session is not there (arch.md §6). Rows
@@ -125,8 +125,8 @@ pub enum Error {
 
     /// ADR 0010 §D5: deleting a `Control` link would orphan every pane in the
     /// session into a buffer with no way back. Teardown is `session kill`
-    /// (destroy) or `session forget` (stop managing).
-    #[error("link {0} is a tmux control link; use `session kill` or `session forget` instead")]
+    /// (destroy) or `session detach` (stop managing).
+    #[error("link {0} is a tmux control link; use `session kill` or `session detach` instead")]
     ControlLinkNotDeletable(LinkId),
 
     /// A control-mode operation was attempted on a session whose backend is

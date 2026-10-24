@@ -12,6 +12,8 @@ runs as a Windows process and is reached through a per-user named pipe.
 For Linux, WSL-local tmux, serial devices and the Unix socket daemon, read
 [`linux.md`](linux.md).
 
+For every command and flag, read [`commands.md`](commands.md).
+
 ## Requirements
 
 - Windows 10 or Windows 11 with ConPTY.

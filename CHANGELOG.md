@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Session takeover verbs are `attach` and `detach`.** `session adopt` is now
+  `session attach`; `session forget` is now `session detach`. The latter still
+  drops xscore rows and leaves tmux running.
+- **`session ls` is now `session list`.** The old short verb is no longer
+  accepted.
 - **A `cwd` that does not exist is refused.** It used to be accepted and then
   silently ignored — portable-pty falls back to `$HOME` when the child cannot
   `chdir`, so `?cwd=/nope` produced a session in your home directory with no

@@ -20,7 +20,7 @@
 // `detach_pane` never touches a shared transport (P0-a) and refuses for panes
 // that tmux owns (they are addressed by `link_key`). `del_link` on a `Pipe`
 // link orphans its panes and keeps their buffers; a `Control` link cannot be
-// deleted at all — `session kill` / `session forget` are the verbs.
+// deleted at all — `session kill` / `session detach` are the verbs.
 //
 // v0.6.0 PR3b (ADR 0010 §D2) added tmux-backed sessions: `create_tmux_session`
 // / `adopt_tmux_session` give a session ONE `tmux -C attach` client, which is
@@ -421,21 +421,21 @@ impl SessionManager {
     ///
     /// Only meaningful for tmux: the tmux server keeps running and the session
     /// stays in `tmux ls`; xscore just drops its rows. A native session has no
-    /// backend outside this process, so "forget" would silently mean "kill" —
+    /// backend outside this process, so "detach" would silently mean "kill" —
     /// refuse instead.
-    pub async fn forget_session(&self, id: SessionId) -> Result<()> {
+    pub async fn detach_session(&self, id: SessionId) -> Result<()> {
         let session = self
             .sessions
             .get(id)
             .await
             .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
         if !session.info.is_tmux() {
-            return Err(Error::ForgetNativeSession(id));
+            return Err(Error::DetachNativeSession(id));
         }
 
         // Detach: the control client is closed (in daemon mode: `CloseTmux`,
         // which drops the slot and therefore its buffers), and tmux keeps
-        // running (arch.md §8, "session forget leaves the backend running").
+        // running (arch.md §8, "session detach leaves the backend running").
         match &self.daemon {
             Some(client) => {
                 let _ = client.close_tmux(id).await;
@@ -514,7 +514,7 @@ impl SessionManager {
     /// Create a real tmux session and manage it.
     ///
     /// The tmux session is named after the xscore session: two names for one
-    /// thing would drift, and `session adopt` is the verb for a session that
+    /// thing would drift, and `session attach` is the verb for a session that
     /// already exists under its own name.
     pub async fn create_tmux_session(
         &self,
@@ -772,7 +772,7 @@ impl SessionManager {
             // Rows first, so nothing points at a session that is about to go.
             // An adopted session is left running: the user's tmux was there
             // before us, and a failed *adoption* must not destroy it.
-            let _ = self.forget_session(sid).await;
+            let _ = self.detach_session(sid).await;
             if created {
                 let _ = self
                     .run_tmux(
@@ -1582,7 +1582,7 @@ impl SessionManager {
     /// * pipe link: orphan every attached pane (buffer kept), close the
     ///   transport ONCE, remove the link.
     /// * control link: refused (ADR 0010 §D5) — see `del_session` /
-    ///   `forget_session` for the two verbs that do tear a tmux session down.
+    ///   `detach_session` for the two verbs that do tear a tmux session down.
     pub async fn del_link(&self, id: LinkId) -> Result<()> {
         let arc_link = self.links.get(id).await.ok_or(Error::LinkNotFound(id))?;
 

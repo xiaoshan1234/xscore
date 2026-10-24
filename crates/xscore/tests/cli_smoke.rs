@@ -1246,7 +1246,7 @@ fn xscore_daemon_survives_sighup() {
 //
 // A session owns links, windows and panes; every child carries `session_id`.
 // `session new` is the one-command path (first link + window + pane), `kill`
-// is the only cascade, and `forget` only applies to tmux-backed sessions.
+// is the only cascade, and `detach` only applies to tmux-backed sessions.
 
 #[test]
 fn xscore_session_new_creates_window_link_and_pane() {
@@ -1324,9 +1324,9 @@ fn xscore_session_new_refuses_a_missing_cwd() {
     assert!(err.contains("is not a directory"), "got: {err}");
 
     // Refused before anything was created.
-    let ls = xscore().args(["session", "ls"]).output().unwrap();
+    let list = xscore().args(["session", "list"]).output().unwrap();
     assert_eq!(
-        String::from_utf8_lossy(&ls.stdout).lines().count(),
+        String::from_utf8_lossy(&list.stdout).lines().count(),
         1,
         "only the header should be there"
     );
@@ -1417,13 +1417,13 @@ fn xscore_session_new_url_errors_are_specific() {
     assert!(err.contains("takes no path"), "got: {err}");
 
     // Nothing was created by either failure.
-    let ls = xscore().args(["session", "ls"]).output().unwrap();
-    assert_eq!(String::from_utf8_lossy(&ls.stdout).lines().count(), 1);
+    let list = xscore().args(["session", "list"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&list.stdout).lines().count(), 1);
 }
 
 #[test]
-fn xscore_session_ls_lists_it() {
-    let name = "session_ls";
+fn xscore_session_list_lists_it() {
+    let name = "session_list";
     let xscore = || xscore_for(name);
 
     let new = xscore()
@@ -1433,7 +1433,7 @@ fn xscore_session_ls_lists_it() {
     assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
     let sid = parse_id_from_stdout(&new.stdout, "session");
 
-    let list = xscore().args(["session", "ls"]).output().unwrap();
+    let list = xscore().args(["session", "list"]).output().unwrap();
     assert!(ok(&list));
     let s = String::from_utf8_lossy(&list.stdout);
     assert!(s.contains("SESSION ID"), "missing header: {s}");
@@ -1456,7 +1456,7 @@ fn xscore_session_kill_cascades() {
     assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
 
     // No sessions left...
-    let sessions = xscore().args(["session", "ls"]).output().unwrap();
+    let sessions = xscore().args(["session", "list"]).output().unwrap();
     let s = String::from_utf8_lossy(&sessions.stdout);
     assert!(!s.contains("work"), "session still listed: {s}");
     assert_eq!(s.lines().count(), 1, "only the header should remain: {s}");
@@ -1470,8 +1470,8 @@ fn xscore_session_kill_cascades() {
 }
 
 #[test]
-fn xscore_session_forget_native_is_refused() {
-    let name = "session_forget_native";
+fn xscore_session_detach_native_is_refused() {
+    let name = "session_detach_native";
     let xscore = || xscore_for(name);
 
     let new = xscore()
@@ -1480,20 +1480,20 @@ fn xscore_session_forget_native_is_refused() {
         .unwrap();
     assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
 
-    let forget = xscore().args(["session", "forget", "work"]).output().unwrap();
+    let detach = xscore().args(["session", "detach", "work"]).output().unwrap();
     assert!(
-        !forget.status.success(),
-        "`session forget` on a native session must be refused"
+        !detach.status.success(),
+        "`session detach` on a native session must be refused"
     );
-    let err = String::from_utf8_lossy(&forget.stderr);
+    let err = String::from_utf8_lossy(&detach.stderr);
     assert!(err.contains("native"), "got: {err}");
     assert!(err.contains("session kill"), "error should name the right verb: {err}");
 
     // Refused means untouched: the session is still there.
-    let sessions = xscore().args(["session", "ls"]).output().unwrap();
+    let sessions = xscore().args(["session", "list"]).output().unwrap();
     assert!(
         String::from_utf8_lossy(&sessions.stdout).contains("work"),
-        "a refused forget must not drop the session"
+        "a refused detach must not drop the session"
     );
 }
 
@@ -1767,8 +1767,8 @@ fn xscore_session_new_tmux_write_is_literal() {
 }
 
 #[test]
-fn xscore_session_adopt_existing_tmux() {
-    let name = "session_adopt_tmux";
+fn xscore_session_attach_existing_tmux() {
+    let name = "session_attach_tmux";
     let xscore = || xscore_for(name);
     cleanup_tmux(name);
 
@@ -1779,8 +1779,15 @@ fn xscore_session_adopt_existing_tmux() {
         .unwrap();
     assert!(created.status.success(), "tmux new-session failed");
 
-    let out = xscore().args(["session", "adopt", "outside"]).output().unwrap();
-    assert!(ok(&out), "session adopt failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = xscore()
+        .args(["session", "attach", "outside"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&out),
+        "session attach failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let lid = parse_id_from_stdout(&out.stdout, "link");
 
     // One pane, bound to the control link the adoption created.
@@ -1797,11 +1804,18 @@ fn xscore_session_adopt_existing_tmux() {
     assert!(show.contains("backend: tmux"), "backend line missing: {show}");
     assert!(show.contains("outside"), "tmux session name missing: {show}");
 
-    // `forget` detaches without touching the server session (arch.md §8).
-    let forget = xscore().args(["session", "forget", "outside"]).output().unwrap();
-    assert!(ok(&forget), "session forget failed: {}", String::from_utf8_lossy(&forget.stderr));
+    // `detach` drops xscore rows without touching the server session.
+    let detach = xscore()
+        .args(["session", "detach", "outside"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&detach),
+        "session detach failed: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
     let alive = tmux_for(name).args(["has-session", "-t", "outside"]).output().unwrap();
-    assert!(alive.status.success(), "`session forget` must leave tmux running");
+    assert!(alive.status.success(), "`session detach` must leave tmux running");
 
     cleanup_tmux(name);
 }
@@ -1941,7 +1955,7 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
     assert!(created.status.success(), "tmux new-session failed");
 
     // First touch wipes this test's HOME, so the legacy file is written after.
-    assert!(xscore().args(["session", "ls"]).output().unwrap().status.success());
+    assert!(xscore().args(["session", "list"]).output().unwrap().status.success());
     let state = home_for(name)
         .join(".config")
         .join("xscore")
@@ -1953,7 +1967,7 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
     // Loading rows that still carry the old tmux path is refused, not silently
     // emptied: losing a tmux session without saying so is the failure this
     // test exists to prevent.
-    let refused = xscore().args(["session", "ls"]).output().unwrap();
+    let refused = xscore().args(["session", "list"]).output().unwrap();
     assert!(!refused.status.success(), "an un-migrated v3 file must not load");
     let err = String::from_utf8_lossy(&refused.stderr);
     assert!(err.contains("state migrate"), "error should name the migration: {err}");

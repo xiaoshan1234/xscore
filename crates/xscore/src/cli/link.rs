@@ -2,7 +2,7 @@
 //
 // `link add` creates a `Pipe` link (a transport xscore owns) plus its first
 // window and pane; a tmux session's single link is created by `session new
-// --tmux` / `session adopt` and cannot be added to or deleted here (ADR 0010
+// --tmux` / `session attach` and cannot be added to or deleted here (ADR 0010
 // §4/§D5). The old open/close/reconcile verbs are gone with the old tmux path:
 // those jobs belong to the session verbs and to control-mode events.
 use crate::core::{Error, LinkId, PaneId, SessionManager};
@@ -18,7 +18,7 @@ pub enum LinkCmd {
     /// * `--pane <pid>`: bind that existing pane instead
     ///
     /// A tmux session has exactly one link — its control client — so this verb
-    /// is refused inside one; use `session new --tmux` / `session adopt`.
+    /// is refused inside one; use `session new --tmux` / `session attach`.
     Add(LinkAddArgs),
 
     /// Full teardown of a pipe link: close its transport and orphan every

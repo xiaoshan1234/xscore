@@ -313,7 +313,7 @@ impl DaemonClient {
         Ok(resp.lines.unwrap_or_default())
     }
 
-    /// Close the client and drop its buffers (kill/forget).
+    /// Close the client and drop its buffers (kill/detach).
     pub async fn close_tmux(&self, session: SessionId) -> Result<()> {
         self.call(Request::CloseTmux { session }).await.map(|_| ())
     }

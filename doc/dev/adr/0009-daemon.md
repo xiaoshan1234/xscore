@@ -99,7 +99,7 @@ bytes rather than a screen snapshot, and the client is not re-spawned for every
 command. Consequences: **idle exit is gated on both** (no links *and* no control
 slots, 5 s of quiet), `daemon stop` closes the clients and therefore drops the
 buffers (they are memory, like a native pane's), and `session kill` /
-`session forget` send `CloseTmux` first — the one-shot `kill-session` still
+`session detach` send `CloseTmux` first — the one-shot `kill-session` still
 runs outside the daemon for `kill`. The reason for the old rule is unchanged:
 tmux is already a resident server, so the daemon is not a hop in the byte path
 that re-marshals or copies anything — it is a second resident *holder* of the

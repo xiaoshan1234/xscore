@@ -250,7 +250,7 @@ Consequences:
   moving it is `move-pane` inside the same session (D6);
 - `link del` is refused for a `Control` link: it would orphan every pane in the
   session into a paneless buffer with no way back. Use `session kill` or
-  `session forget` (D5);
+  `session detach` (D5);
 - `link ls --session work` prints exactly one row for a tmux session, and
   `connected` on that row is the liveness of the whole session.
 
@@ -489,7 +489,7 @@ If the goal is to avoid a second TCP connection, the place to do it is OpenSSH's
 | what | how | why |
 |---|---|---|
 | a **managed** session (we hold its control client) | one persistent `tmux -C attach` (locally, or through one `ssh`) | streams bytes and pushes events |
-| **enumeration and one-shot** (`session ls` across hosts, probing, `adopt`, `kill` of a session we are not attached to) | one `tmux <cmd>` exec per call (`ssh <dest> tmux ...`) | request/response, no state to keep |
+| **enumeration and one-shot** (`session list` across hosts, probing, `attach`, `kill` of a session we are not attached to) | one `tmux <cmd>` exec per call (`ssh <dest> tmux ...`) | request/response, no state to keep |
 
 Mixing them up is the bug to avoid: data must never go through a one-shot exec
 (nothing to stream from), and enumeration must never require attaching (that
@@ -549,7 +549,7 @@ the next `ls` would report a workspace that still exists.
 
 ### Listing is local, showing is live
 
-`session ls` never touches the network: it prints what `state.json` knows plus a
+`session list` never touches the network: it prints what `state.json` knows plus a
 `HOST` column, so listing ten sessions across three hosts is instant and works
 offline. `session show`, `attach`, `data` and window/pane mutations use the live
 control client (or a one-shot exec when the session is not managed). `ls
@@ -637,9 +637,9 @@ returns.
 ```mermaid
 stateDiagram-v2
     state "Session" as SS {
-        [*] --> Live: session new / adopt
+        [*] --> Live: session new / attach
         Live --> Gone: session kill
-        Live --> Unmanaged: session forget
+        Live --> Unmanaged: session detach
         note right of Live
             native: daemon owns it
             tmux: tmux owns it
@@ -667,7 +667,7 @@ Invariants and what enforces each:
   `link_key` (`%N`). Uniqueness of `link_key` inside a link is the invariant that
   keeps `%output` routing unambiguous.
 - **A tmux session has exactly one link.** `session new --tmux` and
-  `session adopt` create it; `session kill` closes it. There is no second link
+  `session attach` creates it; `session kill` closes it. There is no second link
   to a server, so `link add` is rejected in a tmux session.
 - **A pane's link is in the same session.** Cross-session moves only via an
   explicit `pane move --session`, never as a side effect of `attach`.
@@ -683,9 +683,9 @@ Invariants and what enforces each:
   links and nothing else.
 - **`link del` is refused for a `Control` link.** Every pane in the session
   routes through it, so deleting the link would leave them with buffers and no
-  way back. Teardown is `session kill` (destroy) or `session forget` (stop
+  way back. Teardown is `session kill` (destroy) or `session detach` (stop
   managing).
-- **`session forget` leaves the backend running.** Drops xscore's rows only
+- **`session detach` leaves the backend running.** Drops xscore's rows only
   (tmux-backed sessions; for native it is equivalent to `kill`, because the
   daemon is the backend).
 
@@ -783,16 +783,16 @@ Two notes that survive from v0.5.1:
 
 ```bash
 # Session — the workspace
-xscore session ls [--all] [--host H] [--refresh]
+xscore session list [--all] [--host H] [--refresh]
 xscore session new <name> [URL] [-c CONFIG] [--tmux] [--socket S]
                           # URL: shell://cmd?cwd=…&cols=…&rows=…
                           #      serial://dev?baud=…   ssh://user@host?…
                           # --tmux: the URL names the host (ssh://…), or ?cmd=…
-xscore session adopt <name> [--ssh DEST] [--socket S]   # take over an existing tmux session
+xscore session attach <name> [--ssh DEST] [--socket S]   # attach to an existing tmux session
 xscore session show <ref>                    # its windows / panes / links
 xscore session attach <ref>                  # tmux: exec tmux attach; native: unsupported
 xscore session kill <ref>                    # destroy the backend and the rows
-xscore session forget <ref>                  # drop xscore rows, leave backend running
+xscore session detach <ref>                  # drop xscore rows, leave backend running
 xscore session rename <ref> <new>
 
 # Window — scoped to a session
@@ -846,10 +846,10 @@ Notes:
   created — a tmux session has exactly one (§4).
 - `link add` is rejected inside a tmux session for the same reason; `link ls
   --session work` shows exactly one row.
-- `session attach` replaces `link open`; `session kill` / `session forget`
+- `session attach` replaces `link open`; `session kill` / `session detach`
   replace `link close`. `link` loses both verbs.
 - `?tmux=on|auto|local|remote` is **removed**. Whether a session is tmux-backed
-  is decided at `session new` / `session adopt`.
+  is decided at `session new` / `session attach`.
 - `tmux://` is **not** a link URL. Adoption happens at the session level.
 
 ## 11. Delta from v0.5.1
@@ -871,7 +871,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `socket: Option<String>` | replaced by `TmuxSocket { Default, Named, Path }`: a named socket resolves on the *host*, so a name is not a location |
 | `WindowInfo.tmux_window_handle`, `WindowInfo.layout`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux { handle }` (`@N`) and the pane's `link_key` (`%N`) |
 | `WindowLayout` (5 variants) | no consumer; tmux owns layout, native has no renderer |
-| `link open` / `link close` | `session attach` / `session kill` / `session forget` |
+| `link open` / `link close` | `session attach` / `session kill` / `session detach` |
 | `link sync [--heal]` (`SyncReport`) | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
 | `TmuxBridge` (capture-pane per operation) | `ControlBridge`: `%output` fills the pane's buffer, `send-keys` is one line |
 | `backends/ring_buffer.rs` | the pane's buffer is `core/buffer.rs`; `backends/` keeps the conduit |
@@ -885,7 +885,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `EndpointRef::{Pipe(TransportConfig), Control}` | a stream xscore owns, or the session's one control connection |
 | `ControlBridge` | a pane's view of its session's control client: buffer reads, `send-keys` writes |
 | `tmux::TmuxHost` (`Local`, `Ssh`) | argv-prefix runner: local `tmux`, or `ssh <dest> tmux` once per command (§6) |
-| `session adopt` / `session forget` | manage sessions xscore did not create; stop managing without destroying |
+| `session attach` / `session detach` | manage sessions xscore did not create; stop managing without destroying |
 | `pane add --window` on a tmux session | splits the tmux window and inserts the pane row with `link_key = %N` on the session's one link |
 
 ### Changed
@@ -942,9 +942,9 @@ hard error naming the command.
 | D2 | Window mirroring for tmux sessions: mirror `@N`, or keep one tmux window and treat xscore windows as private? | **Decided: mirror `@N`.** `tmux attach` must show what xscore shows; a private grouping would be a second, contradicting structure. |
 | D3 | `WindowLayout`: delete for good, or keep a hint for native windows? | **Delete.** No consumer; reintroduce with the renderer. |
 | D4 | tmux socket: private `-L xscore`, or the user's default socket? | **Decided:** the default socket; `--socket` overrides. Sessions invisible in `tmux ls` are not "managed". Tests pass `--socket` explicitly. |
-| D5 | `link del` on a tmux-backed link | **Refused.** The control link carries every pane in the session. Teardown is `session kill` (destroy) or `session forget` (stop managing). |
+| D5 | `link del` on a tmux-backed link | **Refused.** The control link carries every pane in the session. Teardown is `session kill` (destroy) or `session detach` (stop managing). |
 | D6 | Can a pane move between sessions? | **No implicit moves.** `pane move --session` is explicit and native-only. |
-| D7 | `session forget` — needed, or is `kill` enough? | **Keep it.** Mirrors v0.5.1's `del` vs `close`: destroy vs stop managing. |
+| D7 | `session detach` — needed, or is `kill` enough? | **Keep it.** Mirrors v0.5.1's `del` vs `close`: destroy vs stop managing. |
 | D8 | Alternative to mirroring: address tmux directly (`data --tmux work:1`) and have no xscore rows for tmux at all | **Rejected.** Once one control link serves every pane, panes must be rows: `%output %N` needs a `%N → PaneId → RingBuffer` mapping. Without rows there is nowhere to route a stream. |
 | D9 | Does xscore pass `ControlMaster=auto` by default, or only when the user asks? | **Pass it**, overridable via `--ssh-arg`. Without it a burst of commands pays a full handshake each time; with it xscore writes no pooling code. |
 | D10 | Should `ssh://` links move to the system `ssh` too, leaving one SSH mechanism? | **Not in this change.** `russh` gives a byte stream and in-process control; a link is not an exec client. Revisit only if storing password auth becomes a liability. |
