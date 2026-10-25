@@ -221,9 +221,9 @@ impl SessionManager {
     ///
     /// `Some(name)` is the user being explicit (`--session work`) and must
     /// never fall back to something else — a typo would silently write into the
-    /// wrong workspace. `None` picks the only session if there is exactly one,
-    /// else `default`, and on a virgin state creates `default` so that every
-    /// pre-v0.6 command keeps working without a session of its own.
+    /// wrong workspace. `None` picks the only existing session. With no
+    /// sessions, the caller must create one; with multiple sessions, the
+    /// caller must be explicit. Child commands never invent a container.
     pub async fn resolve_session(&self, name: Option<&str>) -> Result<SessionId> {
         if let Some(n) = name {
             return self
@@ -237,10 +237,10 @@ impl SessionManager {
         if all.len() == 1 {
             return Ok(all[0].info.id);
         }
-        if let Some(s) = self.sessions.get_by_name("default").await {
-            return Ok(s.info.id);
+        if all.is_empty() {
+            return Err(Error::NoSession);
         }
-        self.add_session_native("default").await
+        Err(Error::SessionAmbiguous)
     }
 
     pub async fn add_session_native(&self, name: &str) -> Result<SessionId> {
@@ -1359,7 +1359,7 @@ impl SessionManager {
 
     // ===== add_link =====
 
-    /// Create a link and give it a usable pane, in the default session.
+    /// Create a link and give it a usable pane in the resolved existing session.
     /// See `add_link_in` for the three branches.
     pub async fn add_link(
         &self,
@@ -1635,7 +1635,7 @@ impl SessionManager {
 
     // ===== add_window / del_window =====
 
-    /// Create a window in the default session. See `add_window_in`.
+    /// Create a window in the resolved existing session. See `add_window_in`.
     pub async fn add_window(&self, name: Option<String>, cols: u16, rows: u16) -> Result<WindowId> {
         let sid = self.resolve_session(None).await?;
         self.add_window_in(sid, name, cols, rows).await
@@ -1716,7 +1716,7 @@ impl SessionManager {
 
     // ===== add_pane / del_pane =====
 
-    /// Create a pane in the default session. See `add_pane_in`.
+    /// Create a pane in the resolved existing session. See `add_pane_in`.
     pub async fn add_pane(
         &self,
         name: Option<String>,

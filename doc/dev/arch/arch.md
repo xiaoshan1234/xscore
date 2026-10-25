@@ -83,9 +83,10 @@ windows, several panes, and links of **mixed kinds** at the same time (shell +
 ssh + serial in one workspace is a normal case). A tmux-backed session gets the
 same multiplicity from tmux, which additionally owns the layout.
 
-`session new` creates initial content so the common path stays one step — one
-window plus one link and one pane, mirroring what tmux does — but that is a
-convenience, not a limit. Grow it with `window add`, `link add`, `pane add`.
+`session new` creates an empty native workspace. Links, windows and panes are
+created afterward by their own commands. A tmux-backed session is the backend
+exception: tmux creates its default window/pane and xscore attaches the control
+link.
 
 ## 1. Session
 
@@ -784,13 +785,9 @@ Two notes that survive from v0.5.1:
 ```bash
 # Session — the workspace
 xscore session list [--all] [--host H] [--refresh]
-xscore session new <name> [URL] [-c CONFIG] [--tmux] [--socket S]
-                          # URL: shell://cmd?cwd=…&cols=…&rows=…
-                          #      serial://dev?baud=…   ssh://user@host?…
-                          # --tmux: the URL names the host (ssh://…), or ?cmd=…
+xscore session new <name> [--tmux] [--ssh DEST] [--socket S]
 xscore session attach <name> [--ssh DEST] [--socket S]   # attach to an existing tmux session
 xscore session show <ref>                    # its windows / panes / links
-xscore session attach <ref>                  # tmux: exec tmux attach; native: unsupported
 xscore session kill <ref>                    # destroy the backend and the rows
 xscore session detach <ref>                  # drop xscore rows, leave backend running
 xscore session rename <ref> <new>
@@ -811,8 +808,8 @@ xscore pane screen <p> [--history N]         # rendered grid (not implemented)
 
 # Link — native sessions
 xscore link add <url> --session <s>
-xscore link ls  [--session <s>]
-xscore link del <l>
+xscore link list [--session <s>]
+xscore link del --id <l>
 
 # Data — any pane
 xscore data read  --pane <p> [--bytes N]
@@ -827,20 +824,16 @@ Notes:
   can each have `work`, so names are not globally unique — see §6.
 - Every `<ref>`-taking verb resolves the host first and then contacts only that
   host. No command ever fans out across hosts.
-- `--cmd` / `--cwd` / `--cols` / `--rows` are **URL query parameters**, not
-  flags: the first link and the pane that shows it are described by one string
-  (`shell:///bin/bash?cwd=/var/log&cols=120&rows=40`). With `--tmux` the same
-  string names the server (`shell://` for the local one, `ssh://[user@]host`
-  for a remote one), so `session new` keeps only `--tmux` and `--socket`.
-  Unknown keys are refused rather than ignored. The chosen scheme is stored on
-  the control link's address (`Shell` vs `Ssh`), which is what lets `link list`
-  say `control/shell` or `control/ssh` instead of flattening both to `shell`.
-- `session new` starts the workspace with **one window, one link, one pane**
-  so the common path stays a single command; there is no empty-workspace form
-  (`--empty` is gone) and a URL is optional (`$SHELL` at 80x24).
-- `session new` creates a *workspace*, not one viewport. A native session can
-  hold several windows and links of mixed kinds (shell + ssh + serial) at the
-  same time — see §0.
+- Link URLs belong to `link add`; `session new` has no URL. Shell connection
+  options such as `arg`, `cwd`, `cols` and `rows` are query parameters of the
+  Link URL (`shell:///bin/bash?cwd=/var/log&cols=120&rows=40`). Unknown keys are
+  refused rather than ignored.
+- `session new` creates a *workspace*, not one viewport. A native session starts
+  empty and can later hold several windows and links of mixed kinds (shell +
+  ssh + serial) — see §0.
+- `link add`, `window add` and `pane add` require an existing session. With one
+  session `--session` may be omitted; zero sessions are an error, and multiple
+  sessions require an explicit choice. No implicit `default` is created.
 - For a tmux session, `pane add` is atomic: `split-window`, read `%N`, insert a
   pane row carrying `link_key = %N` on the session's existing link. No link is
   created — a tmux session has exactly one (§4).

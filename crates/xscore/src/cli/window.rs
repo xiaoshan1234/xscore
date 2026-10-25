@@ -36,7 +36,7 @@ pub struct WindowAddArgs {
     #[arg(long, default_value_t = 30)]
     pub rows: u16,
     /// Put the window in this session. Omitted: the manager resolves the
-    /// default (the only session, else `default`, created on demand).
+    /// default (the only existing session; no container is created implicitly).
     #[arg(long, value_name = "NAME")]
     pub session: Option<String>,
 }

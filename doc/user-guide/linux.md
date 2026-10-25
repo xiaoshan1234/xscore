@@ -45,19 +45,24 @@ A native session is kept alive by the xscore daemon. A tmux session is kept
 alive by the tmux server. In both cases, pane bytes are held in daemon memory
 and survive across separate CLI invocations.
 
-## Start a shell
+## Create a Session and add a shell link
 
-With no URL, `session new` starts `$SHELL`, falling back to `/bin/sh`:
+Create an empty native Session:
 
 ```bash
 xscore session new dev
 ```
 
-Choose an explicit shell, directory and size:
+Child-creating commands require an existing Session. If exactly one Session
+exists, `--session` may be omitted; when none or multiple exist, the command
+fails instead of creating or guessing a `default`.
+
+Add a shell Link inside it:
 
 ```bash
-xscore session new dev \
-  'shell:///bin/bash?cwd=/home/me/src&cols=120&rows=40'
+xscore link add \
+  'shell:///bin/bash?cwd=/home/me/src&cols=120&rows=40' \
+  --session dev
 ```
 
 When xscore itself runs inside WSL, `shell:///bin/bash` starts a shell in that
@@ -86,7 +91,8 @@ Unknown query keys are errors.
 A login Bash shell:
 
 ```bash
-xscore session new login 'shell:///bin/bash?arg=-l'
+xscore session new login
+xscore link add 'shell:///bin/bash?arg=-l' --session login
 ```
 
 ## Find session and pane ids
@@ -97,10 +103,13 @@ xscore session list
 xscore pane list --session dev
 ```
 
-The `session new` output also prints four ids:
+`session new` prints the Session id. `link add` prints the child ids:
 
 ```text
 session: 01a...
+```
+
+```text
 link:    01a...
 window:  01a...
 pane:    01a...
@@ -109,7 +118,9 @@ pane:    01a...
 Capture the first pane id in a script:
 
 ```bash
-out=$(xscore session new dev 'shell:///bin/bash')
+xscore session new dev
+
+out=$(xscore link add 'shell:///bin/bash' --session dev)
 printf '%s\n' "$out"
 
 pane=$(printf '%s\n' "$out" | awk '/^pane:/{print $NF}')
@@ -206,7 +217,6 @@ Create a managed tmux session:
 
 ```bash
 xscore session new work --tmux
-xscore session new work --tmux '?cols=120&rows=40'
 ```
 
 xscore creates one `tmux -C attach` control client for the session. Every tmux
@@ -266,24 +276,30 @@ Remote tmux uses the system `ssh` command, so `~/.ssh/config`, `ProxyJump` and
 the SSH agent apply:
 
 ```bash
-xscore session new build --tmux \
-  'ssh://dev@box:2222?identity=~/.ssh/id_ed25519'
+xscore session new build --tmux --ssh dev@box
 ```
+
+Connection options such as port and identity come from `~/.ssh/config` because
+the tmux control client uses the system `ssh`.
 
 ## Serial and SSH links
 
 Serial:
 
 ```bash
-xscore session new hw \
-  'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30'
+xscore session new hw
+xscore link add \
+  'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30' \
+  --session hw
 ```
 
 SSH with key authentication:
 
 ```bash
-xscore session new server \
-  'ssh://me@box:22?identity=~/.ssh/id_ed25519'
+xscore session new server
+xscore link add \
+  'ssh://me@box:22?identity=~/.ssh/id_ed25519' \
+  --session server
 ```
 
 Current limitation: the `russh`-based `ssh://` link accepts any server host key

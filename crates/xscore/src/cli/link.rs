@@ -58,8 +58,8 @@ pub struct LinkAddArgs {
     #[arg(long, value_name = "PANE_ID")]
     pub pane: Option<String>,
 
-    /// Put the link in this session. Omitted: the manager resolves the default
-    /// (the only session, else `default`, created on demand).
+    /// Put the link in this session. Omitted: requires exactly one existing
+    /// session; no container is created implicitly.
     #[arg(long, value_name = "NAME")]
     pub session: Option<String>,
 }
@@ -107,8 +107,7 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
         println!("window: {wid}");
     }
     println!("pane:  {}", result.pane_id);
-    // Geometry rides in the URL (`?cols=120&rows=40`) so `session new` and
-    // `link add` accept the same string.
+    // Geometry rides in the Link URL (`?cols=120&rows=40`).
     if pane_params.cols.is_some() || pane_params.rows.is_some() {
         mgr.resize_pane(
             result.pane_id,

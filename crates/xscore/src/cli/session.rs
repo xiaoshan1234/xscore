@@ -2,13 +2,11 @@
 //
 // `xscore session {list,new,attach,show,kill,detach,rename}`: the workspace verbs.
 //
-// `session new` is the one-command path. A native session immediately gets a
-// first link, window and pane so the common case is a single invocation
-// (arch.md §10); that first link — and the pane showing it — is described by
-// one URL (`shell:///bin/bash?cwd=/tmp&cols=120`), so the only flags left are
-// `--tmux` and `--socket`. With `--tmux` the session IS a tmux session: xscore
-// creates it (`new-session -d`), attaches the one control client that is its
-// link, and mirrors what tmux reports back; the URL then names the host.
+// `session new` creates only the container. A native session starts empty;
+// links, windows and panes are created by their own commands afterwards.
+// With `--tmux` the session IS a tmux session: xscore creates it
+// (`new-session -d`), attaches the one control client that is its link, and
+// mirrors the default window and pane that tmux creates.
 //
 // `session attach` takes over a tmux session that already exists — the only
 // difference from `new --tmux` is that the server side is not created, and is
@@ -17,7 +15,7 @@
 // `kill` destroys the backend and the rows; `detach` only drops the rows and
 // leaves tmux running. For a native session the two cannot differ — the daemon
 // IS the backend — so `detach` refuses.
-use crate::core::{Error, SessionId, SessionManager, TmuxCreateOptions};
+use crate::core::{Error, SessionId, SessionManager};
 use crate::model::{SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket};
 use crate::util::resolve_socket;
 use clap::{Args, Subcommand};
@@ -28,10 +26,8 @@ pub enum SessionCmd {
     /// List sessions with the number of windows, panes and links each owns.
     List,
 
-    /// Create a session. Native by default; `--tmux` makes it a real tmux
-    /// session driven through one control client. The first link is described
-    /// by a URL whose query carries cwd/cols/rows (omitted: `$SHELL` at
-    /// 80x24), so every session starts with a link, a window and a pane.
+    /// Create a container. Native is empty; `--tmux` selects a real tmux
+    /// backend and lets tmux create its default window and pane.
     New(SessionNewArgs),
 
     /// Attach to an existing tmux session.
@@ -55,35 +51,19 @@ pub struct SessionNewArgs {
     /// Session name — the handle every other verb resolves.
     pub name: String,
 
-    /// What the session's first link is. Pane settings ride in the query:
-    ///
-    ///   shell:///bin/bash?cwd=/var/log&cols=120&rows=40
-    ///   serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30
-    ///   ssh://user@host:22?identity=~/.ssh/id_ed25519&cols=120
-    ///
-    /// Omitted: `$SHELL` on Unix/WSL, or the default WSL distribution on
-    /// native Windows.
-    ///
-    /// With --tmux the URL names the tmux host instead — `ssh://[user@]host`,
-    /// or just `?cmd=…` for the local server (see `--tmux`).
-    pub url: Option<String>,
-
-    /// Use a saved link template instead of a URL (`xscore link config add`).
-    /// A URL given as well overrides the template field by field.
-    #[arg(short = 'c', long = "config", value_name = "CONFIG")]
-    pub config: Option<String>,
-
     /// Make this a tmux session: xscore creates it and drives it through one
     /// control-mode client (ADR 0010 §D2). The tmux session is named after the
-    /// xscore session. With this flag the URL describes where the server is:
-    /// `ssh://[user@]host[:port][?identity=…&cmd=…&cwd=…&cols=…&rows=…]`, or
-    /// `?cmd=…&cols=…` alone for the local server. Omitted: local.
+    /// xscore session. Omitted: a native session.
     #[arg(long)]
     pub tmux: bool,
 
+    /// Run the tmux server on this SSH host. Only valid with --tmux.
+    #[arg(long, value_name = "DEST", requires = "tmux")]
+    pub ssh: Option<String>,
+
     /// tmux server socket (`tmux -L <NAME>`). Defaults to $XSCORE_SOCKET, then
-    /// the default server. An explicit flag always wins over the environment.
-    #[arg(long, value_name = "NAME")]
+    /// the default server. Only valid with --tmux.
+    #[arg(long, value_name = "NAME", requires = "tmux")]
     pub socket: Option<String>,
 }
 
@@ -143,84 +123,22 @@ async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<(
     if args.tmux {
         return new_tmux(mgr, args).await;
     }
-    if args.socket.is_some() {
-        anyhow::bail!("--socket only applies to tmux sessions; add --tmux");
-    }
-
-    // Everything about the first link — command, cwd, geometry — comes from one
-    // URL. With neither a URL nor a template the default is a shell on $SHELL.
-    let default_url;
-    let url = match (args.url.as_deref(), args.config.as_deref()) {
-        (None, None) => {
-            default_url = default_shell_url();
-            Some(default_url.as_str())
-        }
-        (u, _) => u,
-    };
-    let (spec, address, pane) =
-        super::link::resolve_link_input(url, args.config.as_deref())?;
 
     let sid = mgr.add_session_native(&args.name).await?;
     println!("session: {sid}");
-    let result = mgr.add_link_in(sid, spec, address, None, None).await?;
-    println!("link:   {}", result.link_id);
-    if let Some(wid) = result.window_id {
-        println!("window: {wid}");
-    }
-    println!("pane:   {}", result.pane_id);
-
-    // Only when asked: a resize of a fresh pty is harmless but pointless, and
-    // on the default path it must not be able to fail the command.
-    if pane.cols.is_some() || pane.rows.is_some() {
-        mgr.resize_pane(result.pane_id, pane.cols.unwrap_or(80), pane.rows.unwrap_or(24))
-            .await?;
-    }
     Ok(())
-}
-
-/// The platform's default interactive shell.
-#[cfg(windows)]
-fn default_shell_url() -> String {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    let system_root = system_root
-        .trim_end_matches(['\\', '/'])
-        .replace('\\', "/");
-    format!("shell:///{system_root}/System32/wsl.exe")
-}
-
-/// `shell://<absolute path>` for $SHELL, falling back to /bin/sh.
-#[cfg(not(windows))]
-fn default_shell_url() -> String {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".into());
-    format!("shell://{shell}")
 }
 
 /// `session new --tmux`: a real tmux session plus its control link.
 async fn new_tmux(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<()> {
-    if args.config.is_some() {
-        anyhow::bail!(
-            "-c CONFIG names a pipe link, which a --tmux session does not have; \
-             pass the host as a URL (ssh://…) or omit it"
-        );
-    }
-    let target = crate::url::parse_tmux_target(args.url.as_deref().unwrap_or(""))?;
-    if let Some(dir) = target.cwd.as_deref() {
-        // tmux would report a bad `-c` itself, but only after creating the
-        // session; check first so nothing is left behind.
-        crate::util::require_dir(dir)?;
-    }
     let socket = resolve_socket(args.socket.as_deref());
     let sid = mgr
-        .create_tmux_session_with(
+        .create_tmux_session(
             &args.name,
-            target.host,
+            host_from(args.ssh.as_deref()),
             socket,
-            target.cols.unwrap_or(80),
-            target.rows.unwrap_or(24),
-            TmuxCreateOptions { command: target.cmd, cwd: target.cwd },
+            80,
+            24,
         )
         .await?;
     println!("session: {sid}");

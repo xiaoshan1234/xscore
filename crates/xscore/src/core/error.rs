@@ -18,6 +18,12 @@ pub enum Error {
     #[error("a session named `{0}` already exists")]
     SessionExists(String),
 
+    #[error("no session exists; create one with `xscore session new <name>` first")]
+    NoSession,
+
+    #[error("multiple sessions exist; specify `--session <name>`")]
+    SessionAmbiguous,
+
     /// A native session IS this process's backend (its links are daemon-owned
     /// pipes). There is nothing to "stop managing" without destroying it, so
     /// `session detach` points at the truthful verb instead.

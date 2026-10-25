@@ -66,6 +66,7 @@ async fn data_read_after_link_pane_attach_write() {
     let sock = setup("base").await;
 
     let mgr = SessionManager::new();
+    mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse shell:///bin/cat");
     let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
     let pane_id = res.pane_id;
@@ -158,6 +159,7 @@ async fn direct_link_auto_detaches_previously_active_pane() {
     let sock = setup("q1").await;
 
     let mgr = SessionManager::new();
+    mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse"); // default = raw
     let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
     let p1 = res.pane_id; // auto-created, attached
@@ -184,6 +186,7 @@ async fn round_trip_across_two_managers() {
 
     // Manager A: add link (raw; brings its own pane), write, persist.
     let mgr_a = SessionManager::new();
+    mgr_a.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr_a.add_link(spec, addr, None, None).await.expect("a.add_link");
     let link_id_a = res.link_id;
@@ -228,6 +231,7 @@ async fn round_trip_across_two_managers() {
 #[tokio::test]
 async fn orphan_pane_data_ops_return_not_attached() {
     let mgr = SessionManager::new();
+    mgr.add_session_native("test").await.expect("session");
     let pane_id = mgr.add_pane(None, 80, 24, 0, 0, None).await.expect("add_pane");
 
     let mut buf = [0u8; 16];
@@ -253,6 +257,7 @@ async fn orphan_pane_data_ops_return_not_attached() {
 async fn direct_bridge_buffer_retains_after_detach() {
     let sock = setup("buffer").await;
     let mgr = SessionManager::new();
+    mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
     let pid = res.pane_id;
@@ -288,6 +293,7 @@ async fn direct_bridge_buffer_retains_after_detach() {
 async fn detach_keeps_transport_alive() {
     let sock = setup("detach-alive").await;
     let mgr = SessionManager::new();
+    mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
     let pid = res.pane_id;
@@ -314,6 +320,7 @@ async fn detach_keeps_transport_alive() {
 async fn link_del_direct_keeps_pane_orphan() {
     let sock = setup("del-direct").await;
     let mgr = SessionManager::new();
+    mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr.add_link(spec, addr, None, None).await.expect("add_link");
     let pid = res.pane_id;

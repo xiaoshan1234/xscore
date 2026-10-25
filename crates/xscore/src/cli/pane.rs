@@ -53,7 +53,7 @@ pub struct PaneAddArgs {
     #[arg(long, value_name = "WINDOW_ID")]
     pub window: Option<String>,
     /// Put the pane in this session. Omitted: the manager resolves the default
-    /// (the only session, else `default`, created on demand).
+    /// (the only existing session; no container is created implicitly).
     #[arg(long, value_name = "NAME")]
     pub session: Option<String>,
 }

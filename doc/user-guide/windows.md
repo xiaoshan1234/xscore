@@ -57,11 +57,23 @@ Session  a workspace
   Link   one connection to a shell
 ```
 
-`session new` creates a session with one window, one link and one pane. The
-daemon owns the live shell and pane buffer, so data survives across separate
-CLI invocations.
+`session new` creates only the Session container. A native Session starts
+empty. Links, windows and panes are created separately inside that Session.
 
-## URL syntax
+## Create a Session
+
+```powershell
+# Empty native Session
+.\target\release\xscore.exe session new dev
+
+# All child commands now resolve `dev`
+.\target\release\xscore.exe session show dev
+```
+
+If there is exactly one Session, child commands can omit `--session`. With no
+Session they fail; with multiple Sessions they require `--session`.
+
+## Link URL syntax
 
 There is one public shell scheme:
 
@@ -81,31 +93,42 @@ shell:///C:/Windows/System32/wsl.exe
 Use three slashes. `shell://powershell` puts `powershell` in the URL authority
 and is rejected.
 
-### PowerShell
+### PowerShell link
 
 ```powershell
-# Windows PowerShell 5.1
-.\target\release\xscore.exe session new ps `
-  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40'
+# The Session container must already exist
+.\target\release\xscore.exe session new ps
 
-# PowerShell 7
-.\target\release\xscore.exe session new ps7 `
-  'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40'
+# Windows PowerShell 5.1
+.\target\release\xscore.exe link add `
+  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40' `
+  --session ps
+
+# PowerShell 7 in ps7
+.\target\release\xscore.exe session new ps7
+.\target\release\xscore.exe link add `
+  'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40' `
+  --session ps7
 ```
 
 Use forward slashes in the URL. Single-quote the complete URL in PowerShell so
 that `&` is not interpreted by the shell.
 
-### WSL
+### WSL link
 
 ```powershell
-# Default distribution and its configured default shell
-.\target\release\xscore.exe session new wsl `
-  'shell:///C:/Windows/System32/wsl.exe'
+.\target\release\xscore.exe session new wsl
+.\target\release\xscore.exe session new ubuntu
 
-# Named distribution and inner Linux shell
-.\target\release\xscore.exe session new ubuntu `
-  'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash'
+# Default distribution
+.\target\release\xscore.exe link add `
+  'shell:///C:/Windows/System32/wsl.exe' `
+  --session wsl
+
+# Named distribution, directory and inner shell
+.\target\release\xscore.exe link add `
+  'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash' `
+  --session ubuntu
 ```
 
 Shell query parameters:
@@ -124,15 +147,18 @@ than the host-process `cwd`. The named-distribution example expands to:
 wsl.exe --distribution Ubuntu --cd /home/me/src --exec /bin/bash
 ```
 
-WSL can also be the default. On native Windows, running `session new` without a
-URL uses `shell:///C:/Windows/System32/wsl.exe`.
+`link add` creates the Link and its first Window/Pane because a native Session
+only becomes useful when it has a connection. The Session itself remains the
+owner.
 
 ## Create and find a session
 
 ```powershell
-$out = .\target\release\xscore.exe session new dev `
-  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo'
-$out
+.\target\release\xscore.exe session new dev
+
+$out = .\target\release\xscore.exe link add `
+  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo' `
+  --session dev
 
 $pane = ($out -match '^pane:')[0] -replace '^pane:\s*', ''
 $link = ($out -match '^link:')[0] -replace '^link:\s*', ''

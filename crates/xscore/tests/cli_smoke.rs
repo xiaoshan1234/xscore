@@ -1245,12 +1245,12 @@ fn xscore_daemon_survives_sighup() {
 // ----- v0.6.0 (ADR 0010): the session is the workspace -----
 //
 // A session owns links, windows and panes; every child carries `session_id`.
-// `session new` is the one-command path (first link + window + pane), `kill`
-// is the only cascade, and `detach` only applies to tmux-backed sessions.
+// `session new` creates only the container. Child resources are created inside
+// an existing session; `kill` is the only cascade.
 
 #[test]
-fn xscore_session_new_creates_window_link_and_pane() {
-    let name = "session_new_creates";
+fn xscore_native_session_new_creates_an_empty_container() {
+    let name = "session_new_empty";
     let xscore = || xscore_for(name);
 
     let out = xscore()
@@ -1260,38 +1260,44 @@ fn xscore_session_new_creates_window_link_and_pane() {
     assert!(ok(&out), "session new failed: {}", String::from_utf8_lossy(&out.stderr));
 
     let sid = parse_id_from_stdout(&out.stdout, "session");
-    let lid = parse_id_from_stdout(&out.stdout, "link");
-    let wid = parse_id_from_stdout(&out.stdout, "window");
-    let pid = parse_id_from_stdout(&out.stdout, "pane");
+    assert!(!out.stdout.windows(5).any(|w| w == b"link:"));
+    assert!(!out.stdout.windows(7).any(|w| w == b"window:"));
+    assert!(!out.stdout.windows(5).any(|w| w == b"pane:"));
 
-    // Every child points back at the session it was created in.
-    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
-    assert_eq!(pane["session_id"], serde_json::json!(sid), "pane session: {pane}");
-    assert_eq!(pane["link_id"], serde_json::json!(lid), "pane link: {pane}");
-    assert_eq!(pane["window_id"], serde_json::json!(wid), "pane window: {pane}");
+    let links = xscore().args(["link", "list"]).output().unwrap();
+    let windows = xscore().args(["window", "list"]).output().unwrap();
+    let panes = xscore().args(["pane", "list"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&links.stdout).lines().count(), 1);
+    assert_eq!(String::from_utf8_lossy(&windows.stdout).lines().count(), 1);
+    assert_eq!(String::from_utf8_lossy(&panes.stdout).lines().count(), 1);
 
-    let window = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
-    assert_eq!(window["session_id"], serde_json::json!(sid), "window session: {window}");
-
-    let link = json(&xscore().args(["link", "show", "--id", &lid]).output().unwrap().stdout);
-    assert_eq!(link["session_id"], serde_json::json!(sid), "link session: {link}");
+    let session = xscore().args(["session", "show", "work"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&session.stdout).contains(&sid));
 
     cleanup_daemon(name);
 }
 
-// The first link is described by one URL, so command / cwd / geometry travel
-// with it instead of as flags (`session new` keeps only `--tmux` and
-// `--socket`). These assert the parsing reached the pane and the transport.
+// Link URLs describe connections, not sessions. These assert the URL parsing
+// still reaches the pane and transport after the session exists.
 #[test]
-fn xscore_session_new_url_carries_cwd_and_geometry() {
-    let name = "session_new_url";
+fn xscore_link_add_url_carries_cwd_and_geometry() {
+    let name = "link_add_url";
     let xscore = || xscore_for(name);
 
+    let session = xscore().args(["session", "new", "dev"]).output().unwrap();
+    assert!(ok(&session));
+
     let out = xscore()
-        .args(["session", "new", "dev", "shell:///bin/bash?cwd=/tmp&cols=120&rows=40"])
+        .args([
+            "link",
+            "add",
+            "shell:///bin/bash?cwd=/tmp&cols=120&rows=40",
+            "--session",
+            "dev",
+        ])
         .output()
         .unwrap();
-    assert!(ok(&out), "session new <url> failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(ok(&out), "link add <url> failed: {}", String::from_utf8_lossy(&out.stderr));
     let pid = parse_id_from_stdout(&out.stdout, "pane");
     let lid = parse_id_from_stdout(&out.stdout, "link");
 
@@ -1311,25 +1317,35 @@ fn xscore_session_new_url_carries_cwd_and_geometry() {
 }
 
 #[test]
-fn xscore_session_new_refuses_a_missing_cwd() {
-    let name = "session_new_bad_cwd";
+fn xscore_link_add_refuses_a_missing_cwd_after_session_creation() {
+    let name = "link_add_bad_cwd";
     let xscore = || xscore_for(name);
 
+    let session = xscore().args(["session", "new", "dev"]).output().unwrap();
+    assert!(ok(&session));
+
     let out = xscore()
-        .args(["session", "new", "dev", "shell:///bin/bash?cwd=/definitely-not-here"])
+        .args([
+            "link",
+            "add",
+            "shell:///bin/bash?cwd=/definitely-not-here",
+            "--session",
+            "dev",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success(), "a cwd that does not exist must be refused");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("is not a directory"), "got: {err}");
 
-    // Refused before anything was created.
-    let list = xscore().args(["session", "list"]).output().unwrap();
+    // Refused before the link was created; the session remains.
+    let list = xscore().args(["link", "list"]).output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&list.stdout).lines().count(),
         1,
         "only the header should be there"
     );
+    assert!(ok(&xscore().args(["session", "show", "dev"]).output().unwrap()));
 
     cleanup_daemon(name);
 }
@@ -1337,15 +1353,22 @@ fn xscore_session_new_refuses_a_missing_cwd() {
 /// A Windows path is translated to its WSL mount, and the error names what it
 /// looked for. Only meaningful where `/mnt/c` exists.
 #[test]
-fn xscore_session_new_translates_a_windows_cwd() {
+fn xscore_link_add_translates_a_windows_cwd() {
     if !std::path::Path::new("/mnt/c").is_dir() {
         return; // not WSL (or no C: drive) — nothing to assert
     }
-    let name = "session_new_win_cwd";
+    let name = "link_add_win_cwd";
     let xscore = || xscore_for(name);
 
+    assert!(ok(&xscore().args(["session", "new", "dev"]).output().unwrap()));
     let out = xscore()
-        .args(["session", "new", "dev", r"shell:///bin/bash?cwd=C:\no-such-dir-xyz"])
+        .args([
+            "link",
+            "add",
+            r"shell:///bin/bash?cwd=C:\no-such-dir-xyz",
+            "--session",
+            "dev",
+        ])
         .output()
         .unwrap();
     assert!(!out.status.success());
@@ -1359,8 +1382,8 @@ fn xscore_session_new_translates_a_windows_cwd() {
 }
 
 #[test]
-fn xscore_session_new_from_a_link_config() {
-    let name = "session_new_config";
+fn xscore_link_add_from_a_config_after_session_creation() {
+    let name = "link_add_config";
     let xscore = || xscore_for(name);
 
     let save = xscore()
@@ -1369,8 +1392,12 @@ fn xscore_session_new_from_a_link_config() {
         .unwrap();
     assert!(ok(&save), "link config add failed: {}", String::from_utf8_lossy(&save.stderr));
 
-    let out = xscore().args(["session", "new", "dev", "-c", "local"]).output().unwrap();
-    assert!(ok(&out), "session new -c failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(ok(&xscore().args(["session", "new", "dev"]).output().unwrap()));
+    let out = xscore()
+        .args(["link", "add", "-c", "local", "--session", "dev"])
+        .output()
+        .unwrap();
+    assert!(ok(&out), "link add -c failed: {}", String::from_utf8_lossy(&out.stderr));
     let lid = parse_id_from_stdout(&out.stdout, "link");
     let pid = parse_id_from_stdout(&out.stdout, "pane");
 
@@ -1384,41 +1411,38 @@ fn xscore_session_new_from_a_link_config() {
 }
 
 #[test]
-fn xscore_session_new_url_errors_are_specific() {
-    let name = "session_new_bad_url";
+fn xscore_link_add_requires_an_existing_session() {
+    let name = "link_add_requires_session";
     let xscore = || xscore_for(name);
 
-    let typo = xscore()
-        .args(["session", "new", "dev", "shell:///bin/bash?col=120"])
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/bash"])
         .output()
         .unwrap();
-    assert!(!typo.status.success(), "a misspelled parameter must not be ignored");
-    let err = String::from_utf8_lossy(&typo.stderr);
-    assert!(err.contains("unknown URL parameter"), "got: {err}");
-    assert!(err.contains("col"), "the message should name the key: {err}");
+    assert!(!out.status.success(), "link add must require a container");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no session exists"), "got: {err}");
+    assert!(err.contains("session new"), "got: {err}");
 
-    // With --tmux the URL names a host, not a device. `shell://` is the local
-    // server, and a local server still cannot be given a command in the path —
-    // that is `cmd=…`.
-    let wrong = xscore()
-        .args(["session", "new", "work", "--tmux", "serial:///dev/ttyS0?baud=9600"])
-        .output()
-        .unwrap();
-    assert!(!wrong.status.success(), "--tmux must reject a device URL");
-    let err = String::from_utf8_lossy(&wrong.stderr);
-    assert!(err.contains("names the tmux host"), "got: {err}");
-
-    let pathy = xscore()
-        .args(["session", "new", "work", "--tmux", "shell:///bin/bash"])
-        .output()
-        .unwrap();
-    assert!(!pathy.status.success(), "a tmux shell:// URL takes no path");
-    let err = String::from_utf8_lossy(&pathy.stderr);
-    assert!(err.contains("takes no path"), "got: {err}");
-
-    // Nothing was created by either failure.
     let list = xscore().args(["session", "list"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&list.stdout).lines().count(), 1);
+}
+
+#[test]
+fn xscore_link_add_requires_session_choice_when_multiple_exist() {
+    let name = "link_add_ambiguous_session";
+    let xscore = || xscore_for(name);
+    assert!(ok(&xscore().args(["session", "new", "A"]).output().unwrap()));
+    assert!(ok(&xscore().args(["session", "new", "B"]).output().unwrap()));
+
+    let out = xscore()
+        .args(["link", "add", "shell:///bin/bash"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "implicit session choice must be refused");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("multiple sessions"), "got: {err}");
+    assert!(err.contains("--session"), "got: {err}");
 }
 
 #[test]
@@ -1565,6 +1589,18 @@ fn tmux_stdout(test_name: &str, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).to_string()
 }
 
+fn tmux_new_with_command(test_name: &str, session: &str, command: &str) {
+    let out = tmux_for(test_name)
+        .args(["new-session", "-d", "-s", session, command])
+        .output()
+        .unwrap_or_else(|e| panic!("start tmux {session}: {e}"));
+    assert!(
+        out.status.success(),
+        "tmux new-session failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn xscore_session_new_tmux_creates_window_and_pane() {
     let name = "session_new_tmux";
@@ -1572,7 +1608,7 @@ fn xscore_session_new_tmux_creates_window_and_pane() {
     cleanup_tmux(name);
 
     let out = xscore()
-        .args(["session", "new", "work", "--tmux", "?cols=100&rows=30"])
+        .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
     assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -1632,7 +1668,7 @@ fn xscore_pane_add_in_a_tmux_session_splits_the_current_window() {
     cleanup_tmux(name);
 
     let created = xscore()
-        .args(["session", "new", "w", "--tmux", "shell://"])
+        .args(["session", "new", "w", "--tmux"])
         .output()
         .unwrap();
     assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
@@ -1663,18 +1699,16 @@ fn xscore_pane_add_in_a_tmux_session_splits_the_current_window() {
 }
 
 #[test]
-fn xscore_session_new_tmux_data_roundtrip() {
+fn xscore_session_attach_tmux_data_roundtrip() {
     let name = "session_tmux_roundtrip";
     let xscore = || xscore_for(name);
     cleanup_tmux(name);
 
-    // `cat` echoes what it reads, so a write that reached the pane comes back
-    // as that pane's bytes. The command rides in the URL query now.
-    let out = xscore()
-        .args(["session", "new", "work", "--tmux", "?cmd=cat"])
-        .output()
-        .unwrap();
-    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    // `cat` echoes what it reads. Create that custom tmux pane independently,
+    // then attach the xscore Session to it.
+    tmux_new_with_command(name, "work", "cat");
+    let out = xscore().args(["session", "attach", "work"]).output().unwrap();
+    assert!(ok(&out), "session attach failed: {}", String::from_utf8_lossy(&out.stderr));
     let pid = parse_id_from_stdout(&out.stdout, "pane");
 
     let payload = home_for(name).join("roundtrip.txt");
@@ -1708,7 +1742,7 @@ fn xscore_session_new_tmux_data_roundtrip() {
 }
 
 #[test]
-fn xscore_session_new_tmux_write_is_literal() {
+fn xscore_session_attach_tmux_write_is_literal() {
     let name = "session_tmux_literal";
     let xscore = || xscore_for(name);
     cleanup_tmux(name);
@@ -1716,14 +1750,9 @@ fn xscore_session_new_tmux_write_is_literal() {
     // `stty -echo` keeps the terminal's own echo off the screen, so the screen
     // shows exactly what the pane's `cat` received. Plain `cat`, not `cat -v`:
     // `-v` would re-encode the non-ASCII bytes we are checking.
-    let out = xscore()
-        .args([
-            "session", "new", "work", "--tmux",
-            "?cmd=stty%20-echo%3B%20exec%20cat&cols=120&rows=10",
-        ])
-        .output()
-        .unwrap();
-    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    tmux_new_with_command(name, "work", "stty -echo; exec cat");
+    let out = xscore().args(["session", "attach", "work"]).output().unwrap();
+    assert!(ok(&out), "session attach failed: {}", String::from_utf8_lossy(&out.stderr));
     let pid = parse_id_from_stdout(&out.stdout, "pane");
     let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
     let key = pane["link_key"].as_str().expect("link_key").to_string();
@@ -2081,14 +2110,9 @@ fn xscore_tmux_data_read_across_processes_is_a_stream() {
     cleanup_tmux(name);
     cleanup_daemon(name);
 
-    let created = xscore()
-        .args([
-            "session", "new", "work", "--tmux",
-            "?cmd=stty%20-echo%20raw%3B%20exec%20cat&cols=40&rows=3",
-        ])
-        .output()
-        .unwrap();
-    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    tmux_new_with_command(name, "work", "stty -echo raw; exec cat");
+    let created = xscore().args(["session", "attach", "work"]).output().unwrap();
+    assert!(ok(&created), "session attach failed: {}", String::from_utf8_lossy(&created.stderr));
     let pid = parse_id_from_stdout(&created.stdout, "pane");
 
     // Process A: three bytes, deliberately unterminated.
@@ -2143,14 +2167,9 @@ fn xscore_daemon_restart_drops_tmux_buffers() {
     cleanup_tmux(name);
     cleanup_daemon(name);
 
-    let created = xscore()
-        .args([
-            "session", "new", "work", "--tmux",
-            "?cmd=stty%20-echo%20raw%3B%20exec%20cat&cols=40&rows=3",
-        ])
-        .output()
-        .unwrap();
-    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    tmux_new_with_command(name, "work", "stty -echo raw; exec cat");
+    let created = xscore().args(["session", "attach", "work"]).output().unwrap();
+    assert!(ok(&created), "session attach failed: {}", String::from_utf8_lossy(&created.stderr));
     let pid = parse_id_from_stdout(&created.stdout, "pane");
 
     let payload = home_for(name).join("kept.txt");

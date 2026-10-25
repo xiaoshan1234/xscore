@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Session creation and child creation are separate.** `session new` no longer
+  accepts a URL and creates an empty native Session. `--tmux` still creates the
+  backend structure through tmux. `link add`, `window add` and `pane add` now
+  require an existing Session; they never create an implicit `default`.
 - **Session takeover verbs are `attach` and `detach`.** `session adopt` is now
   `session attach`; `session forget` is now `session detach`. The latter still
   drops xscore rows and leaves tmux running.

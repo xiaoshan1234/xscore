@@ -122,20 +122,6 @@ ssh://me@host:22?identity=~/.ssh/id_ed25519
 Current limitation: the `ssh://` transport accepts any server host key and does
 not yet verify `known_hosts`.
 
-### tmux positional argument
-
-tmux is a session backend, not a URL scheme. With `session new --tmux`, the
-positional URL describes the tmux server and first window:
-
-```text
-(omitted)                       local default tmux server
-?cmd=...&cols=...&rows=...     local server with options
-shell://[?cmd=...&cwd=...]     local server, stated explicitly
-ssh://[user@]host[:port][?...] remote server over the system ssh command
-```
-
-With `--tmux`, `shell://` names the host transport, not a shell executable.
-
 ## session
 
 ### `session list`
@@ -149,38 +135,44 @@ Lists sessions and their window, pane and link counts.
 ### `session new`
 
 ```text
-xscore session new [OPTIONS] <NAME> [URL]
+xscore session new [OPTIONS] <NAME>
 ```
 
-Creates a native session by default. It always starts with one link, one window
-and one pane.
+Creates the Session container. A native session starts empty. `--tmux` selects
+the tmux backend and lets tmux create its default window/pane.
 
 Arguments:
 
 | Argument | Meaning |
 |---|---|
 | `<NAME>` | New session name. |
-| `[URL]` | First link and pane settings. Omitted means `$SHELL` on Unix/WSL, or the default WSL distribution on native Windows. |
 
 Options:
 
 | Option | Meaning |
 |---|---|
-| `-c, --config <CONFIG>` | Use a saved link template. |
 | `--tmux` | Create a real tmux session with one control link. |
+| `--ssh <DEST>` | Create the tmux server on this SSH host. Requires `--tmux`. |
 | `--socket <NAME>` | tmux socket (`tmux -L NAME`). Defaults to `$XSCORE_SOCKET`, then the default server. |
-
-With `--tmux`, the positional URL describes the server rather than a shell.
 
 Examples:
 
 ```text
 xscore session new dev
-xscore session new dev 'shell:///bin/bash?cwd=/var/log'
 xscore session new work --tmux
-xscore session new work --tmux '?cmd=htop&cols=120&rows=40'
-xscore session new build --tmux 'ssh://dev@box?identity=~/.ssh/id_ed25519'
+xscore session new build --tmux --ssh dev@box
 ```
+
+Session selection rules for child-creating commands:
+
+```text
+--session NAME       NAME must already exist
+no --session + 1     use the only Session
+no --session + 0     error: run `xscore session new <name>` first
+no --session + N>1   error: specify `--session <name>`
+```
+
+No command creates an implicit `default` Session.
 
 ### `session attach`
 
@@ -188,7 +180,7 @@ xscore session new build --tmux 'ssh://dev@box?identity=~/.ssh/id_ed25519'
 xscore session attach [OPTIONS] <NAME>
 ```
 
-Adopts an existing tmux session under the same visible name.
+Attaches to an existing tmux session under the same visible name.
 
 | Option | Meaning |
 |---|---|
@@ -256,6 +248,10 @@ xscore link add 'shell:///bin/bash' --session dev
 xscore link add 'serial:///dev/ttyUSB0?baud=115200' --session hw
 xscore link add -c prod --session ops
 ```
+
+The Session must already exist. If `--session` is omitted, xscore uses the only
+existing Session; it errors when none or multiple Sessions exist. It never
+creates a `default` Session implicitly.
 
 `link add` is refused inside a tmux session because that session already has
 its single control link.
@@ -340,7 +336,7 @@ Creates a native window or a real tmux window.
 | `--name <NAME>` | generated or tmux name | Window name. |
 | `--cols <COLS>` | `120` | Native window width. |
 | `--rows <ROWS>` | `30` | Native window height. |
-| `--session <NAME>` | resolved default | Owning session. |
+| `--session <NAME>` | only existing session | Owning session. No Session is created implicitly. |
 
 ### `window list`
 
@@ -402,7 +398,7 @@ window, it creates a real tmux split.
 | `--x <X>` | `0` | Horizontal position. |
 | `--y <Y>` | `0` | Vertical position. |
 | `--window <WINDOW_ID>` | none | Put the pane in this window. |
-| `--session <NAME>` | resolved default | Owning session. |
+| `--session <NAME>` | only existing session | Owning session. No Session is created implicitly. |
 
 ### `pane del`
 
@@ -603,7 +599,6 @@ not implemented.
 | `HOME` | Config root; otherwise `USERPROFILE` on Windows. |
 | `XDG_RUNTIME_DIR` | Unix daemon directory when set. |
 | `XSCORE_SOCKET` | Default tmux socket for `--tmux` and `session attach`; `--socket` wins. |
-| `SystemRoot` | Default Windows path to the built-in `wsl.exe`. |
 | `PATH` | Program lookup for shell executables, `tmux` and system `ssh`. |
 
 Default state:

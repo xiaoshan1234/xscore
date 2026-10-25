@@ -38,10 +38,11 @@ remains the way to manage local or remote tmux sessions on the WSL side.
 # 1. Build (one-time). Rust 1.95+, tokio.
 cargo build --release
 
-# 2. A native session: one command, and it has a shell link, a window,
-#    a pane, and a 64 KiB buffer fed by a real pty. The URL says what the
-#    link is; omit it for $SHELL.
-./target/release/xscore session new dev 'shell:///bin/bash?cwd=/tmp&cols=120&rows=40'
+# 2. Create an empty container, then add a shell link. `link add` creates
+#    its first window and pane so the connection is immediately usable.
+./target/release/xscore session new dev
+./target/release/xscore link add \
+  'shell:///bin/bash?cwd=/tmp&cols=120&rows=40' --session dev
 # stdout:
 #   session: 0192...a1
 #   link:    0192...a2
@@ -53,9 +54,9 @@ echo 'echo hi from xscore' | ./target/release/xscore data write --pane <pid>
 ./target/release/xscore data read --pane <pid>
 # hi from xscore
 #
-# Neither process created the link: `session new` handed the pty and the
-# buffer to the resident daemon (ADR 0009), which keeps pumping while no CLI
-# is running. `data read` returns the bytes that arrived, never a screen.
+# Neither process created the link: `link add` handed the pty and buffer to the
+# resident daemon (ADR 0009), which keeps pumping while no CLI is running.
+# `data read` returns the bytes that arrived, never a screen.
 
 # 4. A tmux session. tmux creates the first window and pane; xscore adopts
 #    them by handle (@0 / %0).
@@ -89,7 +90,8 @@ Run this from PowerShell when `wsl.exe` is installed:
 
 ```powershell
 cargo build --release
-.\target\release\xscore.exe session new dev `
+.\target\release\xscore.exe session new dev
+.\target\release\xscore.exe link add `
   'shell:///C:/Windows/System32/wsl.exe?cols=120&rows=40'
 
 # Use the pane id printed above. The shell runs in WSL; the daemon runs on
@@ -98,13 +100,16 @@ cargo build --release
 .\target\release\xscore.exe data read --pane <pid>
 
 # Pick a distribution, shell and WSL directory explicitly.
-.\target\release\xscore.exe session new ubuntu `
+.\target\release\xscore.exe session new ubuntu
+.\target\release\xscore.exe link add `
   'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash'
 
 # Native Windows PowerShell 5.1 or PowerShell 7
-.\target\release\xscore.exe session new ps `
+.\target\release\xscore.exe session new ps
+.\target\release\xscore.exe link add `
   'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src'
-.\target\release\xscore.exe session new ps7 `
+.\target\release\xscore.exe session new ps7
+.\target\release\xscore.exe link add `
   'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src'
 ```
 
@@ -124,10 +129,9 @@ Session 1:N Link        Session 1:N Pane       Link 0..1 Pane   (pipe: at most o
 | links per session | one per connection you opened | exactly one |
 | attaches a human | n/a | `session attach` → `exec tmux attach` |
 
-`session new` creates one window, one link and one pane so the common path is a
-single command. That is a convenience, not a limit: a native session can hold
-several windows and several links of different kinds (shell + ssh + serial) at
-once.
+`session new` creates only the container. A native session starts empty; a tmux
+session gets the default structure tmux itself creates. Links, windows and
+panes are created within an existing session by their own commands.
 
 **Exclusivity is per link kind.** A `Pipe` link serves at most one pane — two
 readers on one pty would steal each other's bytes. A `Control` link serves every
@@ -204,21 +208,17 @@ include setup, pane read/write examples and troubleshooting.
 Below is the shape of the surface.
 
 ```bash
-# Sessions — the workspace. The first link is one URL; pane settings
-# (cwd, cols, rows) ride in its query.
-xscore session new <name> [URL] [-c CONFIG] [--tmux] [--socket S]
-#   URL: shell:///bin/bash?cwd=/var/log&cols=120&rows=40
-#        serial:///dev/ttyUSB0?baud=115200
-#        ssh://user@host:22?identity=~/.ssh/id_ed25519
-#   --tmux: the URL names the tmux host instead
-#        xscore session new work --tmux 'ssh://box?cols=120'
-#        xscore session new work --tmux '?cmd=htop'
+# Sessions are containers. Native sessions start empty; tmux is explicit.
+xscore session new <name> [--tmux] [--ssh DEST] [--socket S]
 xscore session attach <name> [--socket S] [--ssh DEST]   # attach to an existing tmux session
 xscore session list                                     # windows / panes / links per session
 xscore session show <name>                              # the ids it owns
 xscore session kill <name>                              # the only cascade
 xscore session detach <name>                            # drop the rows, leave tmux running
 xscore session rename <old> <new>
+
+# Links — connections are created inside an existing session
+xscore link add <URL> --session <s>
 
 # Windows — layout containers
 xscore window add --session <s> [--name N] [--cols C --rows R]
@@ -324,7 +324,7 @@ A pane reaches its bytes through a `PaneBridge`:
 - URL parsing, `link config` templates, Q1 (one pane per pipe link), pane geometry,
   per-session filters on every list.
 - Native Windows daemon IPC over named pipes, plus WSL and PowerShell shells
-  launched through ConPTY. `session new` defaults to the active WSL distribution.
+  launched through ConPTY. Child creation requires an existing Session.
 
 **Implemented but not exercised by the suite:** `serial://` (needs hardware) and
 `ssh://` links (needs a server; key auth only, `check_server_key` accepts any key).

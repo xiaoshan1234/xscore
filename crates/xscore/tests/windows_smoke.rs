@@ -103,30 +103,97 @@ fn named_pipe_daemon_status_and_stop() {
 }
 
 #[test]
+fn native_session_starts_empty_and_children_require_a_container() {
+    let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_xscore"));
+    let home = tempfile::tempdir().expect("temp HOME");
+
+    let orphan = command(&exe, home.path(), &["link", "add", "shell:///bin/bash"])
+        .output()
+        .expect("link add without session");
+    assert!(!orphan.status.success());
+    assert!(
+        String::from_utf8_lossy(&orphan.stderr).contains("no session exists"),
+        "{}",
+        String::from_utf8_lossy(&orphan.stderr)
+    );
+
+    let created = command(&exe, home.path(), &["session", "new", "dev"])
+        .output()
+        .expect("create native session");
+    assert!(created.status.success());
+
+    let links = command(&exe, home.path(), &["link", "list"])
+        .output()
+        .expect("link list");
+    assert_eq!(String::from_utf8_lossy(&links.stdout).lines().count(), 1);
+
+    // With exactly one existing session, child commands may omit --session.
+    let window = command(&exe, home.path(), &["window", "add"])
+        .output()
+        .expect("window add");
+    assert!(
+        window.status.success(),
+        "{}",
+        String::from_utf8_lossy(&window.stderr)
+    );
+    let pane = command(&exe, home.path(), &["pane", "add"])
+        .output()
+        .expect("pane add");
+    assert!(pane.status.success(), "{}", String::from_utf8_lossy(&pane.stderr));
+
+    assert!(
+        command(&exe, home.path(), &["session", "new", "other"])
+            .output()
+            .expect("second session")
+            .status
+            .success()
+    );
+    let ambiguous = command(&exe, home.path(), &["pane", "add"])
+        .output()
+        .expect("ambiguous pane add");
+    assert!(!ambiguous.status.success());
+    assert!(
+        String::from_utf8_lossy(&ambiguous.stderr).contains("multiple sessions"),
+        "{}",
+        String::from_utf8_lossy(&ambiguous.stderr)
+    );
+}
+
+#[test]
 fn powershell_session_roundtrips_through_shell_transport() {
     let exe = std::path::PathBuf::from(env!("CARGO_BIN_EXE_xscore"));
     let home = tempfile::tempdir().expect("temp HOME");
     let _daemon = start_daemon(&exe, home.path());
     wait_for_daemon(&exe, home.path());
 
-    let created = command(
-        &exe,
-        home.path(),
-        &[
-            "session",
-            "new",
-            "ps",
-            "shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo",
-        ],
-    )
-    .output()
-    .expect("create PowerShell session");
+    let created = command(&exe, home.path(), &["session", "new", "ps"])
+        .output()
+        .expect("create PowerShell session");
     assert!(
         created.status.success(),
         "{}",
         String::from_utf8_lossy(&created.stderr)
     );
-    let pane = id_after(&created, "pane");
+
+    let link = command(
+        &exe,
+        home.path(),
+        &[
+            "link",
+            "add",
+            "shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo",
+            "--session",
+            "ps",
+        ],
+    )
+    .output()
+    .expect("create PowerShell link");
+    assert!(
+        link.status.success(),
+        "{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let pane = id_after(&link, "pane");
 
     std::thread::sleep(Duration::from_millis(300));
     let mut write = command(&exe, home.path(), &["data", "write", "--pane", &pane])
