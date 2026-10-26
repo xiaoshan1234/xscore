@@ -282,6 +282,21 @@ parameters, including `--distribution`, `--exec` and `--cd`.
 
 ## Architecture
 
+Source dependencies flow through five layers:
+
+```text
+app/cli                    user input and command dispatch
+  -> service               coordination and Raw/Tmux conversion
+       -> ui               Window/Pane rows and UiEvent application
+       -> infra            pty/ssh/serial, tmux -CC and daemon I/O
+  -> domain                shared IDs, errors and persisted model
+```
+
+The UI layer is currently headless and only builds core Window/Pane rows. A
+Pane references a Buffer; it never owns a Link or a byte stream. Raw/Tmux
+SessionManagers decode Link input into Buffer writes and UI events. Link-layer
+infrastructure owns the actual connection.
+
 ```
 CLI (one process per command)                    daemon (resident)
   SessionManager                                   links  : LinkId → Transport
@@ -373,22 +388,23 @@ uses a private socket and kills it on the way out.
 
 ```
 crates/xscore/src/
-  core/        id, address, error, session, link, pane, window,
-               {session,link,pane,window}_registry, manager, state,
-               buffer (independent RingBuffer)
-  model/       SessionInfo, SessionBackend, TmuxHostConfig, TmuxSocket,
-               BufferInfo, LinkInfo, EndpointRef, WindowInfo,
-               WindowBackend, PaneInfo
-  transport/   Transport trait, shell (pty), Shell argv builder, serial, ssh,
-               factory, Noop
-  tmux/        control (the -C client), protocol (parser), format (-F parsers,
-               send_keys_literal, structure queries)
-  backends/    PaneBridge trait, DaemonBridge / DirectBridge / ControlBridge
-  daemon/      protocol, server (slot map, pumps, idle gate), client, IPC
-  url/         URL parser
-  util/        socket name resolution
-  config/      link templates
-  cli/         session, link, window, pane, data, daemon, state
+  app/
+    cli/                 command parsing and dispatch; mcp/ is reserved
+  ui/
+    window.rs            Window UI row and registry
+    pane.rs              Pane UI row and registry
+    event.rs             events consumed by the headless UI model
+  service/
+    buffer_manager/      Buffer rows, ring history and PaneBridge adapters
+    ui_manager.rs        UI registry coordinator
+    link_manager/        Link rows and connection ownership
+    session_manager/     orchestration, Raw/Tmux backends and persistence
+  infra/
+    link/                pty, ssh, serial and transport factory
+    tmux/                control-mode client, parser and text formats
+    daemon/              resident transports/Buffers process and IPC
+    config/, url/, util/
+  domain/                shared IDs, errors and persisted model types
 crates/xscore/tests/
   cli_smoke.rs, data_smoke.rs, tmux_control_smoke.rs, windows_smoke.rs
 ```

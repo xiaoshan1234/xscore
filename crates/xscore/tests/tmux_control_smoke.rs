@@ -18,8 +18,8 @@
 
 #![cfg(unix)]
 
-use xscore::model::TmuxSocket;
-use xscore::tmux::TmuxControl;
+use xscore::domain::model::TmuxSocket;
+use xscore::infra::tmux::TmuxControl;
 
 /// Kills the private server even when the test panics.
 struct Guard {
@@ -88,7 +88,7 @@ async fn control_client_streams_bytes_runs_commands_and_receives_events() {
     //     live server while its one-shot twin worked. This is that bug's
     //     regression test.
     let panes = control
-        .send(&xscore::tmux::list_panes_command("%0"))
+        .send(&xscore::infra::tmux::list_panes_command("%0"))
         .await
         .expect("send list-panes");
     assert!(
@@ -111,7 +111,7 @@ async fn control_client_streams_bytes_runs_commands_and_receives_events() {
     for _ in 0..20 {
         match tokio::time::timeout(std::time::Duration::from_millis(500), events.recv()).await {
             Ok(Some(ev)) => {
-                if matches!(ev, xscore::tmux::TmuxEvent::WindowAdd { .. }) {
+                if matches!(ev, xscore::infra::tmux::TmuxEvent::WindowAdd { .. }) {
                     saw_add = true;
                     break;
                 }

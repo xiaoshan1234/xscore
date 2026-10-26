@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Source layered into `app`, `ui`, `service`, `infra` and `domain`.**
+  CLI commands now live under `app/cli`; Window/Pane rows and `UiEvent` under
+  `ui`; Buffer/Link/Session managers under `service`; pty/ssh/serial, tmux and
+  daemon adapters under `infra`. Raw and Tmux backend files are separate.
 - **Sessions require a Link and a SessionManager.** Raw Sessions accept one or
   more repeatable `--link` URLs; tmux Sessions create their one control Link.
   `window add`, `pane add` and `link add` require an explicit `--session`.

@@ -26,9 +26,9 @@
 #![cfg(unix)]
 
 use std::time::Duration;
-use xscore::core::{SessionManager, TmuxCreateOptions};
-use xscore::model::{BufferOrigin, TmuxHostConfig, TmuxSocket};
-use xscore::url;
+use xscore::domain::model::{BufferOrigin, TmuxHostConfig, TmuxSocket};
+use xscore::infra::url;
+use xscore::service::session_manager::{SessionManager, TmuxCreateOptions};
 
 fn unique_socket_name(tag: &str) -> String {
     format!("xscore-test-data-{tag}-{}", std::process::id())
@@ -54,7 +54,7 @@ async fn setup(tag: &str) -> String {
     sock
 }
 
-async fn read_all(mgr: &SessionManager, pid: xscore::core::PaneId) -> String {
+async fn read_all(mgr: &SessionManager, pid: xscore::domain::PaneId) -> String {
     let mut buf = vec![0u8; 8192];
     let n = mgr.data_read(pid, &mut buf).await.expect("data_read");
     String::from_utf8_lossy(&buf[..n]).to_string()
@@ -722,8 +722,8 @@ async fn tmux_window_add_event_becomes_a_window_row() {
 /// The session's window rows, in a stable order.
 async fn rows(
     mgr: &SessionManager,
-    sid: xscore::core::SessionId,
-) -> Vec<std::sync::Arc<xscore::core::window::Window>> {
+    sid: xscore::domain::SessionId,
+) -> Vec<std::sync::Arc<xscore::ui::window::Window>> {
     let mut windows: Vec<_> = mgr
         .windows
         .list_all()

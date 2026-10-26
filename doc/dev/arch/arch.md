@@ -26,68 +26,36 @@ This file is the shape, not the argument. Rationale lives in the ADRs:
 
 ## 0. The model in one screen
 
-A **session is a workspace with a backend**. The backend decides who keeps the
-processes alive and who owns the structure:
+A **session is a workspace with one backend SessionManager**:
 
 ```
-Session ── workspace; 1:1 with a tmux session, or standalone
-  ├ Window ── layout container
-  ├ Pane   ── buffer + geometry
-  └ Link   ── one connection (an endpoint)
+Session
+  1:N Window
+       1:N Pane
+            0..1 Buffer
+Session
+  1:N Link
+  -> RawSessionManager or TmuxSessionManager
+  -> 1:N Buffer
 ```
 
-| | `Backend::Native` | `Backend::Tmux { .. }` |
+| Layer | Owns | Does not own |
 |---|---|---|
-| keeps processes alive | the resident daemon | the tmux server |
-| where it runs | this machine | this machine, or an ssh host (§6) |
-| Window | xscore grouping; no layout engine | mirrors a tmux window (`@N`) |
-| Pane | xscore buffer + geometry | is a tmux pane (`%N`) |
-| Link | **N** links, one per connection you opened (`Pipe`) | **exactly 1** link: the control client (`Control`) |
-| who feeds the Buffer | RawSessionManager route | TmuxSessionManager, routing `%output %N` |
-| survives CLI exit | yes (daemon) | yes (tmux) |
-| attach a human | n/a | `exec tmux attach` |
-| multi-client | no | yes |
+| UI | Window/Pane rows, geometry, placement and `buffer_id` | Bytes, Links, tmux handles |
+| Buffer service | Buffer rows, byte history, read/write/resize bridges | Window/Pane placement |
+| SessionManager | Raw/Tmux interpretation and Link -> Buffer routing | Concrete pty/ssh/serial I/O |
+| Link manager | Link rows and the connection lifetime | Buffer history or UI rows |
+| Link infrastructure | pty, ssh, serial, tmux control client | Business/session semantics |
 
-That table is why `Session` exists. "Does this go through tmux?" was never a
-property of a *link*; it is a property of the *workspace* the link lives in.
+`Native` sessions have a RawSessionManager: one or more pipe Links, each routed
+to an independent Buffer. `Tmux` sessions have one control Link and a
+TmuxSessionManager: `%output %N` is routed to the Buffer for that tmux pane and
+control events are translated into UI events.
 
-### A session is a container, not a viewport
-
-Both backends hold **N windows, each with N panes, each pane bound to at most
-one link**. Cardinality is not what separates them — ownership is.
-
-```
-session dev                                  (Backend::Native)
-├── window "edit"
-│   ├── pane p1 ── link l1   shell:///bin/bash
-│   └── pane p2 ── link l2   shell:///bin/vim
-└── window "ops"
-    ├── pane p3 ── link l3   ssh://u@host
-    └── pane p4 ── link l4   serial:///dev/ttyUSB0
-
-session work                                 (Backend::Tmux { session: "work" })
-├── window @0
-│   ├── pane %0 ── link l5
-│   └── pane %1 ── link l6
-└── window @1
-    └── pane %2 ── link l7
-```
-
-```
-Session 1:N Window      Window  1:N Pane       Pane 0..1 Buffer
-Session 1:N Link        Session 1:N Buffer     SessionManager: Link(s) → Buffer(s)
-```
-
-A native session is a *workspace*, not a single shell: it can hold several
-windows, several panes, and links of **mixed kinds** at the same time (shell +
-ssh + serial in one workspace is a normal case). A tmux-backed session gets the
-same multiplicity from tmux, which additionally owns the layout.
-
-`session new` requires at least one Link. Raw sessions accept one or more Links;
-tmux creates its one control Link. A backend-specific SessionManager converts
-Link input into independent Buffers and emits structure events that create or
-remove Window and Pane UI rows.
-
+A Pane is a pure UI viewport referencing a Buffer. Multiple Pane rows may
+reference one Buffer. Deleting a Pane deletes UI only; deleting a Buffer leaves
+the Pane rows empty. `session new` requires at least one raw Link, while a tmux
+session creates its single control Link as part of creation.
 ## 1. Session
 
 ```rust
@@ -691,93 +659,65 @@ Invariants and what enforces each:
 
 ## 9. Module structure
 
+The code follows four operational layers plus a shared domain kernel:
+
 ```
 crates/xscore/src/
-  core/        ids, error, address, session, link, pane, window, registries,
-               manager, state, buffer (RingBuffer), events
-  model/       SessionInfo, LinkInfo, WindowInfo, PaneInfo,
-               SessionBackend, WindowBackend, EndpointRef, TransportConfig
-  backends/    PaneBridge: DirectBridge (a pipe's pump + buffer),
-               DaemonBridge (the daemon owns both), ControlBridge (a pane on
-               its session's control client)
-  transport/   Transport trait, shell, Shell argv builder, serial, ssh,
-               NoopTransport, DaemonTransport
-  tmux/        TmuxControl (spawn, reader/writer threads, correlation),
-               protocol (pure parsing), format (the -F parsers and the command
-               lines: send-keys, new-window, split-window, resize-pane)
-  daemon/      protocol, server, client, IPC (Unix socket / named pipe)
-  url/         URL parser
-  config/      link templates
-  cli/         session, window, pane, link, data, daemon, state
+  app/
+    cli/                 session, link, buffer, window, pane, data, daemon, state
+    mcp/                 reserved; not implemented
+  ui/
+    window.rs            Window UI row and WindowInfo/WindowBackend facade
+    pane.rs              Pane UI row and PaneInfo facade
+    *_registry.rs        UI registries
+    event.rs             UiEvent consumed by the UI layer
+  service/
+    buffer_manager/      BufferRegistry, RingBuffer history, PaneBridge adapters
+    ui_manager.rs        coordinates Window/Pane registries
+    link_manager/        Link row, LinkRegistry and transport ownership
+    session_manager/
+      manager.rs         application orchestration and persistence
+      runtime.rs         Raw/Tmux SessionManager dispatch
+      raw_session.rs     Link -> Buffer routes for 1..N Links
+      tmux_session.rs    one control Link, %N -> Buffer, tmux events -> UiEvent
+    state.rs             state.json snapshot and migrations
+  infra/
+    link/                Transport, pty, ssh, serial, factory, launcher
+    tmux/                tmux -CC client, protocol parser, text formats
+    daemon/              resident transports/Buffers and IPC
+    config/, url/, util/
+  domain/
+    id.rs, error.rs, address.rs, buffer.rs, model/
 ```
 
-`backends/` stays as the Buffer I/O bridge — but it no longer owns byte history:
-that belongs to independent Buffers in `core/buffer.rs`. There is **no `sink/`**:
-the demultiplexer is
-`TmuxControl`'s reader loop (ADR 0010, D4 amendment), so a link kind is
-distinguished by `EndpointRef` and by which bridge its panes get, not by a trait
-object.
+The dependency direction is `app -> service -> infra` and
+`service -> ui -> domain`. Infrastructure depends only on `domain`, never on a
+service or UI module. The UI layer never reads a Link or opens a transport.
+`session_manager` is the conversion boundary: Raw converts Link input into
+Buffers; Tmux converts `%output %N` and control events into Buffers and
+`UiEvent`s.
 
 ```mermaid
 graph LR
-    CLI["cli/"]
-    CORE["core/"]
-    MODEL["model/"]
-    BACK["backends/"]
-    TR["transport/"]
-    TM["tmux/"]
-    DM["daemon/"]
-    URL["url/"]
-    CFG["config/"]
+    APP["app/cli"]
+    UI["ui"]
+    SERVICE["service"]
+    DOMAIN["domain"]
+    INFRA["infra"]
 
-    CLI --> CORE
-    CLI --> MODEL
-    CLI --> URL
-    CLI --> CFG
-    CLI --> DM
-
-    CORE --> MODEL
-    CORE --> BACK
-    CORE --> TR
-    CORE --> TM
-    CORE --> DM
-    CORE --> URL
-    CORE --> CFG
-
-    BACK --> TR
-    BACK --> TM
-    BACK --> MODEL
-
-    TM --> TR
-    TM --> MODEL
-
-    TR --> MODEL
-
-    DM --> TR
-    DM --> CORE
-
-    URL --> MODEL
-    CFG --> MODEL
-
-    classDef bad stroke:#c62828,stroke-width:2px,stroke-dasharray: 5 5
-    CLI -.->|forbidden| TR
-    CLI -.->|forbidden| TM
-    CLI -.->|forbidden| BACK
-    MODEL -.->|forbidden| CORE
-    URL -.->|forbidden| CORE
-    CFG -.->|forbidden| CORE
-    class TR,TM,BACK,CORE bad
+    APP --> SERVICE
+    APP --> INFRA
+    APP --> DOMAIN
+    SERVICE --> UI
+    SERVICE --> INFRA
+    SERVICE --> DOMAIN
+    UI --> DOMAIN
+    INFRA --> DOMAIN
 ```
 
-Two notes that survive from v0.5.1:
-
-- `core ↔ daemon` is the one tolerated cycle: `core` holds a `DaemonClient`
-  field and the client needs `Error` / ids. Tolerable while the back-edge only
-  touches those leaf types; if it grows, extract a `LinkStore` trait into
-  `core`.
-- `daemon/server` is reachable only from `main.rs` (`daemon serve`), never from
-  `core`. That keeps "run in-process" and "run as a server" from collapsing into
-  one path.
+`daemon/server` remains reachable only from the `daemon serve` app command. The
+daemon owns live connections and byte history; the CLI remains the only writer
+of metadata.
 
 ## 10. Command surface
 
@@ -860,7 +800,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `link open` / `link close` | `session attach` / `session kill` / `session detach` |
 | `link sync [--heal]` (`SyncReport`) | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
 | `TmuxBridge` (capture-pane per operation) | `ControlBridge`: `%output` fills the pane's buffer, `send-keys` is one line |
-| `backends/ring_buffer.rs` | the pane's buffer is `core/buffer.rs`; `backends/` keeps the conduit |
+| `backends/ring_buffer.rs` | Buffer history is `domain/buffer.rs`; runtime adapters are under `service/buffer_manager` |
 
 ### Added
 

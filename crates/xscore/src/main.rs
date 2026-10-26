@@ -11,8 +11,8 @@
 
 use clap::Parser;
 use std::sync::Arc;
-use xscore::cli::{buffer, link, pane, session, window, Cli, Commands};
-use xscore::core::SessionManager;
+use xscore::app::cli::{buffer, link, pane, session, window, Cli, Commands};
+use xscore::service::session_manager::SessionManager;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,8 +29,8 @@ async fn main() -> anyhow::Result<()> {
     // the file it exists to convert is the file hydration would reject.
     if matches!(&cli.command, Commands::Daemon(_) | Commands::State(_)) {
         match cli.command {
-            Commands::Daemon(cmd) => return xscore::cli::daemon::run(cmd).await,
-            Commands::State(cmd) => return xscore::cli::state::run(cmd),
+            Commands::Daemon(cmd) => return xscore::app::cli::daemon::run(cmd).await,
+            Commands::State(cmd) => return xscore::app::cli::state::run(cmd),
             _ => unreachable!("checked by matches! above"),
         }
     }
@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     // next invocation sees the link.
     let mut mgr = SessionManager::load_from_state().await?;
     // v0.5.0: direct links outlive this process — the daemon owns them.
-    mgr.enable_daemon(Arc::new(xscore::daemon::DaemonClient::new()));
+    mgr.enable_daemon(Arc::new(xscore::infra::daemon::DaemonClient::new()));
     let mgr = Arc::new(mgr);
     match cli.command {
         Commands::Session(c) => session::run(mgr, c).await?,
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Pane(c) => pane::run(mgr, c).await?,
         Commands::Data(c) => {
             // Per-pane data ops (read / write / resize) — task-11.
-            xscore::cli::data::run(mgr, c).await?;
+            xscore::app::cli::data::run(mgr, c).await?;
         }
         Commands::Daemon(_) => unreachable!("handled before hydration"),
         Commands::State(_) => unreachable!("handled before hydration"),

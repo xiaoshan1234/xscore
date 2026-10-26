@@ -1,10 +1,10 @@
-pub mod backends;
-pub mod cli;
-pub mod config;
-pub mod core;
-pub mod daemon;
-pub mod model;
-pub mod tmux;
-pub mod transport;
-pub mod url;
-pub mod util;
+//! Layered xscore architecture.
+//!
+//! `app -> ui/service -> domain`, while `service -> infra` supplies concrete
+//! I/O. The domain kernel has no dependency on the outer layers.
+
+pub mod app;
+pub mod domain;
+pub mod infra;
+pub mod service;
+pub mod ui;
