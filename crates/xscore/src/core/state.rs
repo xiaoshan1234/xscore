@@ -28,10 +28,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use crate::core::{BufferId, LinkId, PaneId, SessionId};
 use crate::core::{Error, Result};
-use crate::core::{PaneId, SessionId};
 use crate::model::{
-    LinkInfo, PaneInfo, SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket, WindowInfo,
+    BufferInfo, BufferOrigin, LinkInfo, PaneInfo, SessionBackend, SessionInfo, TmuxHostConfig,
+    TmuxSocket, WindowInfo,
 };
 
 /// Current on-disk schema version. Bump on any breaking shape change.
@@ -46,6 +47,8 @@ pub struct StateSnapshot {
     pub schema_version: u32,
     pub sessions: Vec<SessionInfo>,
     pub links: Vec<LinkInfo>,
+    #[serde(default)]
+    pub buffers: Vec<BufferInfo>,
     pub windows: Vec<WindowSnapshot>,
     pub panes: Vec<PaneInfo>,
 }
@@ -56,6 +59,7 @@ impl Default for StateSnapshot {
             schema_version: SCHEMA_VERSION,
             sessions: Vec::new(),
             links: Vec::new(),
+            buffers: Vec::new(),
             windows: Vec::new(),
             panes: Vec::new(),
         }
@@ -112,8 +116,8 @@ fn load_from(path: &Path) -> Result<Option<StateSnapshot>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read(path)
-        .map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
     parse_snapshot(&bytes, path)
 }
 
@@ -127,7 +131,10 @@ pub fn parse_snapshot(bytes: &[u8], path: &Path) -> Result<Option<StateSnapshot>
     // must fail loudly instead of deserializing into a half-empty state.
     let probe: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| Error::Config(format!("parse {}: {e}", path.display())))?;
-    let found = probe.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let found = probe
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     if found != SCHEMA_VERSION as u64 {
         return Err(Error::Config(format!(
             "state.json schema_version={found}, expected {SCHEMA_VERSION}; \
@@ -164,6 +171,8 @@ fn legacy_rows(root: &serde_json::Value) -> bool {
         || any("tmux_window_handle", "windows")
         || any("layout", "windows")
         || any("sink_handle", "panes")
+        || any("link_id", "panes")
+        || any("link_key", "panes")
 }
 
 /// The schema version on disk, without parsing the whole file. `0` when the
@@ -176,8 +185,8 @@ pub fn on_disk_version() -> Result<u32> {
             path.display()
         )));
     }
-    let bytes = std::fs::read(&path)
-        .map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
     let root: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| Error::Config(format!("parse {}: {e}", path.display())))?;
     Ok(root
@@ -215,7 +224,10 @@ pub fn migrate_v2_to_v3() -> Result<usize> {
 
 fn migrate_v2_from(path: &Path, socket: &str) -> Result<usize> {
     let root = read_json(path, "a v2 file")?;
-    let found = root.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let found = root
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     if found != 2 {
         return Err(Error::Config(format!(
             "state.json schema_version={found}; `state migrate` converts a v2 file only"
@@ -290,12 +302,13 @@ fn migrate_v2_from(path: &Path, socket: &str) -> Result<usize> {
     // --- 2. panes: their link decides, else the default session ---
     let mut session_by_pane: HashMap<String, SessionId> = HashMap::new();
     for pane in &mut panes {
-        let link_id = pane.get("link_id").and_then(|v| v.as_str()).map(str::to_string);
+        let link_id = pane
+            .get("link_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         let sid = match link_id.and_then(|l| session_by_link.get(&l).copied()) {
             Some(sid) => sid,
-            None => ensure_default_session(
-                &mut sessions, &mut used_names, &mut default_session,
-            ),
+            None => ensure_default_session(&mut sessions, &mut used_names, &mut default_session),
         };
         if let (Some(obj), Ok(id)) = (pane.as_object_mut(), serde_json::to_value(sid)) {
             obj.insert("session_id".into(), id);
@@ -331,7 +344,9 @@ fn migrate_v2_from(path: &Path, socket: &str) -> Result<usize> {
     // Same tail as the v3 upgrade: the old tmux links and their rows go, and
     // every surviving row is rewritten into the shape this build writes.
     adopt_rows(&mut sessions, &mut links, &mut windows, &mut panes, socket)?;
-    write_snapshot(path, sessions, links, windows, panes)?;
+    let mut buffers = Vec::new();
+    materialize_buffers(&mut panes, &mut buffers)?;
+    write_snapshot(path, sessions, links, buffers, windows, panes)?;
     Ok(created)
 }
 
@@ -362,7 +377,10 @@ pub fn migrate_v3_tmux_links() -> Result<usize> {
 
 fn migrate_v3_from(path: &Path, socket: &str) -> Result<usize> {
     let root = read_json(path, "a v3 file")?;
-    let found = root.get("schema_version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let found = root
+        .get("schema_version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     if found != SCHEMA_VERSION as u64 {
         return Err(Error::Config(format!(
             "state.json schema_version={found}; `state migrate` upgrades a v3 file here — \
@@ -372,11 +390,13 @@ fn migrate_v3_from(path: &Path, socket: &str) -> Result<usize> {
 
     let mut sessions = json_array(root.get("sessions"));
     let mut links = json_array(root.get("links"));
+    let mut buffers = json_array(root.get("buffers"));
     let mut windows = json_array(root.get("windows"));
     let mut panes = json_array(root.get("panes"));
 
     let converted = adopt_rows(&mut sessions, &mut links, &mut windows, &mut panes, socket)?;
-    write_snapshot(path, sessions, links, windows, panes)?;
+    materialize_buffers(&mut panes, &mut buffers)?;
+    write_snapshot(path, sessions, links, buffers, windows, panes)?;
     Ok(converted)
 }
 
@@ -393,12 +413,19 @@ fn adopt_rows(
     let mut converted: HashSet<String> = HashSet::new();
     let mut converted_count = 0usize;
     for link in links.iter() {
-        let is_tmux = link.get("sink").and_then(|s| s.get("sink")).and_then(|v| v.as_str())
+        let is_tmux = link
+            .get("sink")
+            .and_then(|s| s.get("sink"))
+            .and_then(|v| v.as_str())
             == Some("tmux");
         if !is_tmux {
             continue;
         }
-        let Some(sid) = link.get("session_id").and_then(|v| v.as_str()).map(str::to_string) else {
+        let Some(sid) = link
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
             continue;
         };
         if !converted.insert(sid.clone()) {
@@ -445,7 +472,9 @@ fn adopt_rows(
             .filter_map(|l| l.get("id").and_then(|v| v.as_str()).map(str::to_string))
             .collect();
         for pane in panes.iter_mut() {
-            let Some(obj) = pane.as_object_mut() else { continue };
+            let Some(obj) = pane.as_object_mut() else {
+                continue;
+            };
             let dangling_window = obj
                 .get("window_id")
                 .and_then(|v| v.as_str())
@@ -467,7 +496,9 @@ fn adopt_rows(
 
     // --- 3. rewrite every surviving row into the shape this build writes ----
     for link in links.iter_mut() {
-        let Some(obj) = link.as_object_mut() else { continue };
+        let Some(obj) = link.as_object_mut() else {
+            continue;
+        };
         // Already in the shape this build writes (a second run): leave the
         // endpoint alone.
         if obj.get("endpoint").map(|v| v.is_object()).unwrap_or(false) {
@@ -496,7 +527,9 @@ fn adopt_rows(
 
     let mut panes_seen: Vec<(String, String)> = Vec::new();
     for window in windows.iter_mut() {
-        let Some(obj) = window.as_object_mut() else { continue };
+        let Some(obj) = window.as_object_mut() else {
+            continue;
+        };
         if obj.get("backend").is_some() {
             // Already in the shape this build writes (a second run).
             obj.remove("tmux_window_handle");
@@ -512,11 +545,17 @@ fn adopt_rows(
         obj.insert("backend".into(), backend);
     }
     for pane in panes.iter_mut() {
-        let Some(obj) = pane.as_object_mut() else { continue };
+        let Some(obj) = pane.as_object_mut() else {
+            continue;
+        };
         // A pane's address inside a shared link: old files called it
         // `sink_handle`; only tmux panes ever had one.
         if obj.get("link_key").map(|v| v.is_null()).unwrap_or(true) {
-            if let Some(handle) = obj.get("sink_handle").and_then(|v| v.as_str()).map(str::to_string) {
+            if let Some(handle) = obj
+                .get("sink_handle")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            {
                 obj.insert("link_key".into(), serde_json::json!(handle));
                 if let (Some(pid), Some(lid)) = (
                     obj.get("id").and_then(|v| v.as_str()),
@@ -568,10 +607,106 @@ fn read_json(path: &Path, what: &str) -> Result<serde_json::Value> {
             path.display()
         )));
     }
-    let bytes = std::fs::read(path)
-        .map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::Config(format!("read {}: {e}", path.display())))?;
     serde_json::from_slice(&bytes)
         .map_err(|e| Error::Config(format!("parse {} as {what}: {e}", path.display())))
+}
+
+/// Convert old PaneInfo link fields into independent Buffer rows. Buffer IDs
+/// are stable within one migration and reused by every pane showing the same
+/// source.
+fn materialize_buffers(
+    panes: &mut [serde_json::Value],
+    buffers: &mut Vec<serde_json::Value>,
+) -> Result<()> {
+    let mut by_source: HashMap<String, BufferId> = buffers
+        .iter()
+        .filter_map(|buffer| {
+            let id = BufferId::parse(buffer.get("id")?.as_str()?).ok()?;
+            let origin = buffer.get("origin")?;
+            let link = origin.get("link_id")?.as_str()?;
+            let key = match origin.get("kind").and_then(|v| v.as_str()) {
+                Some("tmux") => format!("{link}:{}", origin.get("pane_handle")?.as_str()?),
+                _ => link.to_string(),
+            };
+            Some((key, id))
+        })
+        .collect();
+
+    for pane in panes.iter_mut() {
+        let Some(obj) = pane.as_object_mut() else {
+            continue;
+        };
+        if obj.get("buffer_id").and_then(|v| v.as_str()).is_some() {
+            obj.remove("link_id");
+            obj.remove("link_key");
+            obj.remove("sink_handle");
+            continue;
+        }
+        let link_id = obj
+            .get("link_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let handle = obj
+            .get("link_key")
+            .or_else(|| obj.get("sink_handle"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let buffer_id = match link_id {
+            Some(link_id) => {
+                let source = handle
+                    .as_ref()
+                    .map(|handle| format!("{link_id}:{handle}"))
+                    .unwrap_or_else(|| link_id.clone());
+                if let Some(id) = by_source.get(&source).copied() {
+                    id
+                } else {
+                    let id = BufferId::new();
+                    let session_id = obj
+                        .get("session_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| SessionId::parse(s).ok())
+                        .ok_or_else(|| {
+                            Error::Config("pane has no valid session_id during migration".into())
+                        })?;
+                    let origin = match &handle {
+                        Some(handle) => BufferOrigin::Tmux {
+                            link_id: LinkId::parse(&link_id)
+                                .map_err(|e| Error::Config(e.to_string()))?,
+                            pane_handle: handle.clone(),
+                        },
+                        None => BufferOrigin::Link {
+                            link_id: LinkId::parse(&link_id)
+                                .map_err(|e| Error::Config(e.to_string()))?,
+                        },
+                    };
+                    let info = BufferInfo {
+                        id,
+                        session_id,
+                        name: format!("b-{}", &id.to_string()[..8]),
+                        created_at: chrono::Utc::now(),
+                        origin,
+                    };
+                    buffers.push(serde_json::to_value(info)?);
+                    by_source.insert(source, id);
+                    id
+                }
+            }
+            None => {
+                obj.insert("buffer_id".into(), serde_json::Value::Null);
+                obj.remove("link_id");
+                obj.remove("link_key");
+                obj.remove("sink_handle");
+                continue;
+            }
+        };
+        obj.insert("buffer_id".into(), serde_json::json!(buffer_id.to_string()));
+        obj.remove("link_id");
+        obj.remove("link_key");
+        obj.remove("sink_handle");
+    }
+    Ok(())
 }
 
 /// Round-trip through the typed snapshot before writing: it validates the
@@ -582,6 +717,7 @@ fn write_snapshot(
     path: &Path,
     sessions: Vec<serde_json::Value>,
     links: Vec<serde_json::Value>,
+    buffers: Vec<serde_json::Value>,
     windows: Vec<serde_json::Value>,
     panes: Vec<serde_json::Value>,
 ) -> Result<()> {
@@ -589,12 +725,12 @@ fn write_snapshot(
         "schema_version": SCHEMA_VERSION,
         "sessions": sessions,
         "links": links,
+        "buffers": buffers,
         "windows": windows,
         "panes": panes,
     });
-    let snapshot: StateSnapshot = serde_json::from_value(value).map_err(|e| {
-        Error::Config(format!("migrated state does not round-trip: {e}"))
-    })?;
+    let snapshot: StateSnapshot = serde_json::from_value(value)
+        .map_err(|e| Error::Config(format!("migrated state does not round-trip: {e}")))?;
     let bytes = serde_json::to_vec_pretty(&snapshot)?;
     write_atomic(path, &bytes)
 }
@@ -637,20 +773,18 @@ fn ensure_default_session(
     sid
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{EndpointRef, TransportConfig, WindowBackend};
     use std::path::PathBuf;
 
-    fn path() -> PathBuf { PathBuf::from("/tmp/does-not-matter.json") }
+    fn path() -> PathBuf {
+        PathBuf::from("/tmp/does-not-matter.json")
+    }
 
     fn temp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "xscore-state-{tag}-{}.json",
-            std::process::id()
-        ))
+        std::env::temp_dir().join(format!("xscore-state-{tag}-{}.json", std::process::id()))
     }
 
     #[test]
@@ -794,13 +928,22 @@ mod tests {
 
         let ids: HashSet<SessionId> = snap.sessions.iter().map(|s| s.id).collect();
         for link in &snap.links {
-            assert!(ids.contains(&link.session_id), "link has a dangling session");
+            assert!(
+                ids.contains(&link.session_id),
+                "link has a dangling session"
+            );
         }
         for window in &snap.windows {
-            assert!(ids.contains(&window.info.session_id), "window has a dangling session");
+            assert!(
+                ids.contains(&window.info.session_id),
+                "window has a dangling session"
+            );
         }
         for pane in &snap.panes {
-            assert!(ids.contains(&pane.session_id), "pane has a dangling session");
+            assert!(
+                ids.contains(&pane.session_id),
+                "pane has a dangling session"
+            );
         }
 
         let names: HashSet<&str> = snap.sessions.iter().map(|s| s.name.as_str()).collect();
@@ -812,7 +955,11 @@ mod tests {
         // resolved, keeping the tmux session name it had.
         let work = snap.sessions.iter().find(|s| s.name == "work").unwrap();
         match &work.backend {
-            SessionBackend::Tmux { host, socket, session } => {
+            SessionBackend::Tmux {
+                host,
+                socket,
+                session,
+            } => {
                 assert_eq!(*host, TmuxHostConfig::Local);
                 assert_eq!(*socket, TmuxSocket::Named("test-sock".into()));
                 assert_eq!(session, "xscore-work");
@@ -824,7 +971,12 @@ mod tests {
 
         // The old per-command tmux link and the rows that described it are
         // gone (the session re-enumerates itself over the control client).
-        assert_eq!(snap.links.len(), 1, "only the native link survives: {:?}", snap.links);
+        assert_eq!(
+            snap.links.len(),
+            1,
+            "only the native link survives: {:?}",
+            snap.links
+        );
         let raw_link = snap.links.iter().find(|l| l.name == "local").unwrap();
         assert_eq!(raw_link.session_id, local.id);
         match &raw_link.endpoint {
@@ -833,13 +985,31 @@ mod tests {
             }
             other => panic!("expected a pipe endpoint, got {other:?}"),
         }
-        assert!(snap.windows.is_empty(), "the tmux window row went with its link: {:?}", snap.windows);
-        assert_eq!(snap.panes.len(), 1, "only the unattached pane survives: {:?}", snap.panes);
+        assert!(
+            snap.windows.is_empty(),
+            "the tmux window row went with its link: {:?}",
+            snap.windows
+        );
+        assert_eq!(
+            snap.panes.len(),
+            1,
+            "only the unattached pane survives: {:?}",
+            snap.panes
+        );
         let orphan = &snap.panes[0];
         assert_eq!(orphan.name, "p-two");
-        assert_eq!(orphan.session_id,
-            snap.sessions.iter().find(|s| s.name == "default").unwrap().id);
-        assert!(orphan.link_id.is_none(), "its link was dropped with the tmux session");
+        assert_eq!(
+            orphan.session_id,
+            snap.sessions
+                .iter()
+                .find(|s| s.name == "default")
+                .unwrap()
+                .id
+        );
+        assert!(
+            orphan.buffer_id.is_none(),
+            "an unattached pane has no buffer"
+        );
         assert!(orphan.window_id.is_none(), "its window was dropped too");
     }
 
@@ -945,7 +1115,11 @@ mod tests {
         // the socket the migration resolved and under the tmux name it had.
         let old = snap.sessions.iter().find(|s| s.name == "old").unwrap();
         match &old.backend {
-            SessionBackend::Tmux { host, socket, session } => {
+            SessionBackend::Tmux {
+                host,
+                socket,
+                session,
+            } => {
                 assert_eq!(*host, TmuxHostConfig::Local);
                 assert_eq!(*socket, TmuxSocket::Named("test-sock".into()));
                 assert_eq!(session, "xscore-build", "the sink's session name was kept");
@@ -955,7 +1129,11 @@ mod tests {
 
         // Its link, window and both of its panes are gone: the control link is
         // created when the session is next attached, and tmux re-enumerates.
-        assert!(!snap.links.iter().any(|l| l.session_id == old.id), "{:?}", snap.links);
+        assert!(
+            !snap.links.iter().any(|l| l.session_id == old.id),
+            "{:?}",
+            snap.links
+        );
         assert!(!snap.windows.iter().any(|w| w.info.session_id == old.id));
         assert!(!snap.panes.iter().any(|p| p.session_id == old.id));
 
@@ -963,19 +1141,46 @@ mod tests {
         let base = snap.sessions.iter().find(|s| s.name == "base").unwrap();
         let native_link = snap.links.iter().find(|l| l.session_id == base.id).unwrap();
         assert!(matches!(native_link.endpoint, EndpointRef::Pipe(_)));
-        let native_window = snap.windows.iter().find(|w| w.info.session_id == base.id).unwrap();
+        let native_window = snap
+            .windows
+            .iter()
+            .find(|w| w.info.session_id == base.id)
+            .unwrap();
         assert_eq!(native_window.info.backend, WindowBackend::Native);
-        assert_eq!(snap.panes.iter().filter(|p| p.session_id == base.id).count(), 1);
+        assert_eq!(
+            snap.panes
+                .iter()
+                .filter(|p| p.session_id == base.id)
+                .count(),
+            1
+        );
 
         // The managed session keeps its control link and its rows; the shape is
         // the one this build writes.
         let work = snap.sessions.iter().find(|s| s.name == "work").unwrap();
         let ctl = snap.links.iter().find(|l| l.session_id == work.id).unwrap();
         assert!(ctl.is_control(), "the control endpoint survived: {ctl:?}");
-        let work_window = snap.windows.iter().find(|w| w.info.session_id == work.id).unwrap();
-        assert_eq!(work_window.info.backend, WindowBackend::Tmux { handle: "@2".into() });
+        let work_window = snap
+            .windows
+            .iter()
+            .find(|w| w.info.session_id == work.id)
+            .unwrap();
+        assert_eq!(
+            work_window.info.backend,
+            WindowBackend::Tmux {
+                handle: "@2".into()
+            }
+        );
         let work_pane = snap.panes.iter().find(|p| p.session_id == work.id).unwrap();
-        assert_eq!(work_pane.link_key.as_deref(), Some("%2"));
+        let work_buffer = snap
+            .buffers
+            .iter()
+            .find(|buffer| Some(buffer.id) == work_pane.buffer_id)
+            .expect("tmux pane buffer");
+        assert!(matches!(
+            &work_buffer.origin,
+            crate::model::BufferOrigin::Tmux { pane_handle, .. } if pane_handle == "%2"
+        ));
 
         // No row anywhere still carries the deleted path's fields.
         assert!(!text.contains("\"sink\""), "the sink key survived: {text}");
@@ -992,7 +1197,11 @@ mod tests {
         assert_eq!(migrate_v3_from(&path, "test-sock").unwrap(), 1);
         let once = std::fs::read(&path).unwrap();
 
-        assert_eq!(migrate_v3_from(&path, "test-sock").unwrap(), 0, "nothing left to convert");
+        assert_eq!(
+            migrate_v3_from(&path, "test-sock").unwrap(),
+            0,
+            "nothing left to convert"
+        );
         let twice = std::fs::read(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(once, twice, "a second run must not rewrite the file");

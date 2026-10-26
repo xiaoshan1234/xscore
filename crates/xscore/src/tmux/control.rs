@@ -2,7 +2,7 @@
 //
 // One process per managed session, and it is the session's single link:
 //
-//   [prefix...] tmux [-L <name> | -S <path>] -C attach -t <session>
+//   [prefix...] tmux [-L <name> | -S <path>] -CC attach -t <session>
 //
 // `prefix` is empty locally and `["ssh", "-o", "BatchMode=yes", ..., <dest>]`
 // remotely, so remote is one extra segment in the same argv, not a second
@@ -25,14 +25,15 @@
 // (`TmuxTargetGone` vs `TmuxUnreachable`, arch.md §6) are decided one layer up.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
+
+use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
 
 use crate::core::{Error, Result};
 use crate::model::TmuxSocket;
@@ -60,7 +61,12 @@ pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String
     // "tcgetattr failed: Inappropriate ioctl for device" (measured on 3.5a).
     // That form is for clients that own a real terminal, like iTerm2; a pipe
     // client gets the identical protocol from `-C` (ADR 0010 §D2).
-    argv.extend(["-C".to_string(), "attach".to_string(), "-t".to_string(), session.to_string()]);
+    argv.extend([
+        "-CC".to_string(),
+        "attach".to_string(),
+        "-t".to_string(),
+        session.to_string(),
+    ]);
     argv
 }
 
@@ -141,12 +147,13 @@ impl Shared {
     }
 }
 
-/// A live `tmux -C` control client for one session.
+/// A live `tmux -CC` control client for one session, on a dedicated PTY.
 pub struct TmuxControl {
     /// The tmux session this client is attached to; names it in errors.
     session: String,
     /// Kept for `kill`/`wait`. Locked only for a syscall, never across an await.
-    child: Mutex<Child>,
+    child: Mutex<Option<Box<dyn PtyChild + Send + Sync>>>,
+    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     /// `None` after `close`: the writer thread then drains and drops the
     /// child's stdin, which is what makes tmux detach.
     writer: Mutex<Option<UnboundedSender<String>>>,
@@ -161,14 +168,14 @@ impl TmuxControl {
         Self::spawn_with(prefix, socket, session, |_| {})
     }
 
-    /// `spawn` plus a hook to adjust the child's `Command` before it starts.
+    /// `spawn` plus a hook to adjust the child's command before it starts.
     /// Exists so a test can put a fake `tmux` on the *child's* `PATH` instead of
     /// mutating the test process's environment.
     fn spawn_with(
         prefix: &[String],
         socket: &TmuxSocket,
         session: &str,
-        prepare: impl FnOnce(&mut Command),
+        prepare: impl FnOnce(&mut CommandBuilder),
     ) -> Result<TmuxControl> {
         if session.is_empty() {
             return Err(Error::Invalid("tmux session name must not be empty".into()));
@@ -178,29 +185,34 @@ impl TmuxControl {
             .split_first()
             .ok_or_else(|| Error::Sink("empty tmux command line".into()))?;
 
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| Error::Sink(format!("tmux control: openpty: {e}")))?;
+        let mut command = CommandBuilder::new(program);
+        for arg in args {
+            command.arg(arg);
+        }
         prepare(&mut command);
 
-        let mut child = command
-            .spawn()
+        let child = pair
+            .slave
+            .spawn_command(command)
             .map_err(|e| Error::Sink(format!("spawn `{}`: {e}", argv.join(" "))))?;
+        drop(pair.slave);
 
-        // Both pipes must exist or nothing works; take them before any thread
-        // starts, and never leave a half-started child behind on failure.
-        let pipes = (child.stdout.take(), child.stdin.take());
-        let (stdout, stdin) = match pipes {
-            (Some(stdout), Some(stdin)) => (stdout, stdin),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Error::Sink("tmux control: stdin/stdout pipes unavailable".into()));
-            }
-        };
+        let stdout = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| Error::Sink(format!("tmux control: reader: {e}")))?;
+        let stdin = pair
+            .master
+            .take_writer()
+            .map_err(|e| Error::Sink(format!("tmux control: writer: {e}")))?;
 
         let shared = Arc::new(Shared::new());
 
@@ -218,7 +230,8 @@ impl TmuxControl {
 
         Ok(TmuxControl {
             session: session.to_string(),
-            child: Mutex::new(child),
+            child: Mutex::new(Some(child)),
+            master: Mutex::new(Some(pair.master)),
             writer: Mutex::new(Some(write_tx)),
             reader: Mutex::new(Some(reader)),
             shared,
@@ -290,12 +303,11 @@ impl TmuxControl {
         // child's stdin: tmux detaches on EOF before it is ever signalled.
         drop(lock(&self.writer).take());
 
-        {
-            let mut child = lock(&self.child);
-            // Already-exited children reject `kill`; that is not an error here.
+        if let Some(mut child) = lock(&self.child).take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        drop(lock(&self.master).take());
 
         if let Some(reader) = lock(&self.reader).take() {
             // The child is reaped, so its stdout is at EOF and the reader is on
@@ -309,21 +321,27 @@ impl TmuxControl {
 }
 
 impl Drop for TmuxControl {
-    /// A control client never outlives its handle: a stray `tmux -C` would keep
+    /// A control client never outlives its handle: a stray `tmux -CC` would keep
     /// a client attached to the user's session with no reader.
     fn drop(&mut self) {
         drop(lock(&self.writer).take());
-        let mut child = lock(&self.child);
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(mut child) = lock(&self.child).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        drop(lock(&self.master).take());
     }
 }
 
-fn writer_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
+fn writer_loop<W: Write>(mut stdin: W, mut rx: mpsc::UnboundedReceiver<String>) {
     while let Some(line) = rx.blocking_recv() {
         // A write error means the pipe is gone; stop here and let the reader
         // thread's EOF shut the client down.
-        if stdin.write_all(line.as_bytes()).and_then(|()| stdin.flush()).is_err() {
+        if stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.flush())
+            .is_err()
+        {
             break;
         }
     }
@@ -333,7 +351,7 @@ fn writer_loop(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
 /// Owns stdout. Every line goes through the parser; routing is by prefix, and
 /// events are dispatched the moment they are seen, even inside a block
 /// (arch.md §7).
-fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
+fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
     let mut parser = ProtocolParser::new();
     // Which block is open, and the output collected for each open block. Only
     // this thread touches them, so they need no lock.
@@ -435,7 +453,9 @@ fn reader_loop(stdout: ChildStdout, shared: Arc<Shared>) {
 /// A `std::sync::Mutex` guard, recovering from poisoning. A panic elsewhere must
 /// not turn every later command into a panic of its own.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -458,17 +478,28 @@ mod tests {
     #[test]
     fn argv_is_the_measured_shape() {
         let local = argv(&[], &TmuxSocket::Default, "work");
-        assert_eq!(local, ["tmux", "-C", "attach", "-t", "work"]);
+        assert_eq!(local, ["tmux", "-CC", "attach", "-t", "work"]);
 
         // Remote adds one segment in front; nothing else changes (arch.md §6).
-        let prefix: Vec<String> =
-            ["ssh", "-o", "BatchMode=yes", "devbox"].iter().map(|s| s.to_string()).collect();
+        let prefix: Vec<String> = ["ssh", "-o", "BatchMode=yes", "devbox"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let remote = argv(&prefix, &TmuxSocket::Named("xscore".into()), "work");
         assert_eq!(
             remote,
             [
-                "ssh", "-o", "BatchMode=yes", "devbox", "tmux", "-L", "xscore", "-C", "attach",
-                "-t", "work"
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "devbox",
+                "tmux",
+                "-L",
+                "xscore",
+                "-CC",
+                "attach",
+                "-t",
+                "work"
             ]
         );
     }
@@ -527,7 +558,10 @@ while read -r _more; do :; done
         assert_eq!(bytes, b"tick\n");
 
         // ...and pane bytes are never events.
-        assert!(events.try_recv().is_err(), "pane bytes leaked into the event stream");
+        assert!(
+            events.try_recv().is_err(),
+            "pane bytes leaked into the event stream"
+        );
 
         control.close().await.expect("close");
 

@@ -15,7 +15,9 @@ pub fn socket_name() -> String {
 }
 
 /// `-L <name>` for the legacy one-shot tmux commands.
-pub fn tmux_arg_socket() -> Vec<String> { vec!["-L".into(), socket_name()] }
+pub fn tmux_arg_socket() -> Vec<String> {
+    vec!["-L".into(), socket_name()]
+}
 
 /// Resolve the socket for a **new** session.
 ///

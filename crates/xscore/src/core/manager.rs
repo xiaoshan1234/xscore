@@ -4,10 +4,11 @@
 // manager holds `Arc<...>` registries so cloning the manager is cheap.
 //
 // Creation semantics:
-//   - `add_link(spec, addr, id, pane)` yields a `Pipe` link and a usable pane:
+//   - `add_link(spec, addr, id, pane)` yields a `Pipe` Link, an independent
+//     Buffer, and a usable set of UI rows:
 //       * `pane: Some(pid)` → binds that existing (hollow) pane;
 //       * `pane: None`      → creates a native window + a pane and its
-//                             `DirectBridge` (ring buffer).
+//                             and its direct runtime bridge.
 //     There is no tmux branch: a tmux session is created/adopted at the
 //     session level (`create_tmux_session` / `adopt_tmux_session`).
 //   - `add_window_in(session, ..)` creates a real tmux window through the
@@ -17,17 +18,17 @@
 //     control client) when the window has a `WindowBackend::Tmux`, else it
 //     inserts a hollow pane.
 //
-// `detach_pane` never touches a shared transport (P0-a) and refuses for panes
-// that tmux owns (they are addressed by `link_key`). `del_link` on a `Pipe`
-// link orphans its panes and keeps their buffers; a `Control` link cannot be
+// `detach_pane` clears only the UI's Buffer reference and never touches the
+// transport. `del_link` on a `Pipe` Link stops its SessionManager route and
+// keeps Buffers and Pane rows; a `Control` link cannot be
 // deleted at all — `session kill` / `session detach` are the verbs.
 //
 // v0.6.0 PR3b (ADR 0010 §D2) added tmux-backed sessions: `create_tmux_session`
-// / `adopt_tmux_session` give a session ONE `tmux -C attach` client, which is
-// the session's single `Control` link. Pane bytes arrive as `%output %N` and
-// are routed to the pane whose `link_key` is that handle; structure arrives as
-// events. PR4 deleted the old per-command tmux path, so the control client is
-// only way xscore touches tmux data.
+// / `adopt_tmux_session` give a session ONE `tmux -CC attach` client, which is
+// the session's single `Control` link. The Tmux SessionManager maps `%output
+// %N` to a Buffer and translates structure events into registry actions.
+// PR4 deleted the old per-command tmux path, so the control client is the only
+// way xscore touches tmux data.
 //
 // v0.6.0 PR5 (ADR 0009 §1): the client — and every pane buffer it fills —
 // lives in the **daemon** when one is configured, so `data read` is a stream
@@ -38,7 +39,7 @@
 //     `TmuxCommand`/`Attach {key}`/`CloseTmux` on the daemon; no client, no
 //     pump and no buffer of ours. Structure is *enumerated on touch*.
 //   * in-process mode (`data_smoke`, an embedding caller): exactly what PR3b
-//     built — spawn the client here, pump `%output` into `pane_buffers`, react
+//     built — spawn the client here, pump `%output` into `buffer_memory`, react
 //     to events. Kept behind `daemon.is_none()` so the tests keep covering the
 //     tmux protocol itself, without a socket in the way.
 //
@@ -49,32 +50,35 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::{Error, LinkAddress, Result};
 use super::buffer::{RingBuffer, DIRECT_BUFFER_CAPACITY};
-use super::id::{LinkId, PaneId, SessionId, WindowId};
+use super::buffer_registry::BufferRegistry;
+use super::id::{BufferId, LinkId, PaneId, SessionId, WindowId};
 use super::link::Link;
 use super::link_registry::LinkRegistry;
 use super::pane_registry::PaneRegistry;
 use super::session::Session;
+use super::session_managers::{SessionManager as SessionManagerRuntime, TmuxEventAction};
 use super::session_registry::SessionRegistry;
 use super::window::Window;
 use super::window_registry::WindowRegistry;
+use super::{Error, LinkAddress, Result};
 
 use crate::backends::{ControlBridge, DaemonBridge, DirectBridge, PaneBridge};
 use crate::daemon::client::DaemonClient;
 use crate::model::{
-    ConnectSpec, EndpointRef, PaneInfo, SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket,
-    TransportConfig, WindowBackend, WindowInfo,
+    BufferInfo, BufferOrigin, ConnectSpec, EndpointRef, PaneInfo, SessionBackend, SessionInfo,
+    TmuxHostConfig, TmuxSocket, TransportConfig, WindowBackend, WindowInfo,
 };
 use crate::tmux::{PaneLine, TmuxControl, TmuxEvent, WindowLine};
 use crate::transport::factory as transport_factory;
 use crate::transport::NoopTransport;
 
-/// What `link add` produced. A pipe link always comes with a pane (and usually
-/// a window), so the CLI can print all three ids.
+/// What `link add` produced: a Link, its independent Buffer and the initial UI
+/// Pane/Window that reference it.
 #[derive(Debug, Clone, Copy)]
 pub struct LinkAddResult {
     pub link_id: LinkId,
+    pub buffer_id: BufferId,
     pub window_id: Option<WindowId>,
     pub pane_id: PaneId,
 }
@@ -87,15 +91,17 @@ pub struct SessionManager {
     pub links: Arc<LinkRegistry>,
     pub windows: Arc<WindowRegistry>,
     pub panes: Arc<PaneRegistry>,
-    /// Per-pane bridge map. Stored SEPARATELY from `PaneInfo` so mutating
+    pub buffers: Arc<BufferRegistry>,
+    session_managers: Arc<Mutex<HashMap<SessionId, SessionManagerRuntime>>>,
+    /// Per-Buffer bridge map. Stored separately from `PaneInfo` so mutating
     /// the info (which is JSON-serializable) doesn't destroy the bridge.
     /// Bridges are in-memory only.
-    pane_bridges: Arc<Mutex<HashMap<PaneId, Arc<dyn PaneBridge>>>>,
+    buffer_bridges: Arc<Mutex<HashMap<BufferId, Arc<dyn PaneBridge>>>>,
     /// Per-pane direct-pane buffers. They OUTLIVE the bridge: detaching a
     /// direct pane drops the bridge but keeps the history (ADR 0008).
     /// Only used in in-process mode — with a daemon, the buffer belongs
     /// to the daemon (ADR 0009).
-    pane_buffers: Arc<Mutex<HashMap<PaneId, Arc<Mutex<RingBuffer>>>>>,
+    buffer_memory: Arc<Mutex<HashMap<BufferId, Arc<Mutex<RingBuffer>>>>>,
     /// v0.5.0 (ADR 0009): when set, direct links are daemon-backed —
     /// their transport and pane buffers live in the resident daemon, so
     /// they survive this process. `None` keeps everything in-process
@@ -132,7 +138,9 @@ pub struct TmuxCreateOptions {
 }
 
 impl Default for SessionManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionManager {
@@ -142,8 +150,10 @@ impl SessionManager {
             links: Arc::new(LinkRegistry::new()),
             windows: Arc::new(WindowRegistry::new()),
             panes: Arc::new(PaneRegistry::new()),
-            pane_bridges: Arc::new(Mutex::new(HashMap::new())),
-            pane_buffers: Arc::new(Mutex::new(HashMap::new())),
+            buffers: Arc::new(BufferRegistry::new()),
+            session_managers: Arc::new(Mutex::new(HashMap::new())),
+            buffer_bridges: Arc::new(Mutex::new(HashMap::new())),
+            buffer_memory: Arc::new(Mutex::new(HashMap::new())),
             daemon: None,
             tmux_controls: Arc::new(Mutex::new(HashMap::new())),
             tmux_reconcile: Arc::new(Mutex::new(())),
@@ -169,7 +179,9 @@ impl SessionManager {
     /// pipe links: ask the daemon. Without a daemon (in-process mode) fall back
     /// to the flag recorded at construction/hydration time.
     pub async fn link_is_connected(&self, lid: LinkId) -> bool {
-        let Some(link) = self.links.get(lid).await else { return false };
+        let Some(link) = self.links.get(lid).await else {
+            return false;
+        };
         if link.info.is_control() {
             let sid = link.info.session_id;
             // v0.6.0 PR5: the daemon owns the session's client, so its
@@ -200,9 +212,15 @@ impl SessionManager {
             // is the honest answer; reporting `false` would call a perfectly
             // healthy session disconnected just because this process did not
             // attach. This is a `show`, and showing is live (arch.md §6).
-            let Ok(info) = self.get_session(sid).await else { return false };
+            let Ok(info) = self.get_session(sid).await else {
+                return false;
+            };
             return match info.backend {
-                SessionBackend::Tmux { host, socket, session } => self
+                SessionBackend::Tmux {
+                    host,
+                    socket,
+                    session,
+                } => self
                     .tmux_session_exists(&host, &socket, &session)
                     .await
                     .unwrap_or(false),
@@ -210,7 +228,9 @@ impl SessionManager {
             };
         }
         match &self.daemon {
-            Some(_) => crate::daemon::client::probe_link(lid).await.unwrap_or(false),
+            Some(_) => crate::daemon::client::probe_link(lid)
+                .await
+                .unwrap_or(false),
             None => link.connected,
         }
     }
@@ -330,7 +350,12 @@ impl SessionManager {
             .await
             .ok_or_else(|| Error::SessionNotFound(id.to_string()))?;
 
-        if let SessionBackend::Tmux { host, socket, session: name } = &session.info.backend {
+        if let SessionBackend::Tmux {
+            host,
+            socket,
+            session: name,
+        } = &session.info.backend
+        {
             // Destroy means destroy: the control client goes first (so nothing
             // is streaming into rows that are about to disappear), then
             // `kill-session` takes the server session down. Both steps are best
@@ -381,23 +406,37 @@ impl SessionManager {
             self.del_link(lid).await?;
         }
 
-        let stragglers: Vec<PaneInfo> = self
-            .panes
+        let straggling_buffers: Vec<BufferInfo> = self
+            .buffers
             .list_all()
             .await
             .into_iter()
-            .filter(|p| p.session_id == id)
+            .filter(|buffer| buffer.session_id == id)
             .collect();
-        for info in &stragglers {
-            let bridge = self.pane_bridges.lock().await.remove(&info.id);
-            self.pane_buffers.lock().await.remove(&info.id);
+        for info in &straggling_buffers {
+            let bridge = self.buffer_bridges.lock().await.remove(&info.id);
+            self.buffer_memory.lock().await.remove(&info.id);
             // Releasing a bridge only stops a pump: a direct bridge's `close`
             // is "stop my reader", a control bridge's is a no-op, and the tmux
             // session is already gone either way.
             if let Some(b) = bridge {
                 let _ = b.close().await;
             }
-            self.panes.remove(info.id).await;
+            self.buffers.remove(info.id).await;
+            if let Some(client) = &self.daemon {
+                let _ = client.delete_buffer(info.id).await;
+            }
+        }
+        let pane_ids: Vec<PaneId> = self
+            .panes
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|pane| pane.session_id == id)
+            .map(|pane| pane.id)
+            .collect();
+        for pid in pane_ids {
+            self.panes.remove(pid).await;
         }
 
         let doomed_windows: Vec<WindowId> = self
@@ -413,6 +452,7 @@ impl SessionManager {
         }
 
         self.sessions.remove(id).await;
+        self.session_managers.lock().await.remove(&id);
         self.save_state().await?;
         Ok(())
     }
@@ -462,9 +502,18 @@ impl SessionManager {
         for lid in link_ids {
             self.links.remove(lid).await;
         }
-        for info in self.panes.list_all().await.iter().filter(|p| p.session_id == id) {
-            self.pane_bridges.lock().await.remove(&info.id);
-            self.pane_buffers.lock().await.remove(&info.id);
+        let buffers: Vec<BufferId> = self
+            .buffers
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|buffer| buffer.session_id == id)
+            .map(|buffer| buffer.id)
+            .collect();
+        for buffer_id in buffers {
+            self.buffer_bridges.lock().await.remove(&buffer_id);
+            self.buffer_memory.lock().await.remove(&buffer_id);
+            self.buffers.remove(buffer_id).await;
         }
         let pane_ids: Vec<PaneId> = self
             .panes
@@ -489,6 +538,7 @@ impl SessionManager {
             self.windows.remove(wid).await;
         }
         self.sessions.remove(id).await;
+        self.session_managers.lock().await.remove(&id);
         self.save_state().await?;
         Ok(())
     }
@@ -501,7 +551,8 @@ impl SessionManager {
     //
     //   * the server (owner of the structure and of every pane's bytes);
     //   * the registries (`WindowInfo` mirrors `@N`, `PaneInfo` mirrors `%N`);
-    //   * the pane buffers, filled from `%output %N` and routed by `link_key`.
+    //   * independent Buffers, filled from `%output %N` and routed by the Tmux
+    //     SessionManager's `%N -> BufferId` map.
     //
     // Where the client lives is the one thing PR5 changed: with a daemon it is
     // the daemon's (so the buffers outlive this process and `data read` is a
@@ -560,7 +611,12 @@ impl SessionManager {
             args.push(cwd.to_string());
         }
         if let Some(command) = opts.command.as_deref().filter(|c| !c.trim().is_empty()) {
-            args.extend(["--".into(), "/bin/sh".into(), "-c".into(), command.to_string()]);
+            args.extend([
+                "--".into(),
+                "/bin/sh".into(),
+                "-c".into(),
+                command.to_string(),
+            ]);
         }
         let out = self.run_tmux(&host, &socket, &args).await?;
         if !out.status.success() {
@@ -614,7 +670,9 @@ impl SessionManager {
             None => {
                 let control = self.ensure_local_control(id).await?;
                 let view = self.view_with(&control, id).await?;
-                self.reconcile_all(id, &view, Some(&control)).await.map(|_| ())
+                self.reconcile_all(id, &view, Some(&control))
+                    .await
+                    .map(|_| ())
             }
         }
     }
@@ -683,7 +741,10 @@ impl SessionManager {
             return Err(e);
         }
 
-        self.tmux_controls.lock().await.insert(id, Arc::clone(&control));
+        self.tmux_controls
+            .lock()
+            .await
+            .insert(id, Arc::clone(&control));
         self.record_control(id, &control).await;
         self.start_event_pump(id, Arc::clone(&control), events);
         Ok(control)
@@ -700,7 +761,14 @@ impl SessionManager {
             return Err(Error::Daemon("no daemon configured".into()));
         };
         let structure = client
-            .open_tmux(id, target.host, target.socket, &target.name, target.cols, target.rows)
+            .open_tmux(
+                id,
+                target.host,
+                target.socket,
+                &target.name,
+                target.cols,
+                target.rows,
+            )
             .await?;
         let view = TmuxView::from_structure(structure);
         self.reconcile_all(id, &view, None).await?;
@@ -719,8 +787,12 @@ impl SessionManager {
     /// link yet (attachment happens before the row exists on the very first
     /// attach) simply has nothing to record.
     async fn record_control(&self, id: SessionId, control: &Arc<TmuxControl>) {
-        let Some(link_id) = self.control_link_id(id).await else { return };
-        let Some(existing) = self.links.get(link_id).await else { return };
+        let Some(link_id) = self.control_link_id(id).await else {
+            return;
+        };
+        let Some(existing) = self.links.get(link_id).await else {
+            return;
+        };
         let rebuilt = Link {
             id: link_id,
             info: existing.info.clone(),
@@ -760,7 +832,12 @@ impl SessionManager {
         created: bool,
     ) -> Result<SessionId> {
         let sid = self
-            .add_session(SessionInfo::new_tmux(name, host.clone(), socket.clone(), name))
+            .add_session(SessionInfo::new_tmux(
+                name,
+                host.clone(),
+                socket.clone(),
+                name,
+            ))
             .await?;
 
         let outcome = async {
@@ -778,7 +855,11 @@ impl SessionManager {
                     .run_tmux(
                         &host,
                         &socket,
-                        &["kill-session".to_string(), "-t".to_string(), name.to_string()],
+                        &[
+                            "kill-session".to_string(),
+                            "-t".to_string(),
+                            name.to_string(),
+                        ],
                     )
                     .await;
             }
@@ -812,7 +893,12 @@ impl SessionManager {
             return Ok(link_id);
         }
         let info = self.get_session(id).await?;
-        let SessionBackend::Tmux { host, socket, session } = info.backend else {
+        let SessionBackend::Tmux {
+            host,
+            socket,
+            session,
+        } = info.backend
+        else {
             return Err(Error::NotTmuxSession(id));
         };
         let link_id = LinkId::new();
@@ -851,7 +937,12 @@ impl SessionManager {
     /// size is informational there (`-C attach` takes none).
     async fn tmux_target(&self, id: SessionId) -> Result<TmuxTarget> {
         let info = self.get_session(id).await?;
-        let SessionBackend::Tmux { host, socket, session } = info.backend else {
+        let SessionBackend::Tmux {
+            host,
+            socket,
+            session,
+        } = info.backend
+        else {
             return Err(Error::NotTmuxSession(id));
         };
         let size = self
@@ -862,7 +953,13 @@ impl SessionManager {
             .find(|w| w.info.session_id == id)
             .map(|w| (w.info.cols, w.info.rows))
             .unwrap_or((80, 24));
-        Ok(TmuxTarget { host, socket, name: session, cols: size.0, rows: size.1 })
+        Ok(TmuxTarget {
+            host,
+            socket,
+            name: session,
+            cols: size.0,
+            rows: size.1,
+        })
     }
 
     /// Re-read every window and pane of the session from one enumeration.
@@ -904,6 +1001,7 @@ impl SessionManager {
         }
 
         if changed {
+            self.rebuild_session_manager(id).await?;
             self.save_state().await?;
         }
         Ok(changed)
@@ -924,6 +1022,7 @@ impl SessionManager {
             // close it already is.
             let changed = self.forget_window_by_handle(id, handle).await;
             if changed {
+                self.rebuild_session_manager(id).await?;
                 self.save_state().await?;
             }
             return Ok(changed);
@@ -931,6 +1030,7 @@ impl SessionManager {
 
         let changed = self.sync_window(id, view, window, local).await?;
         if changed {
+            self.rebuild_session_manager(id).await?;
             self.save_state().await?;
         }
         Ok(changed)
@@ -945,7 +1045,8 @@ impl SessionManager {
         handle: &str,
     ) -> Result<bool> {
         let view = self.view_with(control, id).await?;
-        self.reconcile_window(id, &view, handle, Some(control)).await
+        self.reconcile_window(id, &view, handle, Some(control))
+            .await
     }
 
     /// Upsert one window and its panes; start a subscriber for each pane that
@@ -968,7 +1069,9 @@ impl SessionManager {
 
         let wid = match self.window_for_handle_in(id, &window.handle).await {
             Some(wid) => {
-                let Some(arc) = self.windows.get(wid).await else { return Ok(false) };
+                let Some(arc) = self.windows.get(wid).await else {
+                    return Ok(false);
+                };
                 let mut updated = arc.info.clone();
                 let before = updated.clone();
                 updated.name = window.name.clone();
@@ -991,7 +1094,9 @@ impl SessionManager {
                     created_at: chrono::Utc::now(),
                     cols: window.cols,
                     rows: window.rows,
-                    backend: WindowBackend::Tmux { handle: window.handle.clone() },
+                    backend: WindowBackend::Tmux {
+                        handle: window.handle.clone(),
+                    },
                 };
                 self.windows.insert(Window::new(info)).await;
                 changed = true;
@@ -1005,7 +1110,7 @@ impl SessionManager {
         let mut seen: HashSet<String> = HashSet::new();
         for pane in panes {
             seen.insert(pane.handle.clone());
-            match self.pane_by_link_key(id, &pane.handle).await {
+            match self.pane_for_tmux_handle(id, &pane.handle).await {
                 Some(existing) => {
                     let mut updated = existing.clone();
                     let before = updated.clone();
@@ -1014,9 +1119,6 @@ impl SessionManager {
                     updated.x = pane.x;
                     updated.y = pane.y;
                     updated.window_id = Some(wid);
-                    if updated.link_id.is_none() {
-                        updated.link_id = Some(link_id);
-                    }
                     if updated != before {
                         self.panes.insert(updated).await;
                         changed = true;
@@ -1031,6 +1133,16 @@ impl SessionManager {
                 }
                 None => {
                     let pid = PaneId::new();
+                    let buffer_id = self
+                        .create_buffer(
+                            id,
+                            format!("tmux-{}", pane.handle),
+                            BufferOrigin::Tmux {
+                                link_id,
+                                pane_handle: pane.handle.clone(),
+                            },
+                        )
+                        .await;
                     let info = PaneInfo {
                         id: pid,
                         session_id: id,
@@ -1040,9 +1152,8 @@ impl SessionManager {
                         rows: pane.rows,
                         x: pane.x,
                         y: pane.y,
-                        link_id: Some(link_id),
+                        buffer_id: Some(buffer_id),
                         window_id: Some(wid),
-                        link_key: Some(pane.handle.clone()),
                     };
                     self.panes.insert(info).await;
                     if let Some(arc) = self.windows.get(wid).await {
@@ -1050,25 +1161,31 @@ impl SessionManager {
                     }
                     // A pane with no subscriber loses its bytes: tmux replays
                     // nothing, so the subscriber starts with the row.
-                    self.start_pane_pump(id, local, pid, &pane.handle).await;
+                    self.start_pane_pump(id, local, buffer_id, &pane.handle)
+                        .await;
                     changed = true;
                 }
             }
         }
 
         // Panes this window no longer has.
-        let stale: Vec<PaneId> = self
-            .panes
-            .list_all()
-            .await
-            .iter()
-            .filter(|p| p.session_id == id && p.window_id == Some(wid))
-            .filter(|p| match &p.link_key {
-                Some(key) => !seen.contains(key),
-                None => false,
-            })
-            .map(|p| p.id)
-            .collect();
+        let mut stale = Vec::new();
+        for pane in self.panes.list_all().await {
+            if pane.session_id != id || pane.window_id != Some(wid) {
+                continue;
+            }
+            let Some(buffer_id) = pane.buffer_id else {
+                continue;
+            };
+            let Some(buffer) = self.buffers.get(buffer_id).await else {
+                continue;
+            };
+            if let BufferOrigin::Tmux { pane_handle, .. } = buffer.origin {
+                if !seen.contains(&pane_handle) {
+                    stale.push(pane.id);
+                }
+            }
+        }
         for pid in stale {
             self.forget_pane_row(pid).await;
             changed = true;
@@ -1086,12 +1203,24 @@ impl SessionManager {
             .map(|w| w.info.id)
     }
 
-    async fn pane_by_link_key(&self, id: SessionId, key: &str) -> Option<PaneInfo> {
-        self.panes
-            .list_all()
-            .await
-            .into_iter()
-            .find(|p| p.session_id == id && p.link_key.as_deref() == Some(key))
+    async fn pane_for_tmux_handle(&self, id: SessionId, key: &str) -> Option<PaneInfo> {
+        for pane in self.panes.list_all().await {
+            if pane.session_id != id {
+                continue;
+            }
+            let Some(buffer_id) = pane.buffer_id else {
+                continue;
+            };
+            if let Some(buffer) = self.buffers.get(buffer_id).await {
+                if matches!(
+                    &buffer.origin,
+                    BufferOrigin::Tmux { pane_handle, .. } if pane_handle == key
+                ) {
+                    return Some(pane);
+                }
+            }
+        }
+        None
     }
 
     /// Drop a window row and the panes that were displayed in it.
@@ -1121,11 +1250,18 @@ impl SessionManager {
     /// is gone, so `close()` only ever releases OUR pump (a control bridge's
     /// `close` is a no-op by design).
     async fn forget_pane_row(&self, pid: PaneId) {
-        let bridge = self.pane_bridges.lock().await.remove(&pid);
-        if let Some(bridge) = bridge {
-            let _ = bridge.close().await;
+        let buffer_id = self.panes.get(pid).await.and_then(|pane| pane.buffer_id);
+        if let Some(buffer_id) = buffer_id {
+            let bridge = self.buffer_bridges.lock().await.remove(&buffer_id);
+            if let Some(bridge) = bridge {
+                let _ = bridge.close().await;
+            }
+            self.buffer_memory.lock().await.remove(&buffer_id);
+            self.buffers.remove(buffer_id).await;
+            if let Some(client) = &self.daemon {
+                let _ = client.delete_buffer(buffer_id).await;
+            }
         }
-        self.pane_buffers.lock().await.remove(&pid);
         self.panes.remove(pid).await;
     }
 
@@ -1147,44 +1283,50 @@ impl SessionManager {
             // Ends when the channel closes — the reader thread drops every
             // sender on EOF, `close()` and `%exit`.
             while let Some(event) = events.recv().await {
-                match event {
+                let action = manager
+                    .session_managers
+                    .lock()
+                    .await
+                    .get(&id)
+                    .and_then(|backend| backend.accept_tmux_event(&event));
+                match action {
                     // A rename and a layout change are the same question as an
                     // add: "what does this window look like now?"
-                    TmuxEvent::WindowAdd { handle }
-                    | TmuxEvent::WindowRenamed { handle }
-                    | TmuxEvent::LayoutChange { handle, .. } => {
-                        if let Err(e) =
-                            manager.reconcile_window_from_control(id, &control, &handle).await
+                    Some(TmuxEventAction::RefreshWindow(handle)) => {
+                        if let Err(e) = manager
+                            .reconcile_window_from_control(id, &control, &handle)
+                            .await
                         {
                             tracing::warn!("tmux: could not reconcile window {handle}: {e}");
                         }
                     }
-                    TmuxEvent::WindowClose { handle } => {
+                    Some(TmuxEventAction::RemoveWindow(handle)) => {
                         if manager.forget_window_by_handle(id, &handle).await {
+                            if let Err(e) = manager.rebuild_session_manager(id).await {
+                                tracing::warn!("tmux: could not rebuild session manager: {e}");
+                            }
                             if let Err(e) = manager.save_state().await {
-                                tracing::warn!("tmux: could not save state after {handle} closed: {e}");
+                                tracing::warn!(
+                                    "tmux: could not save state after {handle} closed: {e}"
+                                );
                             }
                         }
                     }
                     // Nothing in xscore stores "the current window" yet, so
                     // these are informational (arch.md §7 lists them as state
                     // to update when a renderer exists).
-                    TmuxEvent::SessionWindowChanged { session, window } => {
-                        tracing::debug!("tmux {id}: current window of {session} is {window}");
-                    }
-                    TmuxEvent::SessionChanged { session } => {
-                        tracing::debug!("tmux {id}: session is {session}");
-                    }
-                    TmuxEvent::SessionsChanged => {
-                        tracing::debug!("tmux {id}: the session set changed");
-                    }
-                    TmuxEvent::Exit { reason } => {
+                    Some(TmuxEventAction::Ignore) => {}
+                    Some(TmuxEventAction::Exit(reason)) => {
                         // The client is the session's single connection: with
                         // it gone the link is disconnected (which
                         // `link_is_connected` reports from the closed handle)
                         // and every pane pump ends, because `%exit` shuts the
                         // subscriber channels down.
                         tracing::info!("tmux: control client for session {id} exited: {reason}");
+                        break;
+                    }
+                    None => {
+                        tracing::warn!("tmux: session {id} has no backend SessionManager");
                         break;
                     }
                 }
@@ -1194,22 +1336,23 @@ impl SessionManager {
 
     /// Give a new pane its `%output %N` subscriber, wherever the client lives.
     ///
-    /// In-process: a task here appending to `pane_buffers`. Daemon: one
+    /// In-process: a task here appending to `buffer_memory`. Daemon: one
     /// `Attach`, and the daemon's own pump fills the daemon's buffer — which is
     /// the whole point of moving the client there.
     async fn start_pane_pump(
         &self,
         id: SessionId,
         local: Option<&Arc<TmuxControl>>,
-        pid: PaneId,
+        buffer_id: BufferId,
         key: &str,
     ) {
         if let Some(control) = local {
-            self.start_output_pump(Arc::clone(control), pid, key.to_string()).await;
+            self.start_output_pump(Arc::clone(control), buffer_id, key.to_string())
+                .await;
             return;
         }
         if let Some(client) = &self.daemon {
-            if let Err(e) = client.attach_pane(id, pid, key).await {
+            if let Err(e) = client.attach_control_buffer(id, buffer_id, key).await {
                 // Not fatal: the row is still right, and the next data op
                 // re-attaches (`control_bridge`).
                 tracing::warn!("tmux: daemon could not subscribe pane {key}: {e}");
@@ -1218,8 +1361,8 @@ impl SessionManager {
     }
 
     /// One task per pane: `%output %N` appended to that pane's buffer.
-    async fn start_output_pump(&self, control: Arc<TmuxControl>, pid: PaneId, key: String) {
-        let buffer = self.buffer_for(pid).await;
+    async fn start_output_pump(&self, control: Arc<TmuxControl>, buffer_id: BufferId, key: String) {
+        let buffer = self.buffer_for(buffer_id).await;
         let mut rx = match control.output(&key).await {
             Ok(rx) => rx,
             Err(e) => {
@@ -1255,7 +1398,8 @@ impl SessionManager {
             }
             None => {
                 let control = self.ensure_local_control(id).await?;
-                self.reconcile_window_from_control(id, &control, handle).await
+                self.reconcile_window_from_control(id, &control, handle)
+                    .await
             }
         }
     }
@@ -1300,7 +1444,15 @@ impl SessionManager {
         name: &str,
     ) -> Result<bool> {
         let out = self
-            .run_tmux(host, socket, &["has-session".to_string(), "-t".to_string(), name.to_string()])
+            .run_tmux(
+                host,
+                socket,
+                &[
+                    "has-session".to_string(),
+                    "-t".to_string(),
+                    name.to_string(),
+                ],
+            )
             .await?;
         if out.status.success() {
             return Ok(true);
@@ -1348,7 +1500,11 @@ impl SessionManager {
         if out.status.code() == Some(255) {
             return Error::TmuxUnreachable {
                 host: crate::tmux::host_label(host),
-                reason: if stderr.is_empty() { "exit 255".into() } else { stderr },
+                reason: if stderr.is_empty() {
+                    "exit 255".into()
+                } else {
+                    stderr
+                },
             };
         }
         Error::Sink(format!(
@@ -1396,17 +1552,6 @@ impl SessionManager {
         //     leave a spawned child behind) ---
         if let Some(pid) = pane {
             let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-            if let Some(existing) = info.link_id {
-                return Err(Error::PaneAlreadyAttached(pid, existing));
-            }
-            if let Some(key) = info.link_key.clone() {
-                // A pane that carries a `%N` belongs to tmux and is addressed on
-                // its session's control link; there is nothing here to re-bind.
-                return Err(Error::Invalid(format!(
-                    "pane {pid} is addressed by {key} on its session's control link; \
-                     it cannot be attached to a pipe link"
-                )));
-            }
             if info.session_id != session {
                 // Cross-session binding is never implicit (arch.md §8).
                 return Err(Error::NotInSession {
@@ -1429,9 +1574,14 @@ impl SessionManager {
         // transport is created inside the daemon and the CLI only keeps a
         // handle to it. That is what makes the link outlive this process.
         let daemon = self.daemon.clone();
+        let buffer_id = BufferId::new();
         if let Some(client) = &daemon {
             client.ensure().await?;
             client.create_link(link_id, spec.transport.clone()).await?;
+            if let Err(error) = client.create_buffer(buffer_id).await {
+                let _ = client.delete_link(link_id).await;
+                return Err(error);
+            }
         }
 
         let transport_arc: Arc<dyn crate::transport::Transport> = match &daemon {
@@ -1448,6 +1598,15 @@ impl SessionManager {
                 Arc::from(transport)
             }
         };
+        self.buffers
+            .insert(BufferInfo {
+                id: buffer_id,
+                session_id: session,
+                name: format!("b-{}", &buffer_id.to_string()[..8]),
+                created_at: chrono::Utc::now(),
+                origin: BufferOrigin::Link { link_id },
+            })
+            .await;
 
         // --- branch: decide the window / pane / bridge ---
         type Branch = (
@@ -1462,19 +1621,17 @@ impl SessionManager {
             //     whatever window it had.
             Some(pid) => {
                 let bridge: Arc<dyn PaneBridge> = match &daemon {
-                    Some(client) => {
-                        client.create_pane(pid).await?;
-                        Arc::new(DaemonBridge::new(Arc::clone(client), pid))
-                    }
+                    Some(client) => Arc::new(DaemonBridge::new(Arc::clone(client), buffer_id)),
                     None => {
-                        let buf = self.buffer_for(pid).await;
+                        let buf = self.buffer_for(buffer_id).await;
                         Arc::new(DirectBridge::new_with_buffer(
-                            Arc::clone(&transport_arc), buf,
+                            Arc::clone(&transport_arc),
+                            buf,
                         ))
                     }
                 };
                 let mut info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-                info.link_id = Some(link_id);
+                info.buffer_id = Some(buffer_id);
                 (None, pid, info, Some(bridge), None)
             }
 
@@ -1493,14 +1650,12 @@ impl SessionManager {
                 });
                 let _ = w.add_pane(pid).await;
                 let bridge: Arc<dyn PaneBridge> = match &daemon {
-                    Some(client) => {
-                        client.create_pane(pid).await?;
-                        Arc::new(DaemonBridge::new(Arc::clone(client), pid))
-                    }
+                    Some(client) => Arc::new(DaemonBridge::new(Arc::clone(client), buffer_id)),
                     None => {
-                        let buf = self.buffer_for(pid).await;
+                        let buf = self.buffer_for(buffer_id).await;
                         Arc::new(DirectBridge::new_with_buffer(
-                            Arc::clone(&transport_arc), buf,
+                            Arc::clone(&transport_arc),
+                            buf,
                         ))
                     }
                 };
@@ -1516,9 +1671,8 @@ impl SessionManager {
                         rows: 24,
                         x: 0,
                         y: 0,
-                        link_id: Some(link_id),
+                        buffer_id: Some(buffer_id),
                         window_id: Some(wid),
-                        link_key: None,
                     },
                     Some(bridge),
                     Some(w),
@@ -1529,7 +1683,11 @@ impl SessionManager {
         let link_info = crate::model::LinkInfo {
             id: link_id,
             session_id: session,
-            name: if spec.name.is_empty() { link_id.to_string() } else { spec.name.clone() },
+            name: if spec.name.is_empty() {
+                link_id.to_string()
+            } else {
+                spec.name.clone()
+            },
             created_at: chrono::Utc::now(),
             address: address.clone(),
             // Every link this method creates is a pipe: one byte stream, at
@@ -1551,7 +1709,7 @@ impl SessionManager {
         }
         self.panes.insert(pane_record).await;
         if let Some(b) = bridge {
-            self.pane_bridges.lock().await.insert(pane_id, b);
+            self.buffer_bridges.lock().await.insert(buffer_id, b);
         }
 
         // ADR 0009: the binding only becomes LIVE at Attach — the daemon
@@ -1559,28 +1717,39 @@ impl SessionManager {
         // process exits. A failure here must not leave an orphaned
         // transport behind, so tear the daemon link back down.
         if let Some(client) = &daemon {
-            if let Err(e) = client.attach(pane_id, link_id).await {
+            if let Err(e) = client.attach_buffer(buffer_id, link_id).await {
                 let _ = client.delete_link(link_id).await;
+                let _ = client.delete_buffer(buffer_id).await;
+                self.buffers.remove(buffer_id).await;
                 return Err(e);
             }
         }
 
+        self.rebuild_session_manager(session).await?;
         if let Err(e) = self.save_state().await {
             // A failed save means the CLI exits with an error, so nothing
             // will ever reference this link. Do not leave its transport
             // (and a daemon that can therefore never idle-exit) behind.
             if let Some(client) = &daemon {
                 let _ = client.delete_link(link_id).await;
+                let _ = client.delete_buffer(buffer_id).await;
             }
+            self.buffers.remove(buffer_id).await;
+            let _ = self.rebuild_session_manager(session).await;
             return Err(e);
         }
-        Ok(LinkAddResult { link_id, window_id, pane_id })
+        Ok(LinkAddResult {
+            link_id,
+            buffer_id,
+            window_id,
+            pane_id,
+        })
     }
 
     /// Full teardown of a link.
     ///
-    /// * pipe link: orphan every attached pane (buffer kept), close the
-    ///   transport ONCE, remove the link.
+    /// * pipe link: stop feeding its buffers, close the transport once, and
+    ///   remove the link. Buffers and their UI panes remain.
     /// * control link: refused (ADR 0010 §D5) — see `del_session` /
     ///   `detach_session` for the two verbs that do tear a tmux session down.
     pub async fn del_link(&self, id: LinkId) -> Result<()> {
@@ -1592,25 +1761,23 @@ impl SessionManager {
             return Err(Error::ControlLinkNotDeletable(id));
         }
 
-        let attached: Vec<PaneId> = self
-            .panes
+        let linked_buffers: Vec<BufferId> = self
+            .buffers
             .list_all()
             .await
-            .iter()
-            .filter(|p| p.link_id == Some(id))
-            .map(|p| p.id)
+            .into_iter()
+            .filter_map(|buffer| match buffer.origin {
+                BufferOrigin::Link { link_id } if link_id == id => Some(buffer.id),
+                _ => None,
+            })
             .collect();
-        for pid in attached {
-            let bridge = self.pane_bridges.lock().await.remove(&pid);
+        for buffer_id in linked_buffers {
+            let bridge = self.buffer_bridges.lock().await.remove(&buffer_id);
             if let Some(b) = bridge {
                 // DirectBridge::close() stops the pump only (in daemon
                 // mode: Detach), so the transport below is closed
                 // exactly once, on purpose.
                 let _ = b.close().await;
-            }
-            if let Some(mut info) = self.panes.get(pid).await {
-                info.link_id = None;
-                self.panes.insert(info).await;
             }
         }
         match &self.daemon {
@@ -1629,6 +1796,8 @@ impl SessionManager {
         }
 
         self.links.remove(id).await;
+        self.rebuild_session_manager(arc_link.info.session_id)
+            .await?;
         self.save_state().await?;
         Ok(())
     }
@@ -1701,7 +1870,11 @@ impl SessionManager {
     /// reconciliation (any listing, or an event) brings it back, which is why
     /// the verb is about the row only.
     pub async fn del_window(&self, id: WindowId) -> Result<()> {
-        let arc_window = self.windows.get(id).await.ok_or(Error::WindowNotFound(id))?;
+        let arc_window = self
+            .windows
+            .get(id)
+            .await
+            .ok_or(Error::WindowNotFound(id))?;
         let pids: Vec<PaneId> = arc_window.panes.lock().await.clone();
         for pid in pids {
             if let Some(mut info) = self.panes.get(pid).await {
@@ -1735,7 +1908,7 @@ impl SessionManager {
     /// * `window: None` → hollow orphan pane (no link, no window).
     /// * `window: Some(wid)` mirroring a tmux window → split inside that real
     ///   window through the session's control client; the row is the one
-    ///   reconciliation creates, addressed by its `%N` `link_key` on the
+    ///   reconciliation creates, whose Buffer origin retains the `%N` on the
     ///   session's existing link (no link is created — a tmux session has
     ///   exactly one).
     /// * `window: Some(wid)` native → hollow pane inside the window.
@@ -1774,9 +1947,7 @@ impl SessionManager {
                         )
                         .await?;
                     let handle = tmux_handle_from(&lines, '@').ok_or_else(|| {
-                        Error::Sink(format!(
-                            "tmux did not report the current window: {lines:?}"
-                        ))
+                        Error::Sink(format!("tmux did not report the current window: {lines:?}"))
                     })?;
                     let wid = self
                         .windows
@@ -1788,9 +1959,7 @@ impl SessionManager {
                                 && w.info.backend.tmux_handle() == Some(handle.as_str())
                         })
                         .map(|w| w.info.id)
-                        .ok_or_else(|| {
-                            Error::Sink(format!("tmux window {handle} is not a row"))
-                        })?;
+                        .ok_or_else(|| Error::Sink(format!("tmux window {handle} is not a row")))?;
                     Some(wid)
                 } else {
                     None
@@ -1801,7 +1970,11 @@ impl SessionManager {
         // A tmux window's panes are tmux's: split it and adopt what tmux
         // creates, rather than inventing a hollow row that no byte could reach.
         if let Some(wid) = window {
-            let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+            let arc_window = self
+                .windows
+                .get(wid)
+                .await
+                .ok_or(Error::WindowNotFound(wid))?;
             if arc_window.info.session_id != session {
                 return Err(Error::NotInSession {
                     session,
@@ -1819,11 +1992,14 @@ impl SessionManager {
                     ))
                 })?;
                 self.refresh_window(session, &handle).await?;
-                let existing = self.pane_by_link_key(session, &key).await.ok_or_else(|| {
-                    Error::Sink(format!(
-                        "tmux created pane {key} but it did not become a row"
-                    ))
-                })?;
+                let existing = self
+                    .pane_for_tmux_handle(session, &key)
+                    .await
+                    .ok_or_else(|| {
+                        Error::Sink(format!(
+                            "tmux created pane {key} but it did not become a row"
+                        ))
+                    })?;
                 if let Some(requested) = name {
                     let mut renamed = existing.clone();
                     renamed.name = requested;
@@ -1844,9 +2020,8 @@ impl SessionManager {
             rows,
             x,
             y,
-            link_id: None,
+            buffer_id: None,
             window_id: window,
-            link_key: None,
         };
         self.panes.insert(info).await;
         if let Some(wid) = window {
@@ -1860,29 +2035,6 @@ impl SessionManager {
 
     pub async fn del_pane(&self, id: PaneId) -> Result<()> {
         let info = self.panes.get(id).await.ok_or(Error::PaneNotFound(id))?;
-        // Drop the bridge if attached. Releasing a bridge stops a pump; a
-        // control pane is killed on the server further down.
-        let bridge = self.pane_bridges.lock().await.remove(&id);
-        if let Some(b) = bridge {
-            let _ = b.close().await;
-        }
-        self.pane_buffers.lock().await.remove(&id);
-        // ADR 0009: drop the daemon's slot (and its buffer) too — `pane
-        // del` is a full teardown, unlike `pane detach`.
-        if let Some(client) = &self.daemon {
-            let _ = client.delete_pane(id).await;
-        }
-        // A pane tmux owns is killed on the server: dropping only the row would
-        // leave a `%N` that the next reconciliation adopts right back.
-        if let Some(key) = info.link_key.clone() {
-            if let Err(e) = self
-                .tmux_send(info.session_id, &crate::tmux::kill_pane_command(&key))
-                .await
-            {
-                // Already gone is the state we wanted.
-                tracing::debug!("pane del: kill-pane {key} failed: {e}");
-            }
-        }
         if let Some(wid) = info.window_id {
             if let Some(arc_window) = self.windows.get(wid).await {
                 arc_window.panes.lock().await.retain(|x| *x != id);
@@ -1893,154 +2045,90 @@ impl SessionManager {
         Ok(())
     }
 
-    // ===== attach_pane / detach_pane (exclusivity, per link kind) =====
-
-    /// Bind a pane to a `Pipe` link.
-    ///
-    /// Exclusivity is per link kind (ADR 0010 §D3): a pipe link carries one byte
-    /// stream, so at most one pane may read it — attaching auto-detaches the
-    /// previous reader (its buffer survives). A `Control` link is not something
-    /// a pane can be attached to: its panes arrive from tmux with a `%N`.
-    pub async fn attach_pane(&self, pid: PaneId, lid: LinkId) -> Result<()> {
-        let arc_link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
-        let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-
-        // v0.6.0 (ADR 0010 §8): a pane may only be bound to a link of its own
-        // session. Without this, `pane attach` could move a pane into another
-        // workspace's byte stream and the two would disagree about who owns it.
-        if info.session_id != arc_link.info.session_id {
-            return Err(Error::NotInSession {
-                session: arc_link.info.session_id,
-                what: "pane",
-                id: pid.to_string(),
-            });
+    pub async fn del_buffer(&self, id: BufferId) -> Result<()> {
+        let info = self
+            .buffers
+            .get(id)
+            .await
+            .ok_or_else(|| Error::Invalid(format!("buffer not found: {id}")))?;
+        let bridge = self.buffer_bridges.lock().await.remove(&id);
+        if let Some(bridge) = bridge {
+            let _ = bridge.close().await;
         }
-        if arc_link.info.is_control() {
-            return Err(Error::Invalid(format!(
-                "link {lid} is the session's tmux control link; a pane reaches it by \
-                 being created in tmux (its `%N` is its address), not by attaching"
-            )));
+        self.buffer_memory.lock().await.remove(&id);
+        self.buffers.remove(id).await;
+        if let Some(client) = &self.daemon {
+            let _ = client.delete_buffer(id).await;
         }
-
-        if info.link_id == Some(lid) {
-            // `pane attach` is also the reconnect verb. The metadata can say
-            // "attached" while the daemon was stopped or restarted and no
-            // longer owns this link's transport.
-            if let Some(client) = &self.daemon {
-                if client.attach(pid, lid).await.is_err() {
-                    client.ensure().await?;
-                    client
-                        .create_link(lid, pipe_transport(&arc_link.info)?)
-                        .await?;
-                    client.attach(pid, lid).await?;
-                }
-                let bridge: Arc<dyn PaneBridge> =
-                    Arc::new(DaemonBridge::new(Arc::clone(client), pid));
-                self.pane_bridges.lock().await.insert(pid, bridge);
-            }
-            return Ok(());
-        }
-        if let Some(existing) = info.link_id {
-            return Err(Error::PaneAlreadyAttached(pid, existing));
-        }
-        if let Some(key) = info.link_key.as_deref() {
-            // A pane on a control link is addressed by `%N` on that link and
-            // nothing else (ADR 0010 §D6).
-            return Err(Error::Invalid(format!(
-                "pane {pid} is addressed by {key} on its session's control link; \
-                 it cannot be attached to a pipe link"
-            )));
-        }
-
-        // One reader per pipe: detach whatever pane was reading this link.
-        let mut to_detach: Vec<PaneId> = Vec::new();
-        for p in self.panes.list_all().await {
-            if p.id != pid && p.link_id == Some(lid) {
-                to_detach.push(p.id);
+        for mut pane in self.panes.list_all().await {
+            if pane.buffer_id == Some(id) {
+                pane.buffer_id = None;
+                self.panes.insert(pane).await;
             }
         }
-        for old_pid in to_detach {
-            let old_bridge = self.pane_bridges.lock().await.remove(&old_pid);
-            if let Some(b) = old_bridge {
-                let _ = b.close().await;
-            }
-            if let Some(mut old_info) = self.panes.get(old_pid).await {
-                old_info.link_id = None;
-                self.panes.insert(old_info).await;
-            }
-            tracing::info!(
-                "auto-detached pane {old_pid} from link {lid} (new attach: {pid})"
-            );
-        }
-
-        // Build the bridge.
-        let bridge: Arc<dyn PaneBridge> = match &self.daemon {
-            // ADR 0009: the daemon owns the pump and the buffer. It
-            // enforces the same one-reader rule locally (it must — two pumps
-            // on one transport would duplicate every byte into two
-            // buffers), so the metadata loop above and the daemon
-            // agree on which pane is active.
-            Some(client) => {
-                if client.attach(pid, lid).await.is_err() {
-                    // The daemon may have restarted since this link
-                    // was created. Heal it from the persisted
-                    // transport spec, then bind again — this is what
-                    // makes `pane attach` a reconnect, not just a
-                    // metadata edit.
-                    client.ensure().await?;
-                    client
-                        .create_link(lid, pipe_transport(&arc_link.info)?)
-                        .await?;
-                    client.attach(pid, lid).await?;
-                }
-                Arc::new(DaemonBridge::new(Arc::clone(client), pid))
-            }
-            None => {
-                let buf = self.buffer_for(pid).await;
-                Arc::new(DirectBridge::new_with_buffer(
-                    Arc::clone(&arc_link.transport),
-                    buf,
-                ))
-            }
-        };
-
-        self.pane_bridges.lock().await.insert(pid, bridge);
-
-        if let Some(mut i) = self.panes.get(pid).await {
-            i.link_id = Some(lid);
-            self.panes.insert(i).await;
-        }
-
+        self.rebuild_session_manager(info.session_id).await?;
         self.save_state().await?;
         Ok(())
     }
 
-    /// Detach a pane from its link. A pipe pane keeps its buffer; a tmux pane
-    /// cannot be detached at all (its `%N` is its identity on the server).
-    pub async fn detach_pane(&self, pid: PaneId) -> Result<()> {
-        let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        // A tmux pane cannot be detached, only killed (arch.md §8).
-        if info.link_key.is_some() {
-            return Err(Error::TmuxPaneNotDetachable(pid));
+    // ===== pane UI to buffer association =====
+
+    /// Point a UI pane at the buffer produced by a raw link.
+    pub async fn attach_pane(&self, pid: PaneId, lid: LinkId) -> Result<()> {
+        let link = self.links.get(lid).await.ok_or(Error::LinkNotFound(lid))?;
+        let pane = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        if pane.session_id != link.info.session_id {
+            return Err(Error::NotInSession {
+                session: link.info.session_id,
+                what: "pane",
+                id: pid.to_string(),
+            });
         }
-        let _lid = match info.link_id {
-            Some(l) => l,
-            None => return Err(Error::NotAttached(pid)),
-        };
-        let bridge = self.pane_bridges.lock().await.remove(&pid);
-        if let Some(b) = bridge {
-            // P0-a: releases this pane's pump; the link's transport lives.
-            let _ = b.close().await;
+        if link.info.is_control() {
+            return Err(Error::Invalid(format!(
+                "link {lid} is a tmux control link; pane {pid} must reference the buffer \
+                 created for a tmux pane handle"
+            )));
         }
-        // ADR 0009: also tell the daemon directly — a hydrated pane has no
-        // cached bridge, but its pump in the daemon may still be running.
+        let buffer_id = self
+            .session_managers
+            .lock()
+            .await
+            .get(&pane.session_id)
+            .and_then(|manager| manager.buffer_for_link(lid))
+            .ok_or_else(|| Error::Invalid(format!("link {lid} produced no buffer")))?;
+        let buffer = self
+            .buffers
+            .get(buffer_id)
+            .await
+            .ok_or_else(|| Error::Invalid(format!("buffer {buffer_id} not found")))?;
+
         if let Some(client) = &self.daemon {
-            let _ = client.detach(pid).await;
+            if client.attach_buffer(buffer.id, lid).await.is_err() {
+                client.ensure().await?;
+                client.create_link(lid, pipe_transport(&link.info)?).await?;
+                client.create_buffer(buffer.id).await?;
+                client.attach_buffer(buffer.id, lid).await?;
+            }
+            let bridge: Arc<dyn PaneBridge> =
+                Arc::new(DaemonBridge::new(Arc::clone(client), buffer.id));
+            self.buffer_bridges.lock().await.insert(buffer.id, bridge);
         }
-        if let Some(mut i) = self.panes.get(pid).await {
-            i.link_id = None;
-            self.panes.insert(i).await;
+
+        let mut updated = pane;
+        updated.buffer_id = Some(buffer.id);
+        self.panes.insert(updated).await;
+        self.save_state().await?;
+        Ok(())
+    }
+
+    /// Remove the UI association. The buffer and backend pump keep running.
+    pub async fn detach_pane(&self, pid: PaneId) -> Result<()> {
+        let mut pane = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        if pane.buffer_id.take().is_none() {
+            return Err(Error::NotAttached(pid));
         }
+        self.panes.insert(pane).await;
         self.save_state().await?;
         Ok(())
     }
@@ -2048,7 +2136,11 @@ impl SessionManager {
     // ===== window ⇄ pane association =====
 
     pub async fn add_pane_to_window(&self, wid: WindowId, pid: PaneId) -> Result<()> {
-        let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+        let arc_window = self
+            .windows
+            .get(wid)
+            .await
+            .ok_or(Error::WindowNotFound(wid))?;
         let pane_info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
         // v0.6.0 (ADR 0010 §8): a window and its panes share one session.
         if arc_window.info.session_id != pane_info.session_id {
@@ -2061,7 +2153,10 @@ impl SessionManager {
         {
             let panes = arc_window.panes.lock().await;
             if panes.contains(&pid) {
-                return Err(Error::AlreadyInWindow { window: wid, pane: pid });
+                return Err(Error::AlreadyInWindow {
+                    window: wid,
+                    pane: pid,
+                });
             }
         }
         if let Some(mut info) = self.panes.get(pid).await {
@@ -2074,12 +2169,19 @@ impl SessionManager {
     }
 
     pub async fn remove_pane_from_window(&self, wid: WindowId, pid: PaneId) -> Result<()> {
-        let arc_window = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+        let arc_window = self
+            .windows
+            .get(wid)
+            .await
+            .ok_or(Error::WindowNotFound(wid))?;
         let _ = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
         {
             let mut panes = arc_window.panes.lock().await;
             if !panes.contains(&pid) {
-                return Err(Error::NotInWindow { window: wid, pane: pid });
+                return Err(Error::NotInWindow {
+                    window: wid,
+                    pane: pid,
+                });
             }
             panes.retain(|p| *p != pid);
         }
@@ -2093,7 +2195,11 @@ impl SessionManager {
 
     pub async fn move_pane_to_window(&self, pid: PaneId, wid: WindowId) -> Result<()> {
         let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-        let target = self.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+        let target = self
+            .windows
+            .get(wid)
+            .await
+            .ok_or(Error::WindowNotFound(wid))?;
         // Guard BEFORE touching the old window: a rejected move must leave the
         // pane where it was, not half-moved (arch.md §8 — cross-session moves
         // are never an implicit side effect).
@@ -2121,8 +2227,10 @@ impl SessionManager {
         // the call fails, nothing has changed yet — a failed resize must not
         // leave a modified `PaneInfo` behind, which is the same silent lie as
         // returning Ok without doing anything.
-        if let Some(bridge) = self.pane_bridges.lock().await.get(&pid).cloned() {
-            bridge.resize(cols, rows).await?;
+        if let Some(buffer_id) = info.buffer_id {
+            if let Some(bridge) = self.buffer_bridges.lock().await.get(&buffer_id).cloned() {
+                bridge.resize(cols, rows).await?;
+            }
         }
         let mut updated = info;
         updated.cols = cols;
@@ -2190,61 +2298,28 @@ impl SessionManager {
     /// that only loaded `state.json` — the transport and the buffer were
     /// never in this process to begin with.
     async fn bridge_for(&self, pid: PaneId) -> Result<Arc<dyn PaneBridge>> {
-        if let Some(b) = self.pane_bridges.lock().await.get(&pid).cloned() {
-            return Ok(b);
+        let pane = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
+        let buffer_id = pane.buffer_id.ok_or(Error::NotAttached(pid))?;
+        if let Some(bridge) = self.buffer_bridges.lock().await.get(&buffer_id).cloned() {
+            return Ok(bridge);
         }
-        let info = self.panes.get(pid).await.ok_or(Error::PaneNotFound(pid))?;
-
-        // A pane that carries a `link_key` belongs to a control link: tmux is
-        // already resident and holds its scrollback, so it is never
-        // daemon-backed and comes first.
-        if let Some(b) = self.control_bridge(&info).await? {
-            self.pane_bridges.lock().await.insert(pid, Arc::clone(&b));
-            return Ok(b);
-        }
-
-        if let Some(client) = &self.daemon {
-            return match info.link_id {
-                Some(lid) => {
-                    if crate::daemon::client::probe_link(lid).await.unwrap_or(false) {
-                        Ok(Arc::new(DaemonBridge::new(Arc::clone(client), pid)))
-                    } else {
-                        Err(Error::LinkNotConnected(lid))
-                    }
-                }
-                None => {
-                    // Detached direct pane: the daemon keeps its buffer so
-                    // the scrollback stays READABLE (a pane's core is its
-                    // buffer), while writes are refused there for want of
-                    // an attached link.
-                    if crate::daemon::client::probe_pane(pid).await.unwrap_or(false) {
-                        Ok(Arc::new(DaemonBridge::new(Arc::clone(client), pid)))
-                    } else {
-                        Err(Error::NotAttached(pid))
-                    }
-                }
-            };
-        }
-
-        match info.link_id {
-            Some(lid) => {
-                let connected = self
-                    .links
-                    .get(lid)
-                    .await
-                    .map(|l| l.connected)
-                    .unwrap_or(false);
-                if connected {
-                    // Connected link but no bridge: a bug, not a user
-                    // state. Surface it as NotAttached rather than
-                    // silently returning zero bytes.
-                    Err(Error::NotAttached(pid))
-                } else {
-                    Err(Error::LinkNotConnected(lid))
-                }
-            }
-            None => Err(Error::NotAttached(pid)),
-        }
+        let buffer = self
+            .buffers
+            .get(buffer_id)
+            .await
+            .ok_or_else(|| Error::Invalid(format!("buffer {buffer_id} not found")))?;
+        let bridge: Arc<dyn PaneBridge> = match buffer.origin.clone() {
+            BufferOrigin::Tmux {
+                link_id,
+                pane_handle,
+            } => self.control_bridge(&buffer, link_id, &pane_handle).await?,
+            BufferOrigin::Link { link_id } => self.raw_bridge(&buffer, link_id).await?,
+        };
+        self.buffer_bridges
+            .lock()
+            .await
+            .insert(buffer_id, Arc::clone(&bridge));
+        Ok(bridge)
     }
 
     /// The bridge for a pane that lives on its session's control link, if it
@@ -2259,13 +2334,17 @@ impl SessionManager {
     /// for this `%N` before the bridge is handed out. Both calls are
     /// idempotent, and the second is what makes a pane discovered late
     /// (arch.md §13: no history) start streaming from now on.
-    async fn control_bridge(&self, info: &PaneInfo) -> Result<Option<Arc<dyn PaneBridge>>> {
-        let (Some(link_id), Some(key)) = (info.link_id, info.link_key.clone()) else {
-            return Ok(None);
+    async fn control_bridge(
+        &self,
+        info: &BufferInfo,
+        link_id: LinkId,
+        key: &str,
+    ) -> Result<Arc<dyn PaneBridge>> {
+        let Some(link) = self.links.get(link_id).await else {
+            return Err(Error::LinkNotConnected(link_id));
         };
-        let Some(link) = self.links.get(link_id).await else { return Ok(None) };
         if !link.info.is_control() {
-            return Ok(None);
+            return Err(Error::LinkNotConnected(link_id));
         }
         match &self.daemon {
             Some(client) => {
@@ -2282,30 +2361,114 @@ impl SessionManager {
                         )
                         .await?;
                 }
-                client.attach_pane(info.session_id, info.id, &key).await?;
+                client
+                    .attach_control_buffer(info.session_id, info.id, key)
+                    .await?;
                 let bridge: Arc<dyn PaneBridge> =
                     Arc::new(DaemonBridge::new(Arc::clone(client), info.id));
-                Ok(Some(bridge))
+                Ok(bridge)
             }
             None => {
                 let control = self.ensure_local_control(info.session_id).await?;
                 let buffer = self.buffer_for(info.id).await;
                 let bridge: Arc<dyn PaneBridge> =
-                    Arc::new(ControlBridge::new(control, key, buffer));
-                Ok(Some(bridge))
+                    Arc::new(ControlBridge::new(control, key.to_string(), buffer));
+                Ok(bridge)
             }
         }
     }
 
+    async fn raw_bridge(&self, info: &BufferInfo, link_id: LinkId) -> Result<Arc<dyn PaneBridge>> {
+        if let Some(client) = &self.daemon {
+            let link_live = crate::daemon::client::probe_link(link_id)
+                .await
+                .unwrap_or(false);
+            let buffer_live = crate::daemon::client::probe_buffer(info.id)
+                .await
+                .unwrap_or(false);
+            if !link_live && !buffer_live {
+                return Err(Error::LinkNotConnected(link_id));
+            }
+            if link_live {
+                client.attach_buffer(info.id, link_id).await?;
+            }
+            return Ok(Arc::new(DaemonBridge::new(Arc::clone(client), info.id)));
+        }
+        let link = self
+            .links
+            .get(link_id)
+            .await
+            .ok_or(Error::LinkNotConnected(link_id))?;
+        if !link.connected {
+            return Err(Error::LinkNotConnected(link_id));
+        }
+        let buffer = self.buffer_for(info.id).await;
+        Ok(Arc::new(DirectBridge::new_with_buffer(
+            Arc::clone(&link.transport),
+            buffer,
+        )))
+    }
+
     // ===== internal helpers =====
 
-    /// The per-pane buffer, created on first use and kept across
+    /// The buffer, created on first use and kept independently of its UI panes.
     /// detach/re-attach.
-    async fn buffer_for(&self, pid: PaneId) -> Arc<Mutex<RingBuffer>> {
-        let mut map = self.pane_buffers.lock().await;
-        map.entry(pid)
+    async fn buffer_for(&self, buffer_id: BufferId) -> Arc<Mutex<RingBuffer>> {
+        let mut map = self.buffer_memory.lock().await;
+        map.entry(buffer_id)
             .or_insert_with(|| Arc::new(Mutex::new(RingBuffer::new(DIRECT_BUFFER_CAPACITY))))
             .clone()
+    }
+
+    async fn create_buffer(
+        &self,
+        session_id: SessionId,
+        name: String,
+        origin: BufferOrigin,
+    ) -> BufferId {
+        let id = BufferId::new();
+        self.buffers
+            .insert(BufferInfo {
+                id,
+                session_id,
+                name,
+                created_at: chrono::Utc::now(),
+                origin,
+            })
+            .await;
+        id
+    }
+
+    async fn buffers_for_session(&self, session_id: SessionId) -> Vec<BufferInfo> {
+        self.buffers
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|buffer| buffer.session_id == session_id)
+            .collect()
+    }
+
+    async fn rebuild_session_manager(&self, session_id: SessionId) -> Result<()> {
+        let info = self.get_session(session_id).await?;
+        let links: Vec<LinkId> = self
+            .links
+            .list()
+            .await
+            .into_iter()
+            .filter(|link| link.info.session_id == session_id)
+            .map(|link| link.id)
+            .collect();
+        let buffers = self.buffers_for_session(session_id).await;
+        if links.is_empty() {
+            self.session_managers.lock().await.remove(&session_id);
+            return Ok(());
+        }
+        let manager = SessionManagerRuntime::from_parts(&info, &links, &buffers)?;
+        self.session_managers
+            .lock()
+            .await
+            .insert(session_id, manager);
+        Ok(())
     }
 
     // ===== state persistence =====
@@ -2330,11 +2493,13 @@ impl SessionManager {
         }
 
         let panes = self.panes.list_all().await;
+        let buffers = self.buffers.list_all().await;
 
         let snapshot = super::state::StateSnapshot {
             schema_version: super::state::SCHEMA_VERSION,
             sessions,
             links,
+            buffers,
             windows,
             panes,
         };
@@ -2358,11 +2523,17 @@ impl SessionManager {
         for info in snapshot.sessions {
             mgr.sessions.insert(Session::new(info)).await;
         }
+        for info in snapshot.buffers {
+            if mgr.sessions.get(info.session_id).await.is_some() {
+                mgr.buffers.insert(info).await;
+            }
+        }
         for info in snapshot.links {
             if mgr.sessions.get(info.session_id).await.is_none() {
                 tracing::warn!(
                     "hydration: skipping link {} — no session {} in state",
-                    info.id, info.session_id
+                    info.id,
+                    info.session_id
                 );
                 continue;
             }
@@ -2372,7 +2543,8 @@ impl SessionManager {
             if mgr.sessions.get(ws.info.session_id).await.is_none() {
                 tracing::warn!(
                     "hydration: skipping window {} — no session {} in state",
-                    ws.info.id, ws.info.session_id
+                    ws.info.id,
+                    ws.info.session_id
                 );
                 continue;
             }
@@ -2386,11 +2558,24 @@ impl SessionManager {
             if mgr.sessions.get(pinfo.session_id).await.is_none() {
                 tracing::warn!(
                     "hydration: skipping pane {} — no session {} in state",
-                    pinfo.id, pinfo.session_id
+                    pinfo.id,
+                    pinfo.session_id
                 );
                 continue;
             }
             mgr.panes.insert(pinfo).await;
+        }
+        let session_ids: Vec<SessionId> = mgr
+            .sessions
+            .list()
+            .await
+            .into_iter()
+            .map(|session| session.info.id)
+            .collect();
+        for session_id in session_ids {
+            if let Err(e) = mgr.rebuild_session_manager(session_id).await {
+                tracing::warn!("hydration: session manager for {session_id}: {e}");
+            }
         }
         // Nothing else is rebuilt here on purpose. A pipe link's transport died
         // with the process that owned it (see `Link::connected`: false is the
@@ -2537,14 +2722,20 @@ fn control_link_address(host: &TmuxHostConfig, tmux_argv: &[String]) -> LinkAddr
         TmuxHostConfig::Local => {
             let mut words = tmux_argv.iter().cloned();
             let command = words.next().unwrap_or_else(|| "tmux".to_string());
-            LinkAddress::Shell { command, args: words.collect() }
+            LinkAddress::Shell {
+                command,
+                args: words.collect(),
+            }
         }
         TmuxHostConfig::Ssh { destination, args } => {
             // `ssh [-p N] [-i key] [destination]`: with no user in the
             // destination ssh uses the local one, and so does this record.
             let (user, host) = match destination.rsplit_once('@') {
                 Some((user, host)) => (user.to_string(), host.to_string()),
-                None => (std::env::var("USER").unwrap_or_default(), destination.clone()),
+                None => (
+                    std::env::var("USER").unwrap_or_default(),
+                    destination.clone(),
+                ),
             };
             let mut port: u16 = 22;
             let mut identity = None;
@@ -2560,7 +2751,13 @@ fn control_link_address(host: &TmuxHostConfig, tmux_argv: &[String]) -> LinkAddr
                     _ => {}
                 }
             }
-            LinkAddress::Ssh { host, port, user, identity, proxy: None }
+            LinkAddress::Ssh {
+                host,
+                port,
+                user,
+                identity,
+                proxy: None,
+            }
         }
     }
 }
@@ -2593,11 +2790,20 @@ mod control_address_tests {
     fn a_remote_control_link_is_ssh_not_shell() {
         let host = TmuxHostConfig::Ssh {
             destination: "dev@box".into(),
-            args: vec!["-p".into(), "2222".into(), "-i".into(), "~/.ssh/id_ed25519".into()],
+            args: vec![
+                "-p".into(),
+                "2222".into(),
+                "-i".into(),
+                "~/.ssh/id_ed25519".into(),
+            ],
         };
         let (_, tmux_argv) = argv_of(&host);
         let addr = control_link_address(&host, &tmux_argv);
-        assert_eq!(addr.kind(), "ssh", "a remote tmux session is reached over ssh: {addr:?}");
+        assert_eq!(
+            addr.kind(),
+            "ssh",
+            "a remote tmux session is reached over ssh: {addr:?}"
+        );
         assert_eq!(
             addr,
             LinkAddress::Ssh {
@@ -2612,7 +2818,10 @@ mod control_address_tests {
 
     #[test]
     fn a_destination_without_a_user_still_reads_as_ssh() {
-        let host = TmuxHostConfig::Ssh { destination: "box".into(), args: vec![] };
+        let host = TmuxHostConfig::Ssh {
+            destination: "box".into(),
+            args: vec![],
+        };
         let (_, tmux_argv) = argv_of(&host);
         match control_link_address(&host, &tmux_argv) {
             LinkAddress::Ssh { host, port, .. } => {

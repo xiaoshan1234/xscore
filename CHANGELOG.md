@@ -14,15 +14,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `powershell.exe` and `pwsh.exe` are ordinary programs, not special launcher
   keywords. Repeat the `arg=` query parameter to pass their arguments; all
   shell-family URLs normalize to the existing `TransportConfig::Shell`.
-  `session new` defaults to the standard `wsl.exe` path on Windows, and the
-  resident daemon uses a per-user Windows named pipe instead of a Unix socket.
+  The resident daemon uses a per-user Windows named pipe instead of a Unix
+  socket.
 
 ### Changed
 
-- **Session creation and child creation are separate.** `session new` no longer
-  accepts a URL and creates an empty native Session. `--tmux` still creates the
-  backend structure through tmux. `link add`, `window add` and `pane add` now
-  require an existing Session; they never create an implicit `default`.
+- **Sessions require a Link and a SessionManager.** Raw Sessions accept one or
+  more repeatable `--link` URLs; tmux Sessions create their one control Link.
+  `window add`, `pane add` and `link add` require an explicit `--session`.
+- **Buffers are independent of Pane UI.** Buffers have their own persisted
+  `BufferId` and source origin. Pane stores only geometry, window placement and
+  `buffer_id`; Link IDs and tmux handles no longer live on Pane.
+- **Raw and Tmux SessionManagers convert Link input into Buffers.** Raw managers
+  route one or more Links; tmux managers route `%output %N` from one control
+  Link and reconcile window/pane events. The control client now uses `-CC` on a
+  dedicated PTY.
 - **Session takeover verbs are `attach` and `detach`.** `session adopt` is now
   `session attach`; `session forget` is now `session detach`. The latter still
   drops xscore rows and leaves tmux running.
@@ -41,26 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A Windows program as a link gets a warning.** `.exe`/`.bat`/`.cmd` targets
   connect and then produce no output (WSL interop gives them no console behind a
   pty), so the CLI says so instead of leaving an empty buffer.
-- **`session new` describes its first link with a URL.** The flags `--cmd`,
-  `--cwd`, `--cols`, `--rows` and `--empty` are gone; the command, working
-  directory and geometry are query parameters of the link URL, so the flags
-  that remain are `--tmux` and `--socket`, plus `-c` for a saved template:
-
-      xscore session new dev 'shell:///bin/bash?cwd=/var/log&cols=120&rows=40'
-      xscore session new dev                      # $SHELL at 80x24
-      xscore session new dev -c local             # from `link config add`
-      xscore session new work --tmux 'ssh://box'  # tmux on another host
-      xscore session new work --tmux '?cmd=htop'  # local tmux, first command
-
-  With `--tmux` the URL names the host and the **scheme is the link**:
-  `shell://` (or nothing) is the local tmux server, `ssh://[user@]host[:port]`
-  is one reached over ssh, and the control link records which —
-  `link list` prints `control/shell` / `control/ssh` instead of a bare
-  `control`, and `link show` carries the matching address. A session always
-  gets a link, window and pane, so `--empty` no longer exists. `link add`
-  accepts the same parameters, and an unknown query key is now an error instead
-  of being ignored.
-
 ### Fixed
 
 - **`pane attach` reconnects an already-bound pipe pane.** It used to return
@@ -87,7 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **The session tier and tmux through control mode.** `Session` becomes the
 workspace that owns windows, panes and links; tmux stops being a per-link
-option and becomes a backend, driven through one `tmux -C` client whose pane
+option and becomes a backend, driven through one `tmux -CC` client whose pane
 output is a byte stream rather than a screen snapshot. The daemon now owns tmux
 control clients as well as native transports, so pane data survives the CLI
 process. Breaking: `?tmux=on|auto|local|remote`, `SinkConfig`, `Sink`,
@@ -100,7 +86,7 @@ sessions instead of dropping them.
 - **tmux-backed sessions over the control client.** `xscore session new <name>
   --tmux [--socket S] [--ssh DEST] [--cmd C] [--cwd D] [--cols N --rows N]`
   creates a real tmux session and takes over `session adopt <name>` for one that
-  already exists. The session's structure is tmux's: a single `tmux -C attach`
+  already exists. The session's structure is tmux's: a single `tmux -CC attach`
   client (over `ssh` for a remote host, `BatchMode=yes`) is the session's **one
   link**, `%output %N` fills each pane's `RingBuffer` addressed by `link_key`,
   `%window-add` / `%layout-change` / `%unlinked-window-close` keep the window and
@@ -148,7 +134,7 @@ sessions instead of dropping them.
 ### Changed
 
 - **tmux pane data is streamed by the daemon and survives CLI exit.**
-  The session's `tmux -C attach` client, its `%output %N` subscriptions and
+  The session's `tmux -CC attach` client, its `%output %N` subscriptions and
   every pane's `RingBuffer` moved from the CLI process into the resident
   daemon (one control slot per session), so `data read` in a new process returns
   the **bytes** since the daemon subscribed instead of a `capture-pane` screen

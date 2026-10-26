@@ -1,10 +1,10 @@
 // core/link_registry.rs
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use super::address::LinkAddress;
 use super::id::LinkId;
 use super::link::{ArcLink, Link};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Default)]
 pub struct LinkRegistry {
@@ -18,7 +18,9 @@ struct LinkRegistryInner {
 }
 
 impl LinkRegistry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub async fn insert(&self, link: Link) -> ArcLink {
         let id = link.id;

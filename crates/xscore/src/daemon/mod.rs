@@ -23,7 +23,7 @@ pub mod protocol;
 pub mod server;
 
 pub use client::{
-    ensure_daemon, probe_link, probe_pane, send, socket_path, DaemonClient, DaemonTransport,
+    ensure_daemon, probe_buffer, probe_link, send, socket_path, DaemonClient, DaemonTransport,
 };
 pub use protocol::{Request, Response, Status};
 pub use server::run;

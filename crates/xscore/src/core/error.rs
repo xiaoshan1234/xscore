@@ -1,5 +1,5 @@
-use thiserror::Error;
 use super::id::{LinkId, PaneId, SessionId, WindowId};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -7,7 +7,6 @@ pub enum Error {
     LinkNotFound(LinkId),
 
     // ===== v0.6.0 (ADR 0010 §1) — the session tier =====
-
     /// Resolution by name failed (`--session work`, `session show work`). Keyed
     /// by name because that is what the user typed.
     #[error("session not found: {0}")]
@@ -34,7 +33,11 @@ pub enum Error {
     /// of the SAME session. Carries `what` ("pane", "window", "link") so the
     /// message names both sides of the rejected pairing.
     #[error("session {session} does not contain {what} {id}")]
-    NotInSession { session: SessionId, what: &'static str, id: String },
+    NotInSession {
+        session: SessionId,
+        what: &'static str,
+        id: String,
+    },
 
     #[error("window not found: {0}")]
     WindowNotFound(WindowId),
@@ -89,7 +92,6 @@ pub enum Error {
     #[error("daemon error: {0}")]
     Daemon(String),
 
-
     /// v0.4.0 (ADR 0008): the pane is already attached to another link.
     /// We never steal it silently — the user must detach first.
     #[error("pane {0} is already attached to link {1}; detach it first")]
@@ -104,11 +106,12 @@ pub enum Error {
     LinkIdExists(LinkId),
 
     // ===== v0.6.0 (ADR 0010 §D2) — tmux-backed sessions =====
-
     /// `session new --tmux` names the tmux session after the xscore session, so
     /// an existing tmux session of that name would be adopted by accident.
     /// `session attach` is the verb that says "this one already exists".
-    #[error("a tmux session named `{0}` already exists; use `xscore session attach {0}` to manage it")]
+    #[error(
+        "a tmux session named `{0}` already exists; use `xscore session attach {0}` to manage it"
+    )]
     TmuxSessionExists(String),
 
     /// The host was reachable but the session is not there (arch.md §6). Rows
@@ -126,7 +129,9 @@ pub enum Error {
     /// A tmux session has exactly one link — its control client (arch.md §4,
     /// "One tmux session, one link"). A second link would be a second
     /// mechanism driving the same server session.
-    #[error("session {0} is tmux-backed and already has its control link; add panes/windows, not links")]
+    #[error(
+        "session {0} is tmux-backed and already has its control link; add panes/windows, not links"
+    )]
     TmuxSessionHasOneLink(SessionId),
 
     /// ADR 0010 §D5: deleting a `Control` link would orphan every pane in the

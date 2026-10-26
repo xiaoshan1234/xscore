@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::core::{Error, LinkId, PaneId, Result, SessionId};
+use crate::core::{BufferId, Error, LinkId, Result, SessionId};
 use crate::model::{TmuxHostConfig, TmuxSocket, TransportConfig};
 
 /// Hard cap on a single frame body. A pane buffer is 64 KiB and the
@@ -34,15 +34,18 @@ pub enum Request {
     /// Snapshot of what the daemon holds.
     Status,
     /// Create (or replace) a link's live transport inside the daemon.
-    CreateLink { link: LinkId, transport: TransportConfig },
+    CreateLink {
+        link: LinkId,
+        transport: TransportConfig,
+    },
     /// Close a link's transport and unbind its panes. Pane buffers stay.
     DeleteLink { link: LinkId },
-    /// Ensure a pane slot (and its buffer) exists. Idempotent.
-    CreatePane { pane: PaneId },
-    /// Drop a pane slot and its buffer. Idempotent.
-    DeletePane { pane: PaneId },
+    /// Ensure a buffer slot exists. Idempotent.
+    CreateBuffer { buffer: BufferId },
+    /// Drop a buffer slot and its bytes. Idempotent.
+    DeleteBuffer { buffer: BufferId },
     /// Open (or reuse) the control client of a tmux session and answer with
-    /// its structure. The daemon — not the CLI — owns the `tmux -C attach`
+    /// its structure. The daemon — not the CLI — owns the `tmux -CC attach`
     /// process from here on, which is what makes `%output %N` a stream that
     /// outlives the CLI (ADR 0009 §1, ADR 0010 §D2).
     ///
@@ -69,14 +72,14 @@ pub enum Request {
     CloseTmux { session: SessionId },
     /// Is the session's control client alive? (`link show`'s `connected`.)
     ProbeTmux { session: SessionId },
-    /// Bind a pane to a link and start its pump.
+    /// Bind a buffer to a link and start its pump.
     ///
-    /// `key: Some("%N")` means "this pane is `%N` on `session`'s control
-    /// client": subscribe `%output %N` into that pane's buffer. It is a no-op
+    /// `key: Some("%N")` means "this buffer is fed by `%N` on `session`'s
+    /// control client": subscribe `%output %N` into that buffer. It is a no-op
     /// when the pane is already attached — a second subscriber would append
     /// every byte twice. `key: None` is the native pipe path below.
     Attach {
-        pane: PaneId,
+        buffer: BufferId,
         #[serde(default)]
         link: Option<LinkId>,
         #[serde(default)]
@@ -84,14 +87,18 @@ pub enum Request {
         #[serde(default)]
         session: Option<SessionId>,
     },
-    /// Stop a pane's pump. The buffer (and the link) survive.
-    Detach { pane: PaneId },
-    /// Non-destructive snapshot read of the pane's buffer.
-    Read { pane: PaneId, max: usize },
-    /// Write bytes (hex-encoded) to the pane's attached link.
-    Write { pane: PaneId, data: String },
-    /// Resize the pane's attached transport.
-    Resize { pane: PaneId, cols: u16, rows: u16 },
+    /// Stop a buffer's pump. The buffer (and the link) survive.
+    Detach { buffer: BufferId },
+    /// Non-destructive snapshot read of the buffer.
+    Read { buffer: BufferId, max: usize },
+    /// Write bytes (hex-encoded) to the buffer's attached transport.
+    Write { buffer: BufferId, data: String },
+    /// Resize the buffer's attached transport.
+    Resize {
+        buffer: BufferId,
+        cols: u16,
+        rows: u16,
+    },
     /// Ask the daemon to exit (it removes its socket on the way out).
     Stop,
 }
@@ -100,8 +107,8 @@ pub enum Request {
 /// buffer — enough for `xscore daemon status` to be diagnosable without
 /// a separate op.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PaneStatus {
-    pub pane: PaneId,
+pub struct BufferStatus {
+    pub buffer: BufferId,
     /// Attached link id, or `""` when the pane is detached. Empty string
     /// (not null) keeps the field a plain string as specified in ADR
     /// 0009's protocol table.
@@ -162,7 +169,8 @@ pub struct Status {
     /// The daemon's PID — handy for `kill -TERM` when debugging.
     pub pid: u32,
     pub links: Vec<LinkId>,
-    pub panes: Vec<PaneStatus>,
+    #[serde(default)]
+    pub buffers: Vec<BufferStatus>,
     /// One entry per tmux session the daemon holds a control client for.
     #[serde(default)]
     pub tmux: Vec<TmuxStatus>,
@@ -206,33 +214,55 @@ impl Response {
     }
 
     pub fn bytes(bytes: &[u8]) -> Self {
-        Self { data: Some(to_hex(bytes)), ..Self::ok() }
+        Self {
+            data: Some(to_hex(bytes)),
+            ..Self::ok()
+        }
     }
 
     pub fn count(n: usize) -> Self {
-        Self { n: Some(n), ..Self::ok() }
+        Self {
+            n: Some(n),
+            ..Self::ok()
+        }
     }
 
     pub fn status(status: Status) -> Self {
-        Self { status: Some(status), ..Self::ok() }
+        Self {
+            status: Some(status),
+            ..Self::ok()
+        }
     }
 
     pub fn structure(structure: TmuxStructure) -> Self {
-        Self { structure: Some(structure), ..Self::ok() }
+        Self {
+            structure: Some(structure),
+            ..Self::ok()
+        }
     }
 
     /// The `ProbeTmux` answer.
     pub fn bool(alive: bool) -> Self {
-        Self { alive: Some(alive), ..Self::ok() }
+        Self {
+            alive: Some(alive),
+            ..Self::ok()
+        }
     }
 
     /// The `TmuxCommand` answer.
     pub fn lines(lines: Vec<String>) -> Self {
-        Self { lines: Some(lines), ..Self::ok() }
+        Self {
+            lines: Some(lines),
+            ..Self::ok()
+        }
     }
 
     pub fn err(message: impl Into<String>) -> Self {
-        Self { ok: false, error: Some(message.into()), ..Self::ok() }
+        Self {
+            ok: false,
+            error: Some(message.into()),
+            ..Self::ok()
+        }
     }
 }
 
@@ -258,12 +288,12 @@ pub fn from_hex(s: &str) -> Result<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(bytes.len() / 2);
     for pair in bytes.chunks(2) {
-        let hi = (pair[0] as char).to_digit(16).ok_or_else(|| {
-            Error::Invalid(format!("invalid hex digit {:?}", pair[0] as char))
-        })?;
-        let lo = (pair[1] as char).to_digit(16).ok_or_else(|| {
-            Error::Invalid(format!("invalid hex digit {:?}", pair[1] as char))
-        })?;
+        let hi = (pair[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| Error::Invalid(format!("invalid hex digit {:?}", pair[0] as char)))?;
+        let lo = (pair[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| Error::Invalid(format!("invalid hex digit {:?}", pair[1] as char)))?;
         out.push(((hi << 4) | lo) as u8);
     }
     Ok(out)
@@ -368,25 +398,64 @@ mod tests {
 
     #[test]
     fn all_ops_use_snake_case_discriminators() {
-        let pid = PaneId::new();
+        let pid = BufferId::new();
         let lid = LinkId::new();
         let cases = [
             (Request::Ping, "ping"),
             (Request::Status, "status"),
             (Request::DeleteLink { link: lid }, "delete_link"),
-            (Request::CreatePane { pane: pid }, "create_pane"),
-            (Request::DeletePane { pane: pid }, "delete_pane"),
+            (Request::CreateBuffer { buffer: pid }, "create_buffer"),
+            (Request::DeleteBuffer { buffer: pid }, "delete_buffer"),
             (
-                Request::Attach { pane: pid, link: Some(lid), key: None, session: None },
+                Request::Attach {
+                    buffer: pid,
+                    link: Some(lid),
+                    key: None,
+                    session: None,
+                },
                 "attach",
             ),
-            (Request::Detach { pane: pid }, "detach"),
-            (Request::Read { pane: pid, max: 10 }, "read"),
-            (Request::Write { pane: pid, data: "00".into() }, "write"),
-            (Request::Resize { pane: pid, cols: 80, rows: 24 }, "resize"),
-            (Request::CloseTmux { session: SessionId::new() }, "close_tmux"),
-            (Request::Structure { session: SessionId::new() }, "structure"),
-            (Request::ProbeTmux { session: SessionId::new() }, "probe_tmux"),
+            (Request::Detach { buffer: pid }, "detach"),
+            (
+                Request::Read {
+                    buffer: pid,
+                    max: 10,
+                },
+                "read",
+            ),
+            (
+                Request::Write {
+                    buffer: pid,
+                    data: "00".into(),
+                },
+                "write",
+            ),
+            (
+                Request::Resize {
+                    buffer: pid,
+                    cols: 80,
+                    rows: 24,
+                },
+                "resize",
+            ),
+            (
+                Request::CloseTmux {
+                    session: SessionId::new(),
+                },
+                "close_tmux",
+            ),
+            (
+                Request::Structure {
+                    session: SessionId::new(),
+                },
+                "structure",
+            ),
+            (
+                Request::ProbeTmux {
+                    session: SessionId::new(),
+                },
+                "probe_tmux",
+            ),
             (Request::Stop, "stop"),
         ];
         for (req, op) in cases {
@@ -412,7 +481,10 @@ mod tests {
         assert_eq!(v["socket"]["kind"], serde_json::json!("named"));
         assert_eq!(v["session"], serde_json::json!(sid.to_string()));
 
-        let cmd = Request::TmuxCommand { session: sid, command: "new-window".into() };
+        let cmd = Request::TmuxCommand {
+            session: sid,
+            command: "new-window".into(),
+        };
         let v = serde_json::to_value(&cmd).unwrap();
         assert_eq!(v["op"], serde_json::json!("tmux_command"));
         assert_eq!(v["command"], serde_json::json!("new-window"));
@@ -421,12 +493,14 @@ mod tests {
         // attach never grew them, and neither does an older caller.
         let native: Request = serde_json::from_value(serde_json::json!({
             "op": "attach",
-            "pane": PaneId::new().to_string(),
+            "buffer": BufferId::new().to_string(),
             "link": LinkId::new().to_string(),
         }))
         .unwrap();
         match native {
-            Request::Attach { link, key, session, .. } => {
+            Request::Attach {
+                link, key, session, ..
+            } => {
                 assert!(link.is_some());
                 assert!(key.is_none() && session.is_none());
             }
@@ -464,16 +538,13 @@ mod tests {
         assert!(back.ok);
 
         // A status with no tmux slots still deserializes (older daemons).
-        let old: Status = serde_json::from_str(
-            r#"{"pid":1,"links":[],"panes":[]}"#,
-        )
-        .unwrap();
+        let old: Status = serde_json::from_str(r#"{"pid":1,"links":[],"panes":[]}"#).unwrap();
         assert!(old.tmux.is_empty());
 
         let with_tmux = Status {
             pid: 1,
             links: vec![],
-            panes: vec![],
+            buffers: vec![],
             tmux: vec![TmuxStatus {
                 session: sid,
                 name: "work".into(),
@@ -497,7 +568,10 @@ mod tests {
     fn error_response_roundtrips() {
         let resp = Response::err("boom");
         let s = serde_json::to_string(&resp).unwrap();
-        assert!(s.contains(r#""ok":false"#) && s.contains(r#""error":"boom""#), "{s}");
+        assert!(
+            s.contains(r#""ok":false"#) && s.contains(r#""error":"boom""#),
+            "{s}"
+        );
         let back: Response = serde_json::from_str(&s).unwrap();
         assert_eq!(back, resp);
         assert!(back.status.is_none() && back.data.is_none());
@@ -507,7 +581,7 @@ mod tests {
     async fn frames_roundtrip_over_a_pipe() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let req = Request::Write {
-            pane: PaneId::new(),
+            buffer: BufferId::new(),
             data: to_hex(b"hello\n"),
         };
         write_frame(&mut a, &req).await.unwrap();
@@ -526,7 +600,9 @@ mod tests {
         rt.block_on(async {
             let (mut a, mut b) = tokio::io::duplex(64);
             use tokio::io::AsyncWriteExt;
-            a.write_all(&((MAX_FRAME + 1) as u32).to_le_bytes()).await.unwrap();
+            a.write_all(&((MAX_FRAME + 1) as u32).to_le_bytes())
+                .await
+                .unwrap();
             let err = read_frame::<_, Request>(&mut b).await.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         });

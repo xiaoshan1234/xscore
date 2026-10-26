@@ -18,19 +18,26 @@ pub enum DataCmd {
     /// never a screen snapshot. Empty means nothing arrived.
     /// Errors with `NotAttached(pid)` for orphan panes.
     Read {
-        #[arg(long)] pane: String,
-        #[arg(long, default_value_t = 4096)] bytes: usize,
+        #[arg(long)]
+        pane: String,
+        #[arg(long, default_value_t = 4096)]
+        bytes: usize,
     },
     /// Write bytes to a pane's bridge (default: read from stdin; or `--from-file <path>`).
     Write {
-        #[arg(long)] pane: String,
-        #[arg(long)] from_file: Option<String>,
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        from_file: Option<String>,
     },
     /// Resize a pane's terminal dimensions (forwards to bridge if attached).
     Resize {
-        #[arg(long)] pane: String,
-        #[arg(long)] cols: u16,
-        #[arg(long)] rows: u16,
+        #[arg(long)]
+        pane: String,
+        #[arg(long)]
+        cols: u16,
+        #[arg(long)]
+        rows: u16,
     },
 }
 

@@ -1,6 +1,7 @@
 // core/mod.rs
 pub mod address;
 pub mod buffer;
+pub mod buffer_registry;
 pub mod error;
 pub mod id;
 pub mod link;
@@ -9,6 +10,7 @@ pub mod manager;
 pub mod pane;
 pub mod pane_registry;
 pub mod session;
+pub mod session_managers;
 pub mod session_registry;
 pub mod state;
 pub mod window;
@@ -17,7 +19,7 @@ pub mod window_registry;
 pub use address::LinkAddress;
 pub use buffer::RingBuffer;
 pub use error::{Error, Result};
-pub use id::{LinkId, PaneId, SessionId, WindowId};
+pub use id::{BufferId, LinkId, PaneId, SessionId, WindowId};
 pub use manager::{LinkAddResult, SessionManager, TmuxCreateOptions};
 pub use session::Session;
 pub use session_registry::SessionRegistry;

@@ -2,8 +2,9 @@
 //
 // `xscore session {list,new,attach,show,kill,detach,rename}`: the workspace verbs.
 //
-// `session new` creates only the container. A native session starts empty;
-// links, windows and panes are created by their own commands afterwards.
+// A native `session new` creates the workspace plus at least one raw Link.
+// The backend SessionManager converts those Links into Buffers and creates the
+// initial UI Window/Pane. Links added later use `link add --session`.
 // With `--tmux` the session IS a tmux session: xscore creates it
 // (`new-session -d`), attaches the one control client that is its link, and
 // mirrors the default window and pane that tmux creates.
@@ -23,17 +24,17 @@ use std::sync::Arc;
 
 #[derive(Subcommand)]
 pub enum SessionCmd {
-    /// List sessions with the number of windows, panes and links each owns.
+    /// List sessions with the number of windows, panes, buffers and links.
     List,
 
-    /// Create a container. Native is empty; `--tmux` selects a real tmux
-    /// backend and lets tmux create its default window and pane.
+    /// Create a Session with its backend SessionManager. Raw sessions require
+    /// one or more Links; `--tmux` creates the single control Link.
     New(SessionNewArgs),
 
     /// Attach to an existing tmux session.
     Attach(SessionAttachArgs),
 
-    /// Print a session and the ids of its windows, panes and links.
+    /// Print a session and the ids of its windows, panes, buffers and links.
     Show { name: String },
 
     /// Destroy a session and everything in it (the only cascade in the model).
@@ -50,6 +51,10 @@ pub enum SessionCmd {
 pub struct SessionNewArgs {
     /// Session name — the handle every other verb resolves.
     pub name: String,
+
+    /// Link URL for a raw session. Repeat for multiple links.
+    #[arg(long = "link", value_name = "URL", required_unless_present = "tmux")]
+    pub links: Vec<String>,
 
     /// Make this a tmux session: xscore creates it and drives it through one
     /// control-mode client (ADR 0010 §D2). The tmux session is named after the
@@ -96,23 +101,32 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: SessionCmd) -> anyhow::Result<()
 
 async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
     println!(
-        "{:<36}  {:<24}  {:<24}  {:<7}  {:<5}  {:<5}",
-        "SESSION ID", "NAME", "BACKEND", "WINDOWS", "PANES", "LINKS"
+        "{:<36}  {:<24}  {:<24}  {:<7}  {:<5}  {:<5}  {:<7}",
+        "SESSION ID", "NAME", "BACKEND", "WINDOWS", "PANES", "BUFFERS", "LINKS"
     );
     let windows = mgr.windows.list_all().await;
     let panes = mgr.panes.list_all().await;
+    let buffers = mgr.buffers.list_all().await;
     let links = mgr.links.list().await;
     for info in mgr.list_sessions().await? {
-        let w = windows.iter().filter(|x| x.info.session_id == info.id).count();
+        let w = windows
+            .iter()
+            .filter(|x| x.info.session_id == info.id)
+            .count();
         let p = panes.iter().filter(|x| x.session_id == info.id).count();
-        let l = links.iter().filter(|x| x.info.session_id == info.id).count();
+        let b = buffers.iter().filter(|x| x.session_id == info.id).count();
+        let l = links
+            .iter()
+            .filter(|x| x.info.session_id == info.id)
+            .count();
         println!(
-            "{:<36}  {:<24}  {:<24}  {:<7}  {:<5}  {:<5}",
+            "{:<36}  {:<24}  {:<24}  {:<7}  {:<5}  {:<5}  {:<7}",
             info.id,
             info.name,
             backend_label(&info),
             w,
             p,
+            b,
             l
         );
     }
@@ -124,22 +138,53 @@ async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<(
         return new_tmux(mgr, args).await;
     }
 
+    // Validate every URL before creating the Session. A malformed first or
+    // later Link must not leave an empty workspace behind.
+    let links = args
+        .links
+        .iter()
+        .map(|url| super::link::resolve_link_input(Some(url), None))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
     let sid = mgr.add_session_native(&args.name).await?;
     println!("session: {sid}");
+    for (spec, address, pane) in links {
+        let result = match mgr.add_link_in(sid, spec, address, None, None).await {
+            Ok(result) => result,
+            Err(error) => {
+                // Session creation is all-or-nothing: the CLI created this
+                // workspace as part of `session new`, so a failed Link must
+                // not leave a raw Session with zero usable Links.
+                let _ = mgr.del_session(sid).await;
+                return Err(error.into());
+            }
+        };
+        println!("link:    {}", result.link_id);
+        println!("buffer:  {}", result.buffer_id);
+        if let Some(window_id) = result.window_id {
+            println!("window:  {window_id}");
+        }
+        println!("pane:    {}", result.pane_id);
+        if pane.cols.is_some() || pane.rows.is_some() {
+            mgr.resize_pane(
+                result.pane_id,
+                pane.cols.unwrap_or(80),
+                pane.rows.unwrap_or(24),
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
 /// `session new --tmux`: a real tmux session plus its control link.
 async fn new_tmux(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<()> {
+    if !args.links.is_empty() {
+        anyhow::bail!("--link is for raw sessions; --tmux creates its one control link");
+    }
     let socket = resolve_socket(args.socket.as_deref());
     let sid = mgr
-        .create_tmux_session(
-            &args.name,
-            host_from(args.ssh.as_deref()),
-            socket,
-            80,
-            24,
-        )
+        .create_tmux_session(&args.name, host_from(args.ssh.as_deref()), socket, 80, 24)
         .await?;
     println!("session: {sid}");
     print_structure(&mgr, sid).await;
@@ -211,6 +256,13 @@ async fn show(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
         println!("link:    {}", l.info.id);
     }
 
+    let mut buffers = mgr.buffers.list_all().await;
+    buffers.retain(|buffer| buffer.session_id == sid);
+    buffers.sort_by_key(|buffer| buffer.created_at);
+    for buffer in buffers {
+        println!("buffer:  {}", buffer.id);
+    }
+
     let mut windows = mgr.windows.list_all().await;
     windows.retain(|w| w.info.session_id == sid);
     windows.sort_by_key(|w| w.info.created_at);
@@ -273,7 +325,11 @@ async fn resolve(mgr: &SessionManager, name: &str) -> anyhow::Result<SessionId> 
 fn backend_label(info: &SessionInfo) -> String {
     match &info.backend {
         SessionBackend::Native => "native".to_string(),
-        SessionBackend::Tmux { host, socket, session } => {
+        SessionBackend::Tmux {
+            host,
+            socket,
+            session,
+        } => {
             let host = match host {
                 TmuxHostConfig::Local => "local".to_string(),
                 TmuxHostConfig::Ssh { destination, .. } => destination.clone(),

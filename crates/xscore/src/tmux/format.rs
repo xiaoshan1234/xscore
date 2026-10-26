@@ -145,7 +145,10 @@ pub fn send_keys_literal(handle: &str, payload: &str) -> Result<String> {
         }
         return Ok(command);
     }
-    Ok(format!("send-keys -t {handle} -l -- {}", quote_arg(payload)))
+    Ok(format!(
+        "send-keys -t {handle} -l -- {}",
+        quote_arg(payload)
+    ))
 }
 
 /// The command prefix in front of `tmux`: empty locally, one `ssh` segment
@@ -213,10 +216,7 @@ pub fn resize_pane_command(handle: &str, cols: u16, rows: u16) -> String {
 /// someone is looking at. `-P -F` is the only reliable way to learn the handle —
 /// matching on names would confuse two windows that share one.
 pub fn new_window_command(name: Option<&str>) -> String {
-    let mut command = format!(
-        "new-window -d -P -F {}",
-        quote_arg("#{window_id}")
-    );
+    let mut command = format!("new-window -d -P -F {}", quote_arg("#{window_id}"));
     if let Some(name) = name.filter(|n| !n.is_empty()) {
         command.push_str(" -n ");
         command.push_str(&quote_arg(name));
@@ -284,7 +284,10 @@ mod tests {
         // makes every line one field and every enum empty.
         assert_eq!(LIST_WINDOWS_FORMAT.matches('\t').count(), 5);
         assert_eq!(LIST_PANES_FORMAT.matches('\t').count(), 4);
-        assert!(!LIST_WINDOWS_FORMAT.contains("\\t"), "a literal backslash-t would break parsing");
+        assert!(
+            !LIST_WINDOWS_FORMAT.contains("\\t"),
+            "a literal backslash-t would break parsing"
+        );
         assert!(list_windows_command("work").contains(LIST_WINDOWS_FORMAT));
     }
 
@@ -340,10 +343,7 @@ mod tests {
         assert!(created.starts_with("new-window "));
 
         let named = new_window_command(Some("logs"));
-        assert_eq!(
-            named,
-            "new-window -d -P -F '#{window_id}' -n 'logs'"
-        );
+        assert_eq!(named, "new-window -d -P -F '#{window_id}' -n 'logs'");
         // An empty name is "no name", not `-n ''`.
         assert_eq!(new_window_command(Some("")), created);
 
@@ -368,8 +368,23 @@ mod tests {
         );
         // The socket flag lands after `tmux`, on the right side of ssh.
         assert_eq!(
-            one_shot_argv(&host, &TmuxSocket::Named("x".into()), &["has-session".into()]),
-            ["ssh", "-o", "BatchMode=yes", "-p", "2222", "devbox", "tmux", "-L", "x", "has-session"]
+            one_shot_argv(
+                &host,
+                &TmuxSocket::Named("x".into()),
+                &["has-session".into()]
+            ),
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-p",
+                "2222",
+                "devbox",
+                "tmux",
+                "-L",
+                "x",
+                "has-session"
+            ]
         );
     }
 }

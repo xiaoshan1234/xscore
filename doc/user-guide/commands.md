@@ -29,6 +29,7 @@ Top-level surface:
 xscore
 ├── session  list · new · attach · show · kill · detach · rename
 ├── link     add · del · show · list · config {add,remove,show,list}
+├── buffer   list · show · del
 ├── window   add · list · show · del · add-pane · remove-pane
 ├── pane     add · del · show · list · attach · detach · resize · move
 │            add-to-window · remove-from-window
@@ -130,7 +131,7 @@ not yet verify `known_hosts`.
 xscore session list
 ```
 
-Lists sessions and their window, pane and link counts.
+Lists sessions and their window, pane, buffer and link counts.
 
 ### `session new`
 
@@ -138,8 +139,8 @@ Lists sessions and their window, pane and link counts.
 xscore session new [OPTIONS] <NAME>
 ```
 
-Creates the Session container. A native session starts empty. `--tmux` selects
-the tmux backend and lets tmux create its default window/pane.
+Creates a Session with a backend-specific SessionManager. Raw sessions require
+one or more Links; `--tmux` creates the session's single control Link.
 
 Arguments:
 
@@ -152,13 +153,15 @@ Options:
 | Option | Meaning |
 |---|---|
 | `--tmux` | Create a real tmux session with one control link. |
+| `--link <URL>` | Create a raw Link. Repeat for multiple Links. Required unless `--tmux` is present. |
 | `--ssh <DEST>` | Create the tmux server on this SSH host. Requires `--tmux`. |
 | `--socket <NAME>` | tmux socket (`tmux -L NAME`). Defaults to `$XSCORE_SOCKET`, then the default server. |
 
 Examples:
 
 ```text
-xscore session new dev
+xscore session new dev --link 'shell:///bin/bash'
+xscore session new mixed --link 'shell:///bin/bash' --link 'serial:///dev/ttyUSB0?baud=115200'
 xscore session new work --tmux
 xscore session new build --tmux --ssh dev@box
 ```
@@ -166,10 +169,8 @@ xscore session new build --tmux --ssh dev@box
 Session selection rules for child-creating commands:
 
 ```text
---session NAME       NAME must already exist
-no --session + 1     use the only Session
-no --session + 0     error: run `xscore session new <name>` first
-no --session + N>1   error: specify `--session <name>`
+--session NAME       required for link/window/pane creation
+Session NAME         must already exist
 ```
 
 No command creates an implicit `default` Session.
@@ -193,7 +194,7 @@ Attaches to an existing tmux session under the same visible name.
 xscore session show <NAME>
 ```
 
-Prints the session backend and IDs of its windows, panes and links.
+Prints the session backend and IDs of its windows, panes, buffers and links.
 
 ### `session kill`
 
@@ -233,13 +234,14 @@ xscore link add [OPTIONS] [URL]
 ```
 
 Creates a pipe link and normally creates its first window and pane.
+It also creates the Buffer fed by that Link and prints its ID.
 
 | Option | Meaning |
 |---|---|
 | `-c, --config <CONFIG>` | Use a saved link template. |
 | `--id <UUID>` | Use this link ID instead of generating one. |
 | `--pane <PANE_ID>` | Bind an existing orphan pane instead of creating a new one. |
-| `--session <NAME>` | Session that owns the link. |
+| `--session <NAME>` | Required Session that owns the Link. |
 
 Examples:
 
@@ -249,9 +251,7 @@ xscore link add 'serial:///dev/ttyUSB0?baud=115200' --session hw
 xscore link add -c prod --session ops
 ```
 
-The Session must already exist. If `--session` is omitted, xscore uses the only
-existing Session; it errors when none or multiple Sessions exist. It never
-creates a `default` Session implicitly.
+The Session must already exist. `--session` is required.
 
 `link add` is refused inside a tmux session because that session already has
 its single control link.
@@ -262,8 +262,9 @@ its single control link.
 xscore link del --id <ID>
 ```
 
-Closes a pipe link and orphans its attached panes. Buffers remain. Control
-links cannot be deleted; use `session kill` or `session detach`.
+Closes a pipe Link and stops its SessionManager route into Buffers. Buffers and
+UI panes remain as history. Control Links cannot be deleted; use `session kill`
+or `session detach`.
 
 ### `link show`
 
@@ -321,6 +322,36 @@ xscore link config list
 
 Lists saved template names.
 
+## buffer
+
+A Buffer is independent from Pane and Link. Panes reference Buffers as pure UI
+viewports; SessionManagers decide which Link or tmux pane feeds each Buffer.
+
+### `buffer list`
+
+```text
+xscore buffer list [--session <NAME>]
+```
+
+Lists Buffer ID, owning Session and origin (`raw-link` or `tmux-pane`).
+
+### `buffer show`
+
+```text
+xscore buffer show --id <ID>
+```
+
+Prints `BufferInfo` JSON including `session_id` and `origin`.
+
+### `buffer del`
+
+```text
+xscore buffer del --id <ID>
+```
+
+Deletes the Buffer, closes its runtime bridge and clears `buffer_id` from every
+UI Pane that referenced it. Pane rows remain.
+
 ## window
 
 ### `window add`
@@ -336,7 +367,7 @@ Creates a native window or a real tmux window.
 | `--name <NAME>` | generated or tmux name | Window name. |
 | `--cols <COLS>` | `120` | Native window width. |
 | `--rows <ROWS>` | `30` | Native window height. |
-| `--session <NAME>` | only existing session | Owning session. No Session is created implicitly. |
+| `--session <NAME>` | required | Owning session. |
 
 ### `window list`
 
@@ -360,8 +391,8 @@ Prints `WindowInfo` JSON.
 xscore window del --id <ID>
 ```
 
-Removes the window row. Panes survive as orphans. For a tmux window this kills
-the tmux window.
+Removes the window row. Panes survive as orphans. This is metadata-only: it
+does not run `kill-window` in tmux.
 
 ### `window add-pane`
 
@@ -387,8 +418,8 @@ Removes the association. The pane survives as an orphan.
 xscore pane add [OPTIONS]
 ```
 
-Creates a pane. Without `--window`, it is an orphan with no link. With a tmux
-window, it creates a real tmux split.
+Creates a pane. Without `--window`, it is an orphan with no Buffer. With a tmux
+window, it creates a real tmux split and the associated Buffer.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -398,7 +429,7 @@ window, it creates a real tmux split.
 | `--x <X>` | `0` | Horizontal position. |
 | `--y <Y>` | `0` | Vertical position. |
 | `--window <WINDOW_ID>` | none | Put the pane in this window. |
-| `--session <NAME>` | only existing session | Owning session. No Session is created implicitly. |
+| `--session <NAME>` | required | Owning session. |
 
 ### `pane del`
 
@@ -406,8 +437,8 @@ window, it creates a real tmux split.
 xscore pane del --id <ID>
 ```
 
-Fully deletes the pane, detaching it from its link and window. A tmux pane is
-also killed.
+Deletes only the pane UI row and its window membership. Its Buffer, raw Link
+or tmux source remains; use `buffer del` or `session kill` for the source.
 
 ### `pane show`
 
@@ -415,8 +446,7 @@ also killed.
 xscore pane show --id <ID>
 ```
 
-Prints `PaneInfo` JSON, including `link_id`, `window_id`, `link_key` and
-geometry.
+Prints `PaneInfo` JSON, including `buffer_id`, `window_id` and geometry.
 
 ### `pane list`
 
@@ -428,7 +458,7 @@ xscore pane list [OPTIONS]
 |---|---|
 | `--session <NAME>` | Only this session. |
 | `--window <WINDOW>` | Only panes in this window. |
-| `--link <LINK>` | Only panes on this link. |
+| `--buffer <BUFFER>` | Only panes displaying this buffer. |
 
 ### `pane attach`
 
@@ -436,9 +466,8 @@ xscore pane list [OPTIONS]
 xscore pane attach --pane <PANE> --link <LINK>
 ```
 
-Binds a pane to a pipe link. The link's previous pane is auto-detached because a
-pipe has one reader. This is also the reconnect operation for an already-bound
-pane whose daemon transport died.
+Binds the UI pane to the Buffer produced by a raw Link. Multiple UI panes may
+reference the same Buffer.
 
 ### `pane detach`
 
@@ -446,8 +475,7 @@ pane whose daemon transport died.
 xscore pane detach --pane <PANE>
 ```
 
-Unbinds a pipe pane. The pane survives and keeps its buffer. tmux panes cannot
-be detached.
+Clears the pane's Buffer reference. The Buffer and source Link keep running.
 
 ### `pane resize`
 
@@ -553,7 +581,7 @@ Prints JSON containing:
 ```text
 pid
 links[]
-panes[] with link id and buffered byte count
+buffers[] with source link id and buffered byte count
 tmux[] with name, alive, pane count and buffered bytes
 ```
 
@@ -566,7 +594,7 @@ xscore daemon stop
 ```
 
 Stops the daemon, closes live transports and tmux control clients, and loses
-in-memory pane buffers. Session metadata and tmux itself survive.
+in-memory Buffers. Session metadata and tmux itself survive.
 
 ## state
 
@@ -579,7 +607,9 @@ xscore state migrate
 Upgrades `state.json` in place:
 
 - v2 to schema v3 by adding the session tier;
-- old v3 tmux-link rows to control-mode sessions.
+- old tmux-link rows to control-mode sessions;
+- Pane `link_id` / `link_key` fields to independent Buffer rows referenced by
+  `PaneInfo.buffer_id`.
 
 The command is idempotent.
 

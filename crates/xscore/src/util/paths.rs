@@ -88,7 +88,9 @@ mod tests {
 
     #[test]
     fn windows_program_names_are_recognised() {
-        assert!(looks_like_windows_program("/mnt/c/Windows/System32/cmd.exe"));
+        assert!(looks_like_windows_program(
+            "/mnt/c/Windows/System32/cmd.exe"
+        ));
         assert!(looks_like_windows_program("CMD.EXE"));
         assert!(looks_like_windows_program(r"C:\tools\x.bat"));
         assert!(!looks_like_windows_program("/bin/bash"));
@@ -97,8 +99,14 @@ mod tests {
 
     #[test]
     fn windows_paths_map_to_mnt() {
-        assert_eq!(windows_to_wsl(r"C:\Users\loner").as_deref(), Some("/mnt/c/Users/loner"));
-        assert_eq!(windows_to_wsl("C:/Users/loner").as_deref(), Some("/mnt/c/Users/loner"));
+        assert_eq!(
+            windows_to_wsl(r"C:\Users\loner").as_deref(),
+            Some("/mnt/c/Users/loner")
+        );
+        assert_eq!(
+            windows_to_wsl("C:/Users/loner").as_deref(),
+            Some("/mnt/c/Users/loner")
+        );
         assert_eq!(windows_to_wsl(r"d:\work").as_deref(), Some("/mnt/d/work"));
         assert_eq!(windows_to_wsl("C:").as_deref(), Some("/mnt/c"));
         assert_eq!(windows_to_wsl(r"C:\").as_deref(), Some("/mnt/c"));
@@ -106,7 +114,13 @@ mod tests {
 
     #[test]
     fn linux_paths_are_left_alone() {
-        for p in ["/home/loner", "relative/dir", "~/x", r"\\wsl$\debian\home", "C:foo"] {
+        for p in [
+            "/home/loner",
+            "relative/dir",
+            "~/x",
+            r"\\wsl$\debian\home",
+            "C:foo",
+        ] {
             assert_eq!(windows_to_wsl(p), None, "{p} must not be rewritten");
         }
     }
@@ -121,7 +135,9 @@ mod tests {
 
     #[test]
     fn require_dir_rejects_a_missing_directory() {
-        let err = require_dir("/definitely-not-here-xyz").unwrap_err().to_string();
+        let err = require_dir("/definitely-not-here-xyz")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("is not a directory"), "{err}");
         assert!(err.contains("/definitely-not-here-xyz"), "{err}");
     }

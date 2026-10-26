@@ -23,10 +23,16 @@ pub enum LinkCmd {
 
     /// Full teardown of a pipe link: close its transport and orphan every
     /// attached pane (buffers kept).
-    Del { #[arg(long)] id: String },
+    Del {
+        #[arg(long)]
+        id: String,
+    },
 
     /// Print LinkInfo JSON
-    Show { #[arg(long)] id: String },
+    Show {
+        #[arg(long)]
+        id: String,
+    },
 
     /// List links, optionally only one session's.
     List(LinkListArgs),
@@ -52,16 +58,13 @@ pub struct LinkAddArgs {
     #[arg(long, value_name = "UUID")]
     pub id: Option<String>,
 
-    /// Bind an EXISTING pane to the new link instead of creating one.
-    /// Refused for a pane that is already attached (detach it first) and for a
-    /// pane tmux owns (its `%N` addresses it on its session's control link).
+    /// Point an existing UI pane at the Buffer produced by the new Link.
     #[arg(long, value_name = "PANE_ID")]
     pub pane: Option<String>,
 
-    /// Put the link in this session. Omitted: requires exactly one existing
-    /// session; no container is created implicitly.
+    /// Session that owns the link and receives its buffer.
     #[arg(long, value_name = "NAME")]
-    pub session: Option<String>,
+    pub session: String,
 }
 
 #[derive(Args)]
@@ -100,9 +103,12 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
         Some(p) => Some(PaneId::parse(p)?),
         None => None,
     };
-    let sid = mgr.resolve_session(args.session.as_deref()).await?;
-    let result = mgr.add_link_in(sid, spec, address, supplied_id, pane).await?;
+    let sid = mgr.resolve_session(Some(&args.session)).await?;
+    let result = mgr
+        .add_link_in(sid, spec, address, supplied_id, pane)
+        .await?;
     println!("link:  {}", result.link_id);
+    println!("buffer: {}", result.buffer_id);
     if let Some(wid) = result.window_id {
         println!("window: {wid}");
     }
@@ -159,7 +165,12 @@ async fn list(mgr: Arc<SessionManager>, args: LinkListArgs) -> anyhow::Result<()
         // `control/shell` vs `control/ssh` matters: it is how a tmux session
         // says whether its server is local or reached over ssh.
         let kind = if info.is_control() { "control" } else { "pipe" };
-        println!("{:<36}  {:<36}  {:<16}", info.id, info.name, format!("{kind}/{}", info.address.kind()));
+        println!(
+            "{:<36}  {:<36}  {:<16}",
+            info.id,
+            info.name,
+            format!("{kind}/{}", info.address.kind())
+        );
     }
     Ok(())
 }
@@ -169,13 +180,14 @@ async fn config_cmd(cmd: LinkConfigCmd) -> anyhow::Result<()> {
         LinkConfigCmd::Add { name, url } => {
             let spec = crate::url::parse(&url)?.0;
             crate::config::ensure_dirs()?;
-            crate::config::save_connect_spec(
-                &crate::config::link_config_path(&name), &spec)?;
+            crate::config::save_connect_spec(&crate::config::link_config_path(&name), &spec)?;
             println!("saved template: {name}");
         }
         LinkConfigCmd::Remove { name } => {
             let p = crate::config::link_config_path(&name);
-            if !p.exists() { anyhow::bail!("no such template: {name}"); }
+            if !p.exists() {
+                anyhow::bail!("no such template: {name}");
+            }
             std::fs::remove_file(p)?;
             println!("removed template: {name}");
         }
@@ -238,9 +250,16 @@ pub(crate) fn resolve_link_input(
     Ok(parsed)
 }
 
-fn merge_specs(template: crate::model::ConnectSpec, cli: crate::model::ConnectSpec) -> crate::model::ConnectSpec {
+fn merge_specs(
+    template: crate::model::ConnectSpec,
+    cli: crate::model::ConnectSpec,
+) -> crate::model::ConnectSpec {
     crate::model::ConnectSpec {
-        name: if cli.name.is_empty() { template.name } else { cli.name },
+        name: if cli.name.is_empty() {
+            template.name
+        } else {
+            cli.name
+        },
         transport: cli.transport,
         address: cli.address,
     }

@@ -102,10 +102,7 @@ impl DirectBridge {
     /// Create a bridge that writes into a caller-owned buffer. The
     /// manager uses this so a detached pane keeps its history and a
     /// re-attach continues appending to the same scrollback.
-    pub fn new_with_buffer(
-        transport: Arc<dyn Transport>,
-        buffer: Arc<Mutex<RingBuffer>>,
-    ) -> Self {
+    pub fn new_with_buffer(transport: Arc<dyn Transport>, buffer: Arc<Mutex<RingBuffer>>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let task = {
             let t = Arc::clone(&transport);
@@ -152,7 +149,9 @@ impl DirectBridge {
 
 #[async_trait]
 impl PaneBridge for DirectBridge {
-    fn kind(&self) -> &'static str { "direct" }
+    fn kind(&self) -> &'static str {
+        "direct"
+    }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize> {
         let deadline = tokio::time::Instant::now() + READ_WAIT;
@@ -202,44 +201,46 @@ impl PaneBridge for DirectBridge {
 #[derive(Debug)]
 pub struct DaemonBridge {
     client: Arc<crate::daemon::client::DaemonClient>,
-    pane: crate::core::PaneId,
+    buffer: crate::core::BufferId,
 }
 
 impl DaemonBridge {
     pub fn new(
         client: Arc<crate::daemon::client::DaemonClient>,
-        pane: crate::core::PaneId,
+        buffer: crate::core::BufferId,
     ) -> Self {
-        Self { client, pane }
+        Self { client, buffer }
     }
 }
 
 #[async_trait]
 impl PaneBridge for DaemonBridge {
-    fn kind(&self) -> &'static str { "daemon" }
+    fn kind(&self) -> &'static str {
+        "daemon"
+    }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize> {
         // The daemon already applied the "wait up to 200 ms, then report
         // nothing" rule, so this is a plain copy-out.
-        let bytes = self.client.read(self.pane, buf.len()).await?;
+        let bytes = self.client.read(self.buffer, buf.len()).await?;
         let n = bytes.len().min(buf.len());
         buf[..n].copy_from_slice(&bytes[..n]);
         Ok(n)
     }
 
     async fn write(&self, data: &[u8]) -> Result<usize> {
-        self.client.write(self.pane, data).await
+        self.client.write(self.buffer, data).await
     }
 
     async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
-        self.client.resize(self.pane, cols, rows).await
+        self.client.resize(self.buffer, cols, rows).await
     }
 
     async fn close(&self) -> Result<()> {
         // P0-a: detach stops OUR pump. The daemon keeps the transport
         // (other panes / a later re-attach still need it) and keeps the
         // buffer (so the history is still readable when detached).
-        self.client.detach(self.pane).await
+        self.client.detach(self.buffer).await
     }
 }
 
@@ -283,16 +284,24 @@ impl ControlBridge {
         handle: impl Into<String>,
         buffer: Arc<Mutex<RingBuffer>>,
     ) -> Self {
-        Self { control, handle: handle.into(), buffer }
+        Self {
+            control,
+            handle: handle.into(),
+            buffer,
+        }
     }
 
     /// The address this pane reads and writes through.
-    pub fn handle(&self) -> &str { &self.handle }
+    pub fn handle(&self) -> &str {
+        &self.handle
+    }
 }
 
 #[async_trait]
 impl PaneBridge for ControlBridge {
-    fn kind(&self) -> &'static str { "control" }
+    fn kind(&self) -> &'static str {
+        "control"
+    }
 
     async fn read(&self, buf: &mut [u8]) -> Result<usize> {
         // Same contract as `DirectBridge`: wait briefly for bytes, then report
@@ -343,4 +352,3 @@ impl PaneBridge for ControlBridge {
         Ok(())
     }
 }
-

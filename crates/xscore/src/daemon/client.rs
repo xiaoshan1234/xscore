@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::core::{Error, LinkAddress, LinkId, PaneId, Result, SessionId};
+use crate::core::{BufferId, Error, LinkAddress, LinkId, Result, SessionId};
 use crate::model::{TmuxHostConfig, TmuxSocket, TransportConfig};
 use crate::transport::Transport;
 
@@ -44,7 +44,9 @@ pub fn socket_path_from(xdg_runtime_dir: Option<&std::ffi::OsStr>) -> PathBuf {
             return PathBuf::from(rt).join("xscore").join("daemon.sock");
         }
     }
-    crate::config::paths::config_dir().join("run").join("daemon.sock")
+    crate::config::paths::config_dir()
+        .join("run")
+        .join("daemon.sock")
 }
 
 /// Is something accepting on our local endpoint right now? Connect-only: this is
@@ -64,12 +66,9 @@ pub async fn send(req: &Request) -> Result<Response> {
 /// `send` against an explicit path — used by tests (and by nothing else)
 /// so "no daemon there" can be exercised without touching the env.
 pub async fn send_to(path: &std::path::Path, req: &Request) -> Result<Response> {
-    let mut stream = ipc::connect(path).await.map_err(|e| {
-        Error::Daemon(format!(
-            "no daemon at {} ({e})",
-            ipc::display_address(path)
-        ))
-    })?;
+    let mut stream = ipc::connect(path)
+        .await
+        .map_err(|e| Error::Daemon(format!("no daemon at {} ({e})", ipc::display_address(path))))?;
     protocol::write_frame(&mut *stream, req)
         .await
         .map_err(|e| Error::Daemon(format!("write request: {e}")))?;
@@ -122,8 +121,7 @@ pub async fn ensure_daemon() -> Result<()> {
 /// just not session-isolated.
 #[cfg(unix)]
 fn spawn_serve() -> Result<()> {
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
     let spawn = |cmd: &mut std::process::Command| {
         cmd.args(["daemon", "serve", "--idle-exit"])
             .stdin(std::process::Stdio::null())
@@ -153,8 +151,7 @@ fn spawn_serve() -> Result<()> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
-    let exe =
-        std::env::current_exe().map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
+    let exe = std::env::current_exe().map_err(|e| Error::Daemon(format!("current_exe: {e}")))?;
     std::process::Command::new(exe)
         .args(["daemon", "serve", "--idle-exit"])
         .stdin(std::process::Stdio::null())
@@ -172,9 +169,13 @@ pub async fn probe_link(link: LinkId) -> Result<bool> {
     Ok(fetch_status().await?.links.contains(&link))
 }
 
-/// Does the daemon hold a buffer slot for this pane (even detached)?
-pub async fn probe_pane(pane: PaneId) -> Result<bool> {
-    Ok(fetch_status().await?.panes.iter().any(|p| p.pane == pane))
+/// Does the daemon hold this buffer slot (even when detached)?
+pub async fn probe_buffer(buffer: BufferId) -> Result<bool> {
+    Ok(fetch_status()
+        .await?
+        .buffers
+        .iter()
+        .any(|candidate| candidate.buffer == buffer))
 }
 
 /// Is this session's tmux control client alive inside the daemon? This is what
@@ -233,38 +234,55 @@ impl DaemonClient {
             Ok(resp)
         } else {
             Err(Error::Daemon(
-                resp.error.unwrap_or_else(|| "daemon reported failure".into()),
+                resp.error
+                    .unwrap_or_else(|| "daemon reported failure".into()),
             ))
         }
     }
 
     pub async fn create_link(&self, link: LinkId, transport: TransportConfig) -> Result<()> {
-        self.call(Request::CreateLink { link, transport }).await.map(|_| ())
+        self.call(Request::CreateLink { link, transport })
+            .await
+            .map(|_| ())
     }
 
     pub async fn delete_link(&self, link: LinkId) -> Result<()> {
         self.call(Request::DeleteLink { link }).await.map(|_| ())
     }
 
-    pub async fn create_pane(&self, pane: PaneId) -> Result<()> {
-        self.call(Request::CreatePane { pane }).await.map(|_| ())
-    }
-
-    pub async fn delete_pane(&self, pane: PaneId) -> Result<()> {
-        self.call(Request::DeletePane { pane }).await.map(|_| ())
-    }
-
-    pub async fn attach(&self, pane: PaneId, link: LinkId) -> Result<()> {
-        self.call(Request::Attach { pane, link: Some(link), key: None, session: None })
+    pub async fn create_buffer(&self, buffer: BufferId) -> Result<()> {
+        self.call(Request::CreateBuffer { buffer })
             .await
             .map(|_| ())
     }
 
+    pub async fn delete_buffer(&self, buffer: BufferId) -> Result<()> {
+        self.call(Request::DeleteBuffer { buffer })
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn attach_buffer(&self, buffer: BufferId, link: LinkId) -> Result<()> {
+        self.call(Request::Attach {
+            buffer,
+            link: Some(link),
+            key: None,
+            session: None,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Subscribe a tmux pane's `%output %N` into the daemon's buffer for it.
     /// Idempotent: a pane that is already attached is left alone.
-    pub async fn attach_pane(&self, session: SessionId, pane: PaneId, key: &str) -> Result<()> {
+    pub async fn attach_control_buffer(
+        &self,
+        session: SessionId,
+        buffer: BufferId,
+        key: &str,
+    ) -> Result<()> {
         self.call(Request::Attach {
-            pane,
+            buffer,
             link: None,
             key: Some(key.to_string()),
             session: Some(session),
@@ -308,7 +326,10 @@ impl DaemonClient {
     /// mutations: `new-window`, `split-window`, `kill-pane`).
     pub async fn tmux_command(&self, session: SessionId, command: &str) -> Result<Vec<String>> {
         let resp = self
-            .call(Request::TmuxCommand { session, command: command.to_string() })
+            .call(Request::TmuxCommand {
+                session,
+                command: command.to_string(),
+            })
             .await?;
         Ok(resp.lines.unwrap_or_default())
     }
@@ -324,26 +345,31 @@ impl DaemonClient {
         probe_tmux(session).await.unwrap_or(false)
     }
 
-    pub async fn detach(&self, pane: PaneId) -> Result<()> {
-        self.call(Request::Detach { pane }).await.map(|_| ())
+    pub async fn detach(&self, buffer: BufferId) -> Result<()> {
+        self.call(Request::Detach { buffer }).await.map(|_| ())
     }
 
-    pub async fn read(&self, pane: PaneId, max: usize) -> Result<Vec<u8>> {
-        let resp = self.call(Request::Read { pane, max }).await?;
+    pub async fn read(&self, buffer: BufferId, max: usize) -> Result<Vec<u8>> {
+        let resp = self.call(Request::Read { buffer, max }).await?;
         protocol::from_hex(resp.data.as_deref().unwrap_or(""))
     }
 
-    pub async fn write(&self, pane: PaneId, data: &[u8]) -> Result<usize> {
+    pub async fn write(&self, buffer: BufferId, data: &[u8]) -> Result<usize> {
         let resp = self
-            .call(Request::Write { pane, data: protocol::to_hex(data) })
+            .call(Request::Write {
+                buffer,
+                data: protocol::to_hex(data),
+            })
             .await?;
         // The daemon knows how many bytes the transport accepted; fall
         // back to the input length if an older daemon omits it.
         Ok(resp.n.unwrap_or(data.len()))
     }
 
-    pub async fn resize(&self, pane: PaneId, cols: u16, rows: u16) -> Result<()> {
-        self.call(Request::Resize { pane, cols, rows }).await.map(|_| ())
+    pub async fn resize(&self, buffer: BufferId, cols: u16, rows: u16) -> Result<()> {
+        self.call(Request::Resize { buffer, cols, rows })
+            .await
+            .map(|_| ())
     }
 
     pub async fn status(&self) -> Result<Status> {
@@ -387,7 +413,10 @@ impl Transport for DaemonTransport {
     fn address(&self) -> LinkAddress {
         // The routing address lives in `LinkInfo.address` (CLI-side
         // metadata); this adapter has no opinion about it.
-        LinkAddress::Shell { command: String::new(), args: vec![] }
+        LinkAddress::Shell {
+            command: String::new(),
+            args: vec![],
+        }
     }
 
     async fn open(&mut self) -> Result<()> {
@@ -426,7 +455,7 @@ impl Transport for DaemonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::protocol::PaneStatus;
+    use crate::daemon::protocol::BufferStatus;
 
     #[test]
     fn socket_path_is_under_xdg_runtime_dir_when_set() {
@@ -470,8 +499,8 @@ mod tests {
 
     #[test]
     fn pane_status_link_is_empty_string_when_detached() {
-        let json = serde_json::to_value(PaneStatus {
-            pane: PaneId::parse("01928e0a-7d10-7000-8000-000000000001").unwrap(),
+        let json = serde_json::to_value(BufferStatus {
+            buffer: BufferId::parse("01928e0a-7d10-7000-8000-000000000001").unwrap(),
             link: String::new(),
             buffered: 0,
         })

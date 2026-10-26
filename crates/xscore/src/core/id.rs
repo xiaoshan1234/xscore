@@ -9,17 +9,27 @@ macro_rules! uuid_newtype {
         pub struct $name(Uuid);
 
         impl $name {
-            pub fn new() -> Self { Self(Uuid::now_v7()) }
-            pub fn as_uuid(&self) -> Uuid { self.0 }
+            pub fn new() -> Self {
+                Self(Uuid::now_v7())
+            }
+            pub fn as_uuid(&self) -> Uuid {
+                self.0
+            }
             pub fn parse(s: &str) -> Result<Self, uuid::Error> {
                 Ok(Self(Uuid::parse_str(s)?))
             }
         }
 
-        impl Default for $name { fn default() -> Self { Self::new() } }
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
 
         impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { self.0.fmt(f) }
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
         }
     };
 }
@@ -28,6 +38,7 @@ uuid_newtype!(SessionId);
 uuid_newtype!(LinkId);
 uuid_newtype!(WindowId);
 uuid_newtype!(PaneId);
+uuid_newtype!(BufferId);
 
 #[cfg(test)]
 mod tests {
@@ -46,6 +57,13 @@ mod tests {
         let id = PaneId::new();
         let s = id.to_string();
         let parsed = PaneId::parse(&s).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn buffer_id_roundtrip_via_string() {
+        let id = BufferId::new();
+        let parsed = BufferId::parse(&id.to_string()).unwrap();
         assert_eq!(id, parsed);
     }
 

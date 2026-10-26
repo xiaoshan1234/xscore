@@ -1,7 +1,7 @@
-pub mod session;
 pub mod config;
+pub mod session;
 
 pub use session::{
-    ConnectSpec, EndpointRef, LinkInfo, PaneInfo, SessionBackend, SessionInfo, TmuxHostConfig,
-    TmuxSocket, TransportConfig, WindowBackend, WindowInfo,
+    BufferInfo, BufferOrigin, ConnectSpec, EndpointRef, LinkInfo, PaneInfo, SessionBackend,
+    SessionInfo, TmuxHostConfig, TmuxSocket, TransportConfig, WindowBackend, WindowInfo,
 };

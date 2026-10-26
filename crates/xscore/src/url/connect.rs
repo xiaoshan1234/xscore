@@ -91,7 +91,13 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
                 .parse()
                 .map_err(|e: std::num::ParseIntError| Error::Url(e.to_string()))?;
             (
-                TransportConfig::Serial { path: path.clone(), baud, data_bits, parity, stop_bits },
+                TransportConfig::Serial {
+                    path: path.clone(),
+                    baud,
+                    data_bits,
+                    parity,
+                    stop_bits,
+                },
                 LinkAddress::Serial { path },
             )
         }
@@ -115,7 +121,13 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
                     identity: identity.clone(),
                     proxy: proxy.clone(),
                 },
-                LinkAddress::Ssh { host, port, user, identity, proxy },
+                LinkAddress::Ssh {
+                    host,
+                    port,
+                    user,
+                    identity,
+                    proxy,
+                },
             )
         }
         other => return Err(Error::Url(format!("unknown scheme: {other}"))),
@@ -131,7 +143,15 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
     // A URL only says how to connect. "Does this go through tmux?" is a
     // property of the session (`SessionBackend`), so there is nothing to opt
     // into here — the old tmux query flag is gone (ADR 0010 §D7).
-    Ok((ConnectSpec { name, transport, address: address.clone() }, address, pane))
+    Ok((
+        ConnectSpec {
+            name,
+            transport,
+            address: address.clone(),
+        },
+        address,
+        pane,
+    ))
 }
 
 /// A URL path is percent-encoded. Windows drive paths appear as `/C:/...`
@@ -140,11 +160,7 @@ pub fn parse_with_pane(s: &str) -> Result<(ConnectSpec, LinkAddress, PaneParams)
 fn decode_shell_path(path: &str) -> String {
     let decoded = percent_decode_str(path).decode_utf8_lossy().into_owned();
     let bytes = decoded.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0] == b'/'
-        && bytes[1].is_ascii_alphabetic()
-        && bytes[2] == b':'
-    {
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
         decoded[1..].to_string()
     } else {
         decoded
@@ -171,9 +187,11 @@ fn take_dim(pairs: &mut HashMap<String, String>, key: &str) -> Result<Option<u16
     match pairs.remove(key) {
         None => Ok(None),
         Some(raw) => {
-            let v: u16 = raw
-                .parse()
-                .map_err(|_| Error::Url(format!("{key} must be a number from 1 to 65535, got `{raw}`")))?;
+            let v: u16 = raw.parse().map_err(|_| {
+                Error::Url(format!(
+                    "{key} must be a number from 1 to 65535, got `{raw}`"
+                ))
+            })?;
             if v == 0 {
                 return Err(Error::Url(format!("{key} must be greater than 0")));
             }
@@ -219,7 +237,13 @@ mod tests {
     #[test]
     fn parse_shell_url_yields_shell_address() {
         let (_, addr) = parse("shell:///bin/bash").unwrap();
-        assert_eq!(addr, LinkAddress::Shell { command: "/bin/bash".into(), args: vec![] });
+        assert_eq!(
+            addr,
+            LinkAddress::Shell {
+                command: "/bin/bash".into(),
+                args: vec![]
+            }
+        );
     }
 
     #[test]
@@ -263,8 +287,7 @@ mod tests {
 
     #[test]
     fn parse_wsl_executable_without_args() {
-        let (spec, addr, _) =
-            parse_with_pane("shell:///C:/Windows/System32/wsl.exe").unwrap();
+        let (spec, addr, _) = parse_with_pane("shell:///C:/Windows/System32/wsl.exe").unwrap();
         assert_eq!(
             spec.transport,
             TransportConfig::Shell {
@@ -316,7 +339,12 @@ mod tests {
     #[test]
     fn parse_serial_url_yields_serial_address() {
         let (_, addr) = parse("serial:///dev/ttyUSB0?baud=115200").unwrap();
-        assert_eq!(addr, LinkAddress::Serial { path: "/dev/ttyUSB0".into() });
+        assert_eq!(
+            addr,
+            LinkAddress::Serial {
+                path: "/dev/ttyUSB0".into()
+            }
+        );
     }
 
     #[test]
@@ -359,16 +387,19 @@ mod tests {
 
     #[test]
     fn unknown_parameter_is_refused() {
-        let err = parse_with_pane("shell:///bin/bash?col=120").unwrap_err().to_string();
+        let err = parse_with_pane("shell:///bin/bash?col=120")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unknown URL parameter"), "{err}");
         assert!(err.contains("col"), "{err}");
     }
 
     #[test]
     fn a_bad_dimension_is_refused() {
-        let err = parse_with_pane("shell:///bin/bash?cols=12O").unwrap_err().to_string();
+        let err = parse_with_pane("shell:///bin/bash?cols=12O")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cols must be a number"), "{err}");
         assert!(parse_with_pane("shell:///bin/bash?cols=0").is_err());
     }
-
 }

@@ -43,7 +43,7 @@ Session ── workspace; 1:1 with a tmux session, or standalone
 | Window | xscore grouping; no layout engine | mirrors a tmux window (`@N`) |
 | Pane | xscore buffer + geometry | is a tmux pane (`%N`) |
 | Link | **N** links, one per connection you opened (`Pipe`) | **exactly 1** link: the control client (`Control`) |
-| who feeds the pane buffer | the link's `PipeSink` | the session's control client, routing `%output %N` (in the daemon) |
+| who feeds the Buffer | RawSessionManager route | TmuxSessionManager, routing `%output %N` |
 | survives CLI exit | yes (daemon) | yes (tmux) |
 | attach a human | n/a | `exec tmux attach` |
 | multi-client | no | yes |
@@ -74,8 +74,8 @@ session work                                 (Backend::Tmux { session: "work" })
 ```
 
 ```
-Session 1:N Window      Window  1:N Pane       Pane 0..1 Link   (unbound = history only)
-Session 1:N Link        Session 1:N Pane       Link 0..1 Pane   (serves at most one)
+Session 1:N Window      Window  1:N Pane       Pane 0..1 Buffer
+Session 1:N Link        Session 1:N Buffer     SessionManager: Link(s) → Buffer(s)
 ```
 
 A native session is a *workspace*, not a single shell: it can hold several
@@ -83,10 +83,10 @@ windows, several panes, and links of **mixed kinds** at the same time (shell +
 ssh + serial in one workspace is a normal case). A tmux-backed session gets the
 same multiplicity from tmux, which additionally owns the layout.
 
-`session new` creates an empty native workspace. Links, windows and panes are
-created afterward by their own commands. A tmux-backed session is the backend
-exception: tmux creates its default window/pane and xscore attaches the control
-link.
+`session new` requires at least one Link. Raw sessions accept one or more Links;
+tmux creates its one control Link. A backend-specific SessionManager converts
+Link input into independent Buffers and emits structure events that create or
+remove Window and Pane UI rows.
 
 ## 1. Session
 
@@ -99,8 +99,7 @@ pub struct SessionInfo {
 }
 
 pub enum SessionBackend {
-    /// Links are byte pipes owned by the daemon; windows are xscore's own
-    /// grouping. Dies when the daemon forgets it.
+    /// A RawSessionManager routes one or more pipe Links into Buffers.
     Native,
 
     /// This session IS a tmux session. Windows and panes are read from tmux;
@@ -150,9 +149,9 @@ windows, and nothing renders native ones. A stored layout hint nobody applies
 reads like a feature. When a UI layer exists it can introduce a layout model
 shaped by what that layer actually needs.
 
-## 3. Pane
+## 3. Pane, Buffer and SessionManager
 
-A pane is a **buffer with a viewport** — the unit users read and write.
+A pane is a **pure UI viewport**. Bytes live in an independent Buffer.
 
 ```rust
 pub struct PaneInfo {
@@ -162,31 +161,29 @@ pub struct PaneInfo {
     pub created_at: DateTime<Utc>,
     pub cols: u16, pub rows: u16,      // size
     pub x: u16,    pub y: u16,         // position inside its window
-    pub window_id: Option<WindowId>,   // None = not displayed
-    /// The connection this pane reads and writes through. In a tmux session
-    /// this is the session's single control link (§4).
-    pub link_id: Option<LinkId>,
-    /// Address inside a shared link: `"%N"` for a tmux pane, `None` for a pipe
-    /// link, which has one reader and therefore needs no address.
-    pub link_key: Option<String>,
+    pub window_id: Option<WindowId>,
+    pub buffer_id: Option<BufferId>,
+}
+
+```rust
+pub struct BufferInfo {
+    pub id: BufferId,
+    pub session_id: SessionId,
+    pub origin: BufferOrigin,
+}
+
+pub enum BufferOrigin {
+    Link { link_id: LinkId },
+    Tmux { link_id: LinkId, pane_handle: String }, // %N
 }
 ```
 
-There is no `PaneBackend`. A pane's kind is its **link's** kind: a pane on a
-`Control` link is a tmux pane, a pane on a `Pipe` link is a native one. Storing
-it twice invites them to disagree ("this pane is a tmux pane but its link is a
-pty"), and the link is the side that owns the fact.
-
-The pane's **bytes are not in `PaneInfo`** — it is rewritten on every geometry
-change and every save, and a 64 KiB scrollback is neither. Buffers live in the
-daemon, keyed by pane:
-
-- every pane, native or tmux, owns a `RingBuffer` (64 KiB);
-- a native pane's buffer is filled by its pipe link's reader;
-- a tmux pane's buffer is filled by `%output %N` arriving on the session's
-  control client (which the daemon holds), routed by `link_key`;
-- a detached tmux pane keeps its buffer too, and tmux additionally keeps the
-  scrollback, reachable with `capture-pane`.
+RawSessionManager owns the `LinkId -> BufferId` routes for one or more Links.
+TmuxSessionManager owns the `%N -> BufferId` routes for one control Link.
+`TmuxControl` parses `%output` and emits `TmuxEvent`; the TmuxSessionManager
+turns those events into Buffer routes and registry actions for the top-level
+SessionManager. Multiple Panes may reference one Buffer. Deleting a Pane
+deletes only UI, not bytes.
 
 ## 4. Link, Endpoint and Sink
 
@@ -215,7 +212,7 @@ pub enum EndpointRef {
 
 ### One tmux session, one link
 
-A tmux session has **exactly one** link: its control client (`tmux -C attach`,
+A tmux session has **exactly one** link: its control client (`tmux -CC attach`,
 run through `ssh` when the host is remote). Every window, every pane and every
 byte in that session comes through it:
 
@@ -238,7 +235,7 @@ the connection to the server, not the connection of a pane.
 | link | panes it can serve | how a pane addresses itself |
 |---|---|---|
 | `Pipe` | at most **one** | it does not — it is the only reader |
-| `Control` | **all** panes of its session | `link_key = "%N"` |
+| `Control` | **all buffers of its session** | `BufferOrigin::Tmux { pane_handle: "%N" }` |
 
 The earlier blanket rule "no link may be shared" was too strong. It is true of a
 raw byte stream — two reader loops on one pty would steal each other's bytes —
@@ -259,7 +256,7 @@ Consequences:
 
 > **Not introduced (ADR 0010 D4 amendment).** The layout below is what sharing a
 > link *needs*; what shipped is `TmuxControl`'s reader loop: `%output %N` is
-> routed to the pane whose `link_key` is `%N`, and every other notification
+> routed to the Buffer whose tmux origin is `%N`, and every other notification
 > becomes a `TmuxEvent`. It has exactly one implementation, and a trait with one
 > impl plus a trivial forwarder is the ceremony that got the first `Sink`
 > deleted. Introduce the trait when a second link kind has to demultiplex. The
@@ -354,7 +351,7 @@ graph TB
 
     subgraph D["daemon process"]
         DL["3 live Pipe transports"]
-        DP["3 pane buffers + pumps"]
+        DP["3 Buffers + pumps"]
     end
 
     subgraph ST["state.json"]
@@ -389,7 +386,7 @@ graph LR
     subgraph D["daemon process"]
         L["control slot: work-ctl<br/>Control link, one per session"]
         AL["alive flag<br/>false on %exit"]
-        B["per-pane buffers %0, %1, %2<br/>one %output pump each"]
+        B["Buffers for %0, %1, %2<br/>one %output pump each"]
     end
     ST["registries<br/>windows @N, panes %N"]
 
@@ -412,7 +409,7 @@ the **server**, and `%output %N` is what makes a single stream addressable by
 three panes. Across ssh (§6) the same link is one channel; nothing else changes.
 
 The control slot lives in the **daemon** (ADR 0009 §1): the client, its
-`%output` subscriptions and every pane buffer are daemon state, so a CLI
+`%output` subscriptions and every Buffer are daemon state, so a CLI
 invocation that ends does not end the stream. The CLI's `Read`/`Write` are
 requests over the local IPC endpoint, keyed by pane id; `Structure` and
 `TmuxCommand` are
@@ -423,7 +420,7 @@ On Unix the endpoint is a private Unix socket. On native Windows it is a
 per-user named pipe derived from the same config path; both carry the same
 length-prefixed JSON protocol. Windows WSL and PowerShell sessions use
 `shell:///<absolute executable path>` with repeated `arg=` parameters. They
-normalize to the same Shell transport, preserving the daemon and pane buffer
+normalize to the same Shell transport, preserving the daemon and Buffer
 model without special launcher path names.
 
 ## 6. tmux over SSH
@@ -441,7 +438,7 @@ commands go in as lines; `%output`, `%begin/%end` and every notification come
 back on the same channel. One connection per managed session, in both
 directions.
 
-`-C`, not `-CC`. `-CC` additionally disables echo by calling `tcgetattr` on the
+`-CC` with a dedicated PTY. `-CC` additionally disables echo by calling `tcgetattr` on the
 client's terminal, which fails outright when stdin/stdout are pipes:
 
 ```
@@ -469,7 +466,7 @@ command control over a stream that has no framing of its own.**
 
 ### The link is a process, not a reused session
 
-"Run `tmux -C` through the ssh link" is the right idea with one trap: it must be
+"Run `tmux -CC` through the ssh link" is the right idea with one trap: it must be
 a **dedicated exec**, not an existing interactive shell link. If the control
 protocol rides a shell that also has a prompt, echo and job control, those bytes
 land in the same stream as `%output` and the parser can no longer tell protocol
@@ -489,7 +486,7 @@ If the goal is to avoid a second TCP connection, the place to do it is OpenSSH's
 
 | what | how | why |
 |---|---|---|
-| a **managed** session (we hold its control client) | one persistent `tmux -C attach` (locally, or through one `ssh`) | streams bytes and pushes events |
+| a **managed** session (we hold its control client) | one persistent `tmux -CC attach` (locally, or through one `ssh`) | streams bytes and pushes events |
 | **enumeration and one-shot** (`session list` across hosts, probing, `attach`, `kill` of a session we are not attached to) | one `tmux <cmd>` exec per call (`ssh <dest> tmux ...`) | request/response, no state to keep |
 
 Mixing them up is the bug to avoid: data must never go through a one-shot exec
@@ -665,14 +662,16 @@ Invariants and what enforces each:
 - **A `Pipe` link serves at most one pane.** Checked by looking for an existing
   pane on the link; there is no capacity beyond that.
 - **A `Control` link serves every pane of its session**, each with a distinct
-  `link_key` (`%N`). Uniqueness of `link_key` inside a link is the invariant that
+  `BufferOrigin::Tmux.pane_handle` (`%N`). Uniqueness of the handle inside a
+  session is the invariant that
   keeps `%output` routing unambiguous.
 - **A tmux session has exactly one link.** `session new --tmux` and
   `session attach` creates it; `session kill` closes it. There is no second link
   to a server, so `link add` is rejected in a tmux session.
 - **A pane's link is in the same session.** Cross-session moves only via an
   explicit `pane move --session`, never as a side effect of `attach`.
-- **A tmux pane cannot be detached, only killed.** Its `link_key` is its
+- **A tmux UI pane cannot be detached into another source.** Its Buffer origin's
+  `pane_handle` is its
   identity on that server; `pane detach` refuses.
 - **A tmux handle is never an index.** `@N` / `%N` only — indices shift on
   rename and reorder.
@@ -712,9 +711,9 @@ crates/xscore/src/
   cli/         session, window, pane, link, data, daemon, state
 ```
 
-`backends/` stays — it is the per-pane conduit — but it no longer holds the
-pane's buffer: that moved to `core/buffer.rs`, because it belongs to the pane,
-not to the connection. There is **no `sink/`**: the demultiplexer is
+`backends/` stays as the Buffer I/O bridge — but it no longer owns byte history:
+that belongs to independent Buffers in `core/buffer.rs`. There is **no `sink/`**:
+the demultiplexer is
 `TmuxControl`'s reader loop (ADR 0010, D4 amendment), so a link kind is
 distinguished by `EndpointRef` and by which bridge its panes get, not by a trait
 object.
@@ -798,7 +797,7 @@ xscore window add  --session <s> [--name N] [--cols N --rows N]
 xscore window del  --id <w>                  # panes survive as orphans
 
 # Pane — scoped to a session
-xscore pane list [--session <s>] [--window <w>] [--link <l>]
+xscore pane list [--session <s>] [--window <w>] [--buffer <b>]
 xscore pane add  --session <s> [--window <w>] [--cols N --rows N]
 xscore pane del  --id <p>
 xscore pane attach --pane <p> --link <l>     # pipe links only
@@ -824,20 +823,14 @@ Notes:
   can each have `work`, so names are not globally unique — see §6.
 - Every `<ref>`-taking verb resolves the host first and then contacts only that
   host. No command ever fans out across hosts.
-- Link URLs belong to `link add`; `session new` has no URL. Shell connection
-  options such as `arg`, `cwd`, `cols` and `rows` are query parameters of the
-  Link URL (`shell:///bin/bash?cwd=/var/log&cols=120&rows=40`). Unknown keys are
-  refused rather than ignored.
-- `session new` creates a *workspace*, not one viewport. A native session starts
-  empty and can later hold several windows and links of mixed kinds (shell +
-  ssh + serial) — see §0.
-- `link add`, `window add` and `pane add` require an existing session. With one
-  session `--session` may be omitted; zero sessions are an error, and multiple
-  sessions require an explicit choice. No implicit `default` is created.
+- Raw `session new` requires one or more repeatable `--link <URL>` values.
+  Link query options (`arg`, `cwd`, `cols`, `rows`) are unchanged.
+- `session new` creates a workspace plus its backend SessionManager. Raw managers can route several mixed Links into independent Buffers.
+- `link add`, `window add` and `pane add` require an explicit `--session`.
 - For a tmux session, `pane add` is atomic: `split-window`, read `%N`, insert a
-  pane row carrying `link_key = %N` on the session's existing link. No link is
+  Pane/Buffer row carrying `pane_handle = %N`. No link is
   created — a tmux session has exactly one (§4).
-- `link add` is rejected inside a tmux session for the same reason; `link ls
+- `link add` is rejected inside a tmux session for the same reason; `link list
   --session work` shows exactly one row.
 - `session attach` replaces `link open`; `session kill` / `session detach`
   replace `link close`. `link` loses both verbs.
@@ -862,7 +855,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `SinkConfig::{Raw, Tmux}` | replaced by `SessionBackend`; a link no longer knows about tmux |
 | `?tmux=on\|auto\|local\|remote` | tmux-ness is a session property |
 | `socket: Option<String>` | replaced by `TmuxSocket { Default, Named, Path }`: a named socket resolves on the *host*, so a name is not a location |
-| `WindowInfo.tmux_window_handle`, `WindowInfo.layout`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux { handle }` (`@N`) and the pane's `link_key` (`%N`) |
+| `WindowInfo.tmux_window_handle`, `WindowInfo.layout`, `PaneInfo.sink_handle` | folded into `WindowBackend::Tmux { handle }` (`@N`) and `BufferOrigin::Tmux` (`%N`) |
 | `WindowLayout` (5 variants) | no consumer; tmux owns layout, native has no renderer |
 | `link open` / `link close` | `session attach` / `session kill` / `session detach` |
 | `link sync [--heal]` (`SyncReport`) | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
@@ -879,7 +872,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `ControlBridge` | a pane's view of its session's control client: buffer reads, `send-keys` writes |
 | `tmux::TmuxHost` (`Local`, `Ssh`) | argv-prefix runner: local `tmux`, or `ssh <dest> tmux` once per command (§6) |
 | `session attach` / `session detach` | manage sessions xscore did not create; stop managing without destroying |
-| `pane add --window` on a tmux session | splits the tmux window and inserts the pane row with `link_key = %N` on the session's one link |
+| `pane add --window` on a tmux session | splits the tmux window and inserts Pane plus Buffer rows; the Buffer origin carries `%N` |
 
 ### Changed
 
@@ -931,7 +924,7 @@ hard error naming the command.
 
 | # | Question | Lean |
 |---|---|---|
-| D1 | Does a tmux-backed session have explicit `Link`s, and if so how many? | **Decided: one per session.** The link is the control connection to the server; panes address themselves with `link_key = %N`. This is the original "a tmux link may be used by several panes" model, made literal by control mode. |
+| D1 | Does a tmux-backed session have explicit `Link`s, and if so how many? | **Decided: one per session.** The Link is the control connection; the TmuxSessionManager maps `%N` to independent Buffers. |
 | D2 | Window mirroring for tmux sessions: mirror `@N`, or keep one tmux window and treat xscore windows as private? | **Decided: mirror `@N`.** `tmux attach` must show what xscore shows; a private grouping would be a second, contradicting structure. |
 | D3 | `WindowLayout`: delete for good, or keep a hint for native windows? | **Delete.** No consumer; reintroduce with the renderer. |
 | D4 | tmux socket: private `-L xscore`, or the user's default socket? | **Decided:** the default socket; `--socket` overrides. Sessions invisible in `tmux ls` are not "managed". Tests pass `--socket` explicitly. |

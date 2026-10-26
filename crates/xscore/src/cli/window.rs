@@ -1,7 +1,7 @@
 // cli/window.rs (v0.6.0 — a window belongs to a session; tmux sessions get real
 // tmux windows, native ones a purely xscore-side window)
-use crate::core::{Error, SessionManager, SessionId, WindowId};
 use crate::core::window::Window;
+use crate::core::{Error, SessionId, SessionManager, WindowId};
 use crate::model::WindowBackend;
 use clap::{Args, Subcommand};
 use std::sync::Arc;
@@ -14,9 +14,15 @@ pub enum WindowCmd {
     /// List windows, optionally only one session's.
     List(WindowListArgs),
     /// Print WindowInfo JSON.
-    Show { #[arg(long)] id: String },
+    Show {
+        #[arg(long)]
+        id: String,
+    },
     /// Tear down a window row. Panes inside survive as orphans.
-    Del { #[arg(long)] id: String },
+    Del {
+        #[arg(long)]
+        id: String,
+    },
     /// Add a pane to this window.
     AddPane(WindowPaneArgs),
     /// Remove a pane from this window (pane stays alive as orphan).
@@ -35,10 +41,9 @@ pub struct WindowAddArgs {
     /// Total window height in cells (native windows only — tmux reports its own).
     #[arg(long, default_value_t = 30)]
     pub rows: u16,
-    /// Put the window in this session. Omitted: the manager resolves the
-    /// default (the only existing session; no container is created implicitly).
+    /// Session that owns the window.
     #[arg(long, value_name = "NAME")]
-    pub session: Option<String>,
+    pub session: String,
 }
 
 #[derive(Args)]
@@ -50,8 +55,10 @@ pub struct WindowListArgs {
 
 #[derive(Args)]
 pub struct WindowPaneArgs {
-    #[arg(long)] pub window: String,
-    #[arg(long)] pub pane: String,
+    #[arg(long)]
+    pub window: String,
+    #[arg(long)]
+    pub pane: String,
 }
 
 pub async fn run(mgr: Arc<SessionManager>, cmd: WindowCmd) -> anyhow::Result<()> {
@@ -66,7 +73,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: WindowCmd) -> anyhow::Result<()>
 }
 
 async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()> {
-    let sid = mgr.resolve_session(args.session.as_deref()).await?;
+    let sid = mgr.resolve_session(Some(&args.session)).await?;
     let wid = mgr
         .add_window_in(sid, args.name, args.cols, args.rows)
         .await?;
@@ -90,7 +97,10 @@ async fn list(mgr: Arc<SessionManager>, args: WindowListArgs) -> anyhow::Result<
         }
         if session.is_tmux() {
             if let Err(e) = mgr.refresh_tmux_session(session.id).await {
-                tracing::debug!("window ls: could not refresh tmux session {}: {e}", session.name);
+                tracing::debug!(
+                    "window ls: could not refresh tmux session {}: {e}",
+                    session.name
+                );
             }
         }
     }
@@ -153,7 +163,11 @@ async fn session_names(mgr: &SessionManager) -> SessionNames {
 
 async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     let wid = WindowId::parse(id)?;
-    let w = mgr.windows.get(wid).await.ok_or(Error::WindowNotFound(wid))?;
+    let w = mgr
+        .windows
+        .get(wid)
+        .await
+        .ok_or(Error::WindowNotFound(wid))?;
     println!("{}", serde_json::to_string_pretty(&w.info)?);
     Ok(())
 }

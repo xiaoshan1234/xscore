@@ -22,7 +22,10 @@ pub struct RingBuffer {
 
 impl RingBuffer {
     pub fn new(capacity: usize) -> Self {
-        Self { data: VecDeque::with_capacity(capacity.min(4096)), capacity }
+        Self {
+            data: VecDeque::with_capacity(capacity.min(4096)),
+            capacity,
+        }
     }
 
     /// Append one byte, evicting the oldest when full.
@@ -56,10 +59,18 @@ impl RingBuffer {
         n
     }
 
-    pub fn len(&self) -> usize { self.data.len() }
-    pub fn is_empty(&self) -> bool { self.data.is_empty() }
-    pub fn capacity(&self) -> usize { self.capacity }
-    pub fn clear(&mut self) { self.data.clear(); }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+    pub fn clear(&mut self) {
+        self.data.clear();
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +102,11 @@ mod tests {
         rb.push_slice(b"abc");
         let mut out = [0u8; 8];
         assert_eq!(rb.copy_out(&mut out), 3);
-        assert_eq!(rb.copy_out(&mut out), 3, "second read must still see the bytes");
+        assert_eq!(
+            rb.copy_out(&mut out),
+            3,
+            "second read must still see the bytes"
+        );
         assert_eq!(rb.len(), 3);
     }
 

@@ -72,10 +72,15 @@ impl ShellTransport {
 
 #[async_trait]
 impl super::Transport for ShellTransport {
-    fn kind(&self) -> &'static str { "shell" }
+    fn kind(&self) -> &'static str {
+        "shell"
+    }
 
     fn address(&self) -> LinkAddress {
-        LinkAddress::Shell { command: self.command.clone(), args: self.args.clone() }
+        LinkAddress::Shell {
+            command: self.command.clone(),
+            args: self.args.clone(),
+        }
     }
 
     async fn open(&mut self) -> Result<()> {
@@ -215,9 +220,16 @@ impl super::Transport for ShellTransport {
 
     async fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let guard = self.master.lock().unwrap();
-        let master = guard.as_ref().ok_or_else(|| Error::Transport("not open".into()))?;
+        let master = guard
+            .as_ref()
+            .ok_or_else(|| Error::Transport("not open".into()))?;
         master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| Error::Transport(format!("pty resize: {e}")))
     }
 
@@ -269,7 +281,10 @@ mod tests {
     async fn shell_link_gets_a_tty() {
         let mut t = ShellTransport::new(
             "sh".into(),
-            vec!["-c".into(), "test -t 1 && echo IS_TTY || echo NOT_A_TTY".into()],
+            vec![
+                "-c".into(),
+                "test -t 1 && echo IS_TTY || echo NOT_A_TTY".into(),
+            ],
             None,
         )
         .await
@@ -284,7 +299,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn shell_transport_roundtrip() {
-        let mut t = ShellTransport::new("cat".into(), vec![], None).await.unwrap();
+        let mut t = ShellTransport::new("cat".into(), vec![], None)
+            .await
+            .unwrap();
         t.open().await.unwrap();
         t.write(b"hi\n").await.unwrap();
         let out = read_until(&t, "hi").await;
@@ -305,14 +322,19 @@ mod tests {
         t.open().await.unwrap();
         t.resize(100, 40).await.unwrap();
         let out = read_until(&t, "40 100").await;
-        assert!(out.contains("40 100"), "child must see the resize, got {out:?}");
+        assert!(
+            out.contains("40 100"),
+            "child must see the resize, got {out:?}"
+        );
         t.close().await.unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn write_after_close_fails() {
-        let mut t = ShellTransport::new("cat".into(), vec![], None).await.unwrap();
+        let mut t = ShellTransport::new("cat".into(), vec![], None)
+            .await
+            .unwrap();
         t.open().await.unwrap();
         t.close().await.unwrap();
         assert!(t.write(b"x").await.is_err());
@@ -321,13 +343,9 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn windows_conpty_roundtrip() {
-        let mut t = ShellTransport::new(
-            "cmd.exe".into(),
-            vec!["/Q".into(), "/K".into()],
-            None,
-        )
-        .await
-        .unwrap();
+        let mut t = ShellTransport::new("cmd.exe".into(), vec!["/Q".into(), "/K".into()], None)
+            .await
+            .unwrap();
         t.open().await.unwrap();
         t.write(b"echo XSCORE_WINDOWS_PTY\r\n").await.unwrap();
         let out = read_until(&t, "XSCORE_WINDOWS_PTY").await;

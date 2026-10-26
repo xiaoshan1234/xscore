@@ -58,11 +58,7 @@ pub async fn run(cmd: DaemonCmd) -> anyhow::Result<()> {
                 for t in &status.tmux {
                     eprintln!(
                         "tmux {}: {} alive={} panes={} buffered={}",
-                        t.session,
-                        t.name,
-                        t.alive,
-                        t.panes,
-                        t.buffered
+                        t.session, t.name, t.alive, t.panes, t.buffered
                     );
                 }
             }

@@ -114,8 +114,12 @@ fn parse_id_from_stdout(stdout: &[u8], key: &str) -> String {
     String::from_utf8_lossy(stdout)
         .lines()
         .find(|l| l.trim_start().starts_with(&prefix))
-        .unwrap_or_else(|| panic!("no `{prefix}:` line in stdout: {}",
-            String::from_utf8_lossy(stdout)))
+        .unwrap_or_else(|| {
+            panic!(
+                "no `{prefix}:` line in stdout: {}",
+                String::from_utf8_lossy(stdout)
+            )
+        })
         .trim()
         .strip_prefix(&prefix)
         .unwrap_or("")
@@ -125,8 +129,10 @@ fn parse_id_from_stdout(stdout: &[u8], key: &str) -> String {
 
 fn json(stdout: &[u8]) -> serde_json::Value {
     serde_json::from_slice(stdout).unwrap_or_else(|e| {
-        panic!("expected JSON on stdout, got {:?} ({e})",
-            String::from_utf8_lossy(stdout))
+        panic!(
+            "expected JSON on stdout, got {:?} ({e})",
+            String::from_utf8_lossy(stdout)
+        )
     })
 }
 
@@ -164,7 +170,12 @@ fn xscore_link_add_requires_url_or_config() {
 #[test]
 fn xscore_link_config_add_and_list_roundtrip() {
     let xscore = || xscore_for("link_config_roundtrip");
-    let _ = std::fs::remove_dir_all(home_for("link_config_roundtrip").join(".config").join("xscore").join("links"));
+    let _ = std::fs::remove_dir_all(
+        home_for("link_config_roundtrip")
+            .join(".config")
+            .join("xscore")
+            .join("links"),
+    );
     let add = xscore()
         .args(["link", "config", "add", "web", "ssh://root@host:22"])
         .output()
@@ -175,16 +186,14 @@ fn xscore_link_config_add_and_list_roundtrip() {
         String::from_utf8_lossy(&add.stderr)
     );
 
-    let list = xscore()
-        .args(["link", "config", "list"])
-        .output()
-        .unwrap();
+    let list = xscore().args(["link", "config", "list"]).output().unwrap();
     let s = String::from_utf8_lossy(&list.stdout);
-    assert!(s.contains("web"), "expected name 'web' in config list, got: {s}");
+    assert!(
+        s.contains("web"),
+        "expected name 'web' in config list, got: {s}"
+    );
 
-    let _ = xscore()
-        .args(["link", "config", "remove", "web"])
-        .output();
+    let _ = xscore().args(["link", "config", "remove", "web"]).output();
 }
 
 // ----- ADR 0005 invariant: two `link add <same url>` = two distinct links -----
@@ -215,36 +224,53 @@ fn xscore_link_add_direct_creates_window_and_pane() {
         .args(["link", "add", "shell:///bin/cat"])
         .output()
         .unwrap();
-    assert!(ok(&out), "add failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let link_id = parse_id_from_stdout(&out.stdout, "link");
     let window_id = parse_id_from_stdout(&out.stdout, "window");
     let pane_id = parse_id_from_stdout(&out.stdout, "pane");
 
     // Pane is attached to the link and lives in the auto-created window.
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output()
-        .unwrap()
-        .stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(pane["link_id"], serde_json::json!(link_id));
     assert_eq!(pane["window_id"], serde_json::json!(window_id));
-    assert!(pane["link_key"].is_null(), "a pipe pane carries no %N address: {pane}");
+    assert!(
+        pane["link_key"].is_null(),
+        "a pipe pane carries no %N address: {pane}"
+    );
 
     // Window is virtual: no tmux handle.
-    let window = json(&xscore()
-        .args(["window", "show", "--id", &window_id])
-        .output()
-        .unwrap()
-        .stdout);
-    assert_eq!(window["backend"]["kind"], serde_json::json!("native"), "native window: {window}");
+    let window = json(
+        &xscore()
+            .args(["window", "show", "--id", &window_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        window["backend"]["kind"],
+        serde_json::json!("native"),
+        "native window: {window}"
+    );
 
     // The link really is a pipe: one byte stream, no tmux in the middle.
-    let link = json(&xscore()
-        .args(["link", "show", "--id", &link_id])
-        .output()
-        .unwrap()
-        .stdout);
+    let link = json(
+        &xscore()
+            .args(["link", "show", "--id", &link_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(
         link["endpoint"]["pipe"]["transport"],
         serde_json::json!("shell"),
@@ -269,19 +295,28 @@ fn xscore_link_add_direct_with_pane() {
         .args(["link", "add", "shell:///bin/cat", "--pane", &pane_id])
         .output()
         .unwrap();
-    assert!(ok(&out), "add --pane failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "add --pane failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("link:"), "missing link: {s}");
     assert!(s.contains("pane:"), "missing pane: {s}");
-    assert!(!s.contains("window:"), "binding an existing pane must not create a window: {s}");
+    assert!(
+        !s.contains("window:"),
+        "binding an existing pane must not create a window: {s}"
+    );
     assert_eq!(parse_id_from_stdout(&out.stdout, "pane"), pane_id);
 
     let link_id = parse_id_from_stdout(&out.stdout, "link");
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output()
-        .unwrap()
-        .stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(pane["link_id"], serde_json::json!(link_id));
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
@@ -308,7 +343,10 @@ fn xscore_link_add_direct_with_attached_pane_errors() {
         .args(["link", "add", "shell:///bin/cat", "--pane", &pane_id])
         .output()
         .unwrap();
-    assert!(!second.status.success(), "re-binding an attached pane must fail");
+    assert!(
+        !second.status.success(),
+        "re-binding an attached pane must fail"
+    );
     let err = String::from_utf8_lossy(&second.stderr);
     assert!(
         err.contains("already attached") && err.contains(&link_a),
@@ -316,11 +354,13 @@ fn xscore_link_add_direct_with_attached_pane_errors() {
     );
 
     // Still attached to A (no silent steal).
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output()
-        .unwrap()
-        .stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(pane["link_id"], serde_json::json!(link_a));
 
     let _ = xscore().args(["link", "del", "--id", &link_a]).output();
@@ -344,7 +384,11 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let lid = parse_id_from_stdout(&out.stdout, "link");
 
     // One tmux session, one connection: a second link would be a second
@@ -353,7 +397,10 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
         .args(["link", "add", "shell:///bin/cat", "--session", "work"])
         .output()
         .unwrap();
-    assert!(!add.status.success(), "a tmux session must not take a second link");
+    assert!(
+        !add.status.success(),
+        "a tmux session must not take a second link"
+    );
     let err = String::from_utf8_lossy(&add.stderr);
     assert!(
         err.contains("control link") || err.contains("one link"),
@@ -372,13 +419,36 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
             .stdout,
         "pane",
     );
-    let before = json(&xscore().args(["pane", "show", "--id", &split]).output().unwrap().stdout);
+    let before = json(
+        &xscore()
+            .args(["pane", "show", "--id", &split])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     let with_pane = xscore()
-        .args(["link", "add", "shell:///bin/cat", "--session", "work", "--pane", &split])
+        .args([
+            "link",
+            "add",
+            "shell:///bin/cat",
+            "--session",
+            "work",
+            "--pane",
+            &split,
+        ])
         .output()
         .unwrap();
-    assert!(!with_pane.status.success(), "`--pane` must not bypass the one-link rule");
-    let after = json(&xscore().args(["pane", "show", "--id", &split]).output().unwrap().stdout);
+    assert!(
+        !with_pane.status.success(),
+        "`--pane` must not bypass the one-link rule"
+    );
+    let after = json(
+        &xscore()
+            .args(["pane", "show", "--id", &split])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(
         before["link_id"], after["link_id"],
         "a rejected add must not rebind the pane: {after}"
@@ -389,13 +459,30 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
     );
 
     // And the session still has exactly one link, as the filter reports.
-    let ls = xscore().args(["link", "list", "--session", "work"]).output().unwrap();
-    assert!(ok(&ls), "link list failed: {}", String::from_utf8_lossy(&ls.stderr));
+    let ls = xscore()
+        .args(["link", "list", "--session", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&ls),
+        "link list failed: {}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
     let listing = String::from_utf8_lossy(&ls.stdout).to_string();
-    let rows = listing.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+    let rows = listing
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count();
     assert_eq!(rows, 1, "one tmux session, one link: {listing}");
-    assert!(listing.contains(&lid), "the control link is the one: {listing}");
-    assert!(listing.contains("control"), "and it is reported as such: {listing}");
+    assert!(
+        listing.contains(&lid),
+        "the control link is the one: {listing}"
+    );
+    assert!(
+        listing.contains("control"),
+        "and it is reported as such: {listing}"
+    );
 
     let _ = xscore().args(["pane", "del", "--id", &split]).output();
     let _ = xscore().args(["session", "kill", "work"]).output();
@@ -408,17 +495,25 @@ fn xscore_link_add_inside_a_tmux_session_is_refused() {
 fn xscore_window_add_virtual() {
     let xscore = || xscore_for("window_add_virtual");
     let out = xscore()
-        .args(["window", "add", "--name", "scratch", "--cols", "100", "--rows", "20"])
+        .args([
+            "window", "add", "--name", "scratch", "--cols", "100", "--rows", "20",
+        ])
         .output()
         .unwrap();
     assert!(ok(&out));
     let wid = parse_id_from_stdout(&out.stdout, "window");
-    let w = json(&xscore()
-        .args(["window", "show", "--id", &wid])
-        .output()
-        .unwrap()
-        .stdout);
-    assert_eq!(w["backend"]["kind"], serde_json::json!("native"), "native window: {w}");
+    let w = json(
+        &xscore()
+            .args(["window", "show", "--id", &wid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        w["backend"]["kind"],
+        serde_json::json!("native"),
+        "native window: {w}"
+    );
     assert_eq!(w["cols"], serde_json::json!(100));
     assert!(w["name"] == serde_json::json!("scratch"), "{w}");
     let _ = xscore().args(["window", "del", "--id", &wid]).output();
@@ -436,25 +531,45 @@ fn xscore_window_add_tmux_session() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    assert!(
+        ok(&created),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
 
     // No `--link`: the SESSION decides, which is the whole point of ADR 0010.
     let out = xscore()
         .args(["window", "add", "--name", "logs", "--session", "work"])
         .output()
         .unwrap();
-    assert!(ok(&out), "window add --session failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "window add --session failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let wid = parse_id_from_stdout(&out.stdout, "window");
 
-    let w = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
+    let w = json(
+        &xscore()
+            .args(["window", "show", "--id", &wid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(w["backend"]["kind"], serde_json::json!("tmux"), "{w}");
     let handle = w["backend"]["handle"].as_str().expect("tmux handle");
     assert!(handle.starts_with('@'), "expected @N, got {handle}");
     assert_eq!(w["name"], serde_json::json!("logs"));
 
     // tmux is the source of truth: it has the window too.
-    let listing = tmux_stdout(name, &["list-windows", "-t", "work", "-F", "#{window_name}"]);
-    assert!(listing.contains("logs"), "tmux does not have the window: {listing:?}");
+    let listing = tmux_stdout(
+        name,
+        &["list-windows", "-t", "work", "-F", "#{window_name}"],
+    );
+    assert!(
+        listing.contains("logs"),
+        "tmux does not have the window: {listing:?}"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -472,7 +587,11 @@ fn xscore_pane_add_to_tmux_window() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&add), "session new --tmux failed: {}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        ok(&add),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let lid = parse_id_from_stdout(&add.stdout, "link");
     let wid = parse_id_from_stdout(&add.stdout, "window");
     let adopted = parse_id_from_stdout(&add.stdout, "pane");
@@ -481,25 +600,52 @@ fn xscore_pane_add_to_tmux_window() {
         .args(["pane", "add", "--window", &wid, "--session", "work"])
         .output()
         .unwrap();
-    assert!(ok(&out), "pane add --window failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "pane add --window failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let pid = parse_id_from_stdout(&out.stdout, "pane");
     assert_ne!(pid, adopted);
 
     // The new row is tmux's: it is addressed by its own `%N` on the session's
     // ONE link, not by a link of its own.
-    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     let key = pane["link_key"].as_str().expect("link_key");
     assert!(key.starts_with('%'), "expected %N, got {key}");
     assert_eq!(pane["link_id"], serde_json::json!(lid));
     assert_eq!(pane["window_id"], serde_json::json!(wid));
 
     // Both panes are the session's; no other session sees them.
-    let ls = xscore().args(["pane", "list", "--session", "work"]).output().unwrap();
-    assert!(ok(&ls), "pane list failed: {}", String::from_utf8_lossy(&ls.stderr));
+    let ls = xscore()
+        .args(["pane", "list", "--session", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&ls),
+        "pane list failed: {}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
     let listing = String::from_utf8_lossy(&ls.stdout).to_string();
-    let rows = listing.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(rows, 2, "expected the adopted pane plus the split: {listing}");
-    assert!(listing.contains(&pid) && listing.contains(&adopted), "{listing}");
+    let rows = listing
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count();
+    assert_eq!(
+        rows, 2,
+        "expected the adopted pane plus the split: {listing}"
+    );
+    assert!(
+        listing.contains(&pid) && listing.contains(&adopted),
+        "{listing}"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -513,27 +659,58 @@ fn xscore_window_and_pane_list_take_a_session_filter() {
     let xscore = || xscore_for(name);
 
     let a = xscore().args(["session", "new", "A"]).output().unwrap();
-    assert!(ok(&a), "session new A failed: {}", String::from_utf8_lossy(&a.stderr));
+    assert!(
+        ok(&a),
+        "session new A failed: {}",
+        String::from_utf8_lossy(&a.stderr)
+    );
     let wid_a = parse_id_from_stdout(&a.stdout, "window");
     let pid_a = parse_id_from_stdout(&a.stdout, "pane");
 
     let b = xscore().args(["session", "new", "B"]).output().unwrap();
-    assert!(ok(&b), "session new B failed: {}", String::from_utf8_lossy(&b.stderr));
+    assert!(
+        ok(&b),
+        "session new B failed: {}",
+        String::from_utf8_lossy(&b.stderr)
+    );
     let wid_b = parse_id_from_stdout(&b.stdout, "window");
     let pid_b = parse_id_from_stdout(&b.stdout, "pane");
 
-    let windows = xscore().args(["window", "list", "--session", "A"]).output().unwrap();
-    assert!(ok(&windows), "window list failed: {}", String::from_utf8_lossy(&windows.stderr));
+    let windows = xscore()
+        .args(["window", "list", "--session", "A"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&windows),
+        "window list failed: {}",
+        String::from_utf8_lossy(&windows.stderr)
+    );
     let wl = String::from_utf8_lossy(&windows.stdout).to_string();
     assert!(wl.contains(&wid_a), "A's window missing: {wl}");
-    assert!(!wl.contains(&wid_b), "B's window leaked into A's listing: {wl}");
-    assert!(wl.contains("SESSION"), "the listing names the session column: {wl}");
+    assert!(
+        !wl.contains(&wid_b),
+        "B's window leaked into A's listing: {wl}"
+    );
+    assert!(
+        wl.contains("SESSION"),
+        "the listing names the session column: {wl}"
+    );
 
-    let panes = xscore().args(["pane", "list", "--session", "A"]).output().unwrap();
-    assert!(ok(&panes), "pane list failed: {}", String::from_utf8_lossy(&panes.stderr));
+    let panes = xscore()
+        .args(["pane", "list", "--session", "A"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&panes),
+        "pane list failed: {}",
+        String::from_utf8_lossy(&panes.stderr)
+    );
     let pl = String::from_utf8_lossy(&panes.stdout).to_string();
     assert!(pl.contains(&pid_a), "A's pane missing: {pl}");
-    assert!(!pl.contains(&pid_b), "B's pane leaked into A's listing: {pl}");
+    assert!(
+        !pl.contains(&pid_b),
+        "B's pane leaked into A's listing: {pl}"
+    );
 
     // No filter still shows both.
     let all = xscore().args(["window", "list"]).output().unwrap();
@@ -548,14 +725,19 @@ fn xscore_window_and_pane_list_take_a_session_filter() {
 #[test]
 fn xscore_pane_add_orphan() {
     let xscore = || xscore_for("pane_add_orphan");
-    let out = xscore().args(["pane", "add", "--cols", "90", "--rows", "25"]).output().unwrap();
+    let out = xscore()
+        .args(["pane", "add", "--cols", "90", "--rows", "25"])
+        .output()
+        .unwrap();
     assert!(ok(&out));
     let pid = parse_id_from_stdout(&out.stdout, "pane");
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pid])
-        .output()
-        .unwrap()
-        .stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert!(pane["link_id"].is_null(), "{pane}");
     assert!(pane["window_id"].is_null(), "{pane}");
     assert!(pane["link_key"].is_null(), "{pane}");
@@ -569,18 +751,26 @@ fn xscore_pane_add_orphan() {
 #[test]
 fn xscore_link_del_direct_orphans_panes() {
     let xscore = || xscore_for("link_del_direct_orphans");
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
-    assert!(ok(&xscore().args(["link", "del", "--id", &link_id]).output().unwrap()));
-
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
+    assert!(ok(&xscore()
+        .args(["link", "del", "--id", &link_id])
         .output()
-        .unwrap()
-        .stdout);
+        .unwrap()));
+
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert!(pane["link_id"].is_null(), "pane should be orphaned: {pane}");
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
     cleanup_daemon("link_del_direct_orphans");
@@ -598,14 +788,28 @@ fn xscore_session_kill_removes_tmux_panes() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&add), "session new --tmux failed: {}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        ok(&add),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
     let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
-    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+    assert!(
+        ok(&kill),
+        "session kill failed: {}",
+        String::from_utf8_lossy(&kill.stderr)
+    );
 
-    let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
-    assert!(!show.status.success(), "the tmux pane row must be gone after session kill");
+    let show = xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap();
+    assert!(
+        !show.status.success(),
+        "the tmux pane row must be gone after session kill"
+    );
     assert!(
         String::from_utf8_lossy(&show.stderr).contains("pane not found"),
         "expected PaneNotFound, got: {}",
@@ -632,7 +836,11 @@ fn xscore_tmux_pane_cannot_detach() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&add), "session new --tmux failed: {}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        ok(&add),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
@@ -648,14 +856,21 @@ fn xscore_tmux_pane_cannot_detach() {
     );
 
     // Still attached after the rejected detach.
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output()
-        .unwrap()
-        .stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(pane["link_id"], serde_json::json!(link_id));
-    assert!(pane["link_key"].as_str().map(|k| k.starts_with('%')).unwrap_or(false),
-        "the pane keeps its %N address: {pane}");
+    assert!(
+        pane["link_key"]
+            .as_str()
+            .map(|k| k.starts_with('%'))
+            .unwrap_or(false),
+        "the pane keeps its %N address: {pane}"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -667,7 +882,12 @@ fn xscore_tmux_pane_cannot_detach() {
 fn xscore_rejects_legacy_state_schema() {
     let xscore = || xscore_for("legacy_state_schema");
     // First touch wipes this test's HOME, so write the legacy file after.
-    assert!(xscore().args(["link", "list"]).output().unwrap().status.success());
+    assert!(xscore()
+        .args(["link", "list"])
+        .output()
+        .unwrap()
+        .status
+        .success());
     let state = home_for("legacy_state_schema")
         .join(".config")
         .join("xscore")
@@ -678,18 +898,32 @@ fn xscore_rejects_legacy_state_schema() {
     std::fs::write(&state, r#"{"links":[],"windows":[],"panes":[]}"#).unwrap();
 
     let out = xscore().args(["link", "list"]).output().unwrap();
-    assert!(!out.status.success(), "legacy state.json must be a hard error");
+    assert!(
+        !out.status.success(),
+        "legacy state.json must be a hard error"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("schema_version=0"), "got: {err}");
     // v0.6.0 (ADR 0010 D8): the schema moved to 3, so the message (and this
     // assertion, which tracks it) moved with it.
     assert!(err.contains("expected 3"), "got: {err}");
-    assert!(err.contains("delete"), "error should tell the user what to do: {err}");
-    assert!(err.contains("state migrate"), "error should name the migration: {err}");
+    assert!(
+        err.contains("delete"),
+        "error should tell the user what to do: {err}"
+    );
+    assert!(
+        err.contains("state migrate"),
+        "error should name the migration: {err}"
+    );
 
     // Deleting it restores normal operation.
     std::fs::remove_file(&state).unwrap();
-    assert!(xscore().args(["link", "list"]).output().unwrap().status.success());
+    assert!(xscore()
+        .args(["link", "list"])
+        .output()
+        .unwrap()
+        .status
+        .success());
 }
 
 // ----- v0.4.0: full flow still works on the decoupled verbs -----
@@ -699,7 +933,10 @@ fn xscore_full_flow_create_pane_attach_data() {
     let xscore = || xscore_for("full_flow");
 
     // 1. Create link (raw). It now comes with a pane of its own.
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let auto_pane = parse_id_from_stdout(&add.stdout, "pane");
@@ -710,67 +947,109 @@ fn xscore_full_flow_create_pane_attach_data() {
 
     let attach = xscore()
         .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
-        .output().unwrap();
-    assert!(ok(&attach), "attach failed: {}", String::from_utf8_lossy(&attach.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        ok(&attach),
+        "attach failed: {}",
+        String::from_utf8_lossy(&attach.stderr)
+    );
 
     // Q1: the auto-created pane was auto-detached.
-    let auto = json(&xscore()
-        .args(["pane", "show", "--id", &auto_pane])
-        .output()
-        .unwrap()
-        .stdout);
-    assert!(auto["link_id"].is_null(), "Q1 should detach the old pane: {auto}");
+    let auto = json(
+        &xscore()
+            .args(["pane", "show", "--id", &auto_pane])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert!(
+        auto["link_id"].is_null(),
+        "Q1 should detach the old pane: {auto}"
+    );
 
     // 3. Verify the pane's info shows the link_id.
-    let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
+    let show = xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap();
     let s = String::from_utf8_lossy(&show.stdout);
-    assert!(s.contains(&link_id), "pane.show should include link_id; got: {s}");
+    assert!(
+        s.contains(&link_id),
+        "pane.show should include link_id; got: {s}"
+    );
 
     // 4. Create a window + put the pane in it.
     let add_window = xscore()
         .args(["window", "add", "--cols", "120", "--rows", "30"])
-        .output().unwrap();
+        .output()
+        .unwrap();
     assert!(ok(&add_window));
     let window_id = parse_id_from_stdout(&add_window.stdout, "window");
 
     let add_to_window = xscore()
-        .args(["pane", "add-to-window", "--pane", &pane_id, "--window", &window_id])
-        .output().unwrap();
-    assert!(ok(&add_to_window),
-        "add-to-window failed: {}", String::from_utf8_lossy(&add_to_window.stderr));
+        .args([
+            "pane",
+            "add-to-window",
+            "--pane",
+            &pane_id,
+            "--window",
+            &window_id,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&add_to_window),
+        "add-to-window failed: {}",
+        String::from_utf8_lossy(&add_to_window.stderr)
+    );
 
     // 5. Verify the lists agree.
     let window_list = xscore().args(["window", "list"]).output().unwrap();
     let wl = String::from_utf8_lossy(&window_list.stdout);
-    assert!(wl.contains(&window_id), "window list should contain wid: {wl}");
+    assert!(
+        wl.contains(&window_id),
+        "window list should contain wid: {wl}"
+    );
 
     let pane_list = xscore()
         .args(["pane", "list", "--window", &window_id])
-        .output().unwrap();
+        .output()
+        .unwrap();
     let pl = String::from_utf8_lossy(&pane_list.stdout);
-    assert!(pl.contains(&pane_id),
-        "pane list (--window) should contain pane id; got: {pl}");
+    assert!(
+        pl.contains(&pane_id),
+        "pane list (--window) should contain pane id; got: {pl}"
+    );
 
     // 6. Detach the pane (orphan again).
     let detach = xscore()
         .args(["pane", "detach", "--pane", &pane_id])
-        .output().unwrap();
+        .output()
+        .unwrap();
     assert!(ok(&detach));
 
     // 7. data write fails now (orphan).
     let write_fail = xscore()
         .args(["data", "write", "--pane", &pane_id])
         .stdin(std::process::Stdio::piped())
-        .output().unwrap();
-    assert!(!write_fail.status.success(),
-        "data_write on detached pane must fail");
+        .output()
+        .unwrap();
+    assert!(
+        !write_fail.status.success(),
+        "data_write on detached pane must fail"
+    );
     let s = String::from_utf8_lossy(&write_fail.stderr);
-    assert!(s.contains("not attached") || s.contains("NotAttached"),
-        "expected NotAttached error, got: {s}");
+    assert!(
+        s.contains("not attached") || s.contains("NotAttached"),
+        "expected NotAttached error, got: {s}"
+    );
 
     // Cleanup
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
-    let _ = xscore().args(["window", "del", "--id", &window_id]).output();
+    let _ = xscore()
+        .args(["window", "del", "--id", &window_id])
+        .output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &auto_pane]).output();
     cleanup_daemon("full_flow");
@@ -781,27 +1060,50 @@ fn xscore_full_flow_create_pane_attach_data() {
 #[test]
 fn xscore_q1_direct_link_auto_detaches_old_active_pane() {
     let xscore = || xscore_for("q1_auto_detach");
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     let link_id = parse_id_from_stdout(&add.stdout, "link");
 
-    let p1 = parse_id_from_stdout(&xscore().args(["pane", "add"]).output().unwrap().stdout, "pane");
-    let p2 = parse_id_from_stdout(&xscore().args(["pane", "add"]).output().unwrap().stdout, "pane");
+    let p1 = parse_id_from_stdout(
+        &xscore().args(["pane", "add"]).output().unwrap().stdout,
+        "pane",
+    );
+    let p2 = parse_id_from_stdout(
+        &xscore().args(["pane", "add"]).output().unwrap().stdout,
+        "pane",
+    );
 
-    let _ = xscore().args(["pane", "attach", "--pane", &p1, "--link", &link_id]).output().unwrap();
-    let _ = xscore().args(["pane", "attach", "--pane", &p2, "--link", &link_id]).output().unwrap();
+    let _ = xscore()
+        .args(["pane", "attach", "--pane", &p1, "--link", &link_id])
+        .output()
+        .unwrap();
+    let _ = xscore()
+        .args(["pane", "attach", "--pane", &p2, "--link", &link_id])
+        .output()
+        .unwrap();
 
     // p1 should be detached (link_id: null); p2 should be attached.
-    let show_p1 = xscore().args(["pane", "show", "--id", &p1]).output().unwrap();
+    let show_p1 = xscore()
+        .args(["pane", "show", "--id", &p1])
+        .output()
+        .unwrap();
     let p1_json = String::from_utf8_lossy(&show_p1.stdout);
     assert!(
         p1_json.contains(r#""link_id": null"#) || p1_json.contains(r#""link_id":null"#),
         "p1 should be detached, got: {p1_json}"
     );
 
-    let show_p2 = xscore().args(["pane", "show", "--id", &p2]).output().unwrap();
+    let show_p2 = xscore()
+        .args(["pane", "show", "--id", &p2])
+        .output()
+        .unwrap();
     let p2_json = String::from_utf8_lossy(&show_p2.stdout);
-    assert!(p2_json.contains(&link_id),
-        "p2 should be attached, got: {p2_json}");
+    assert!(
+        p2_json.contains(&link_id),
+        "p2 should be attached, got: {p2_json}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &p1]).output();
@@ -815,8 +1117,11 @@ fn xscore_q1_direct_link_auto_detaches_old_active_pane() {
 fn xscore_window_add_list_del_orphan() {
     let xscore = || xscore_for("window_orphan");
     let add = xscore()
-        .args(["window", "add", "--name", "scratch", "--cols", "100", "--rows", "20"])
-        .output().unwrap();
+        .args([
+            "window", "add", "--name", "scratch", "--cols", "100", "--rows", "20",
+        ])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let wid = parse_id_from_stdout(&add.stdout, "window");
 
@@ -824,7 +1129,10 @@ fn xscore_window_add_list_del_orphan() {
     let ls = String::from_utf8_lossy(&list.stdout);
     assert!(ls.contains(&wid), "window list should contain wid: {ls}");
 
-    let del = xscore().args(["window", "del", "--id", &wid]).output().unwrap();
+    let del = xscore()
+        .args(["window", "del", "--id", &wid])
+        .output()
+        .unwrap();
     assert!(ok(&del));
 }
 
@@ -833,19 +1141,29 @@ fn xscore_window_add_list_del_orphan() {
 #[test]
 fn xscore_link_del_detaches_pane_keeps_pane_alive() {
     let xscore = || xscore_for("link_del_detaches");
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let add_pane = xscore().args(["pane", "add"]).output().unwrap();
     let pane_id = parse_id_from_stdout(&add_pane.stdout, "pane");
     let _ = xscore()
         .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
-        .output().unwrap();
+        .output()
+        .unwrap();
 
-    let del = xscore().args(["link", "del", "--id", &link_id]).output().unwrap();
+    let del = xscore()
+        .args(["link", "del", "--id", &link_id])
+        .output()
+        .unwrap();
     assert!(ok(&del));
 
     // The pane survives — info.link_id is now None.
-    let show = xscore().args(["pane", "show", "--id", &pane_id]).output().unwrap();
+    let show = xscore()
+        .args(["pane", "show", "--id", &pane_id])
+        .output()
+        .unwrap();
     let s = String::from_utf8_lossy(&show.stdout);
     assert!(
         s.contains(r#""link_id": null"#) || s.contains(r#""link_id":null"#),
@@ -870,25 +1188,41 @@ fn xscore_direct_link_stays_connected_after_restart() {
     cleanup_daemon("direct_stays_connected");
 
     // Process 1: create a direct link. It auto-creates a window + pane.
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
     // Process 2: the transport did NOT die with process 1 — the daemon
     // holds it, so `link show` must report a live connection.
-    let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
+    let show = xscore()
+        .args(["link", "show", "--id", &link_id])
+        .output()
+        .unwrap();
     assert!(ok(&show));
     let link = json(&show.stdout);
-    assert_eq!(link["connected"], serde_json::json!(true),
-        "direct link must stay connected across processes: {link}");
+    assert_eq!(
+        link["connected"],
+        serde_json::json!(true),
+        "direct link must stay connected across processes: {link}"
+    );
 
     // The pane's binding is still real.
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output().unwrap().stdout);
-    assert_eq!(pane["link_id"], serde_json::json!(link_id),
-        "binding must survive the restart: {pane}");
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        pane["link_id"],
+        serde_json::json!(link_id),
+        "binding must survive the restart: {pane}"
+    );
 
     // Process 3: and I/O actually works from a process that never had the
     // transport. This is the whole point of v0.5.0.
@@ -901,12 +1235,19 @@ fn xscore_direct_link_stays_connected_after_restart() {
         .unwrap();
     {
         use std::io::Write;
-        child.stdin.as_mut().unwrap().write_all(b"still-here\n").unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(b"still-here\n")
+            .unwrap();
     }
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(),
+    assert!(
+        out.status.success(),
         "write on a daemon-backed link must succeed: {}",
-        String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
@@ -928,8 +1269,15 @@ fn xscore_daemon_direct_link_survives_process() {
     cleanup_daemon(name);
 
     // Process A: create the link.
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
-    assert!(ok(&add), "link add failed: {}", String::from_utf8_lossy(&add.stderr));
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&add),
+        "link add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
@@ -946,18 +1294,30 @@ fn xscore_daemon_direct_link_survives_process() {
         child.stdin.as_mut().unwrap().write_all(b"hello\n").unwrap();
     }
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(),
-        "cross-process write failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "cross-process write failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // `/bin/cat` echoes; give the daemon's pump time to drain it.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     // Process C: read it back.
-    let read = xscore().args(["data", "read", "--pane", &pane_id]).output().unwrap();
-    assert!(ok(&read), "cross-process read failed: {}", String::from_utf8_lossy(&read.stderr));
+    let read = xscore()
+        .args(["data", "read", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&read),
+        "cross-process read failed: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
     let s = String::from_utf8_lossy(&read.stdout);
-    assert!(s.contains("hello"),
-        "read from a third process must see the daemon's buffer, got: {s:?}");
+    assert!(
+        s.contains("hello"),
+        "read from a third process must see the daemon's buffer, got: {s:?}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
@@ -971,23 +1331,37 @@ fn xscore_daemon_status_lists_link() {
     let xscore = || xscore_for(name);
     cleanup_daemon(name);
 
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
     let status = xscore().args(["daemon", "status"]).output().unwrap();
-    assert!(ok(&status), "daemon status failed: {}", String::from_utf8_lossy(&status.stderr));
+    assert!(
+        ok(&status),
+        "daemon status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
     let v = json(&status.stdout);
     assert_eq!(v["ok"], serde_json::json!(true), "{v}");
     let links = v["status"]["links"].as_array().expect("links array");
-    assert!(links.iter().any(|l| l == &serde_json::json!(link_id)),
-        "status must list {link_id}: {v}");
+    assert!(
+        links.iter().any(|l| l == &serde_json::json!(link_id)),
+        "status must list {link_id}: {v}"
+    );
     let panes = v["status"]["panes"].as_array().expect("panes array");
-    let pane = panes.iter().find(|p| p["pane"] == serde_json::json!(pane_id))
+    let pane = panes
+        .iter()
+        .find(|p| p["pane"] == serde_json::json!(pane_id))
         .unwrap_or_else(|| panic!("status must list pane {pane_id}: {v}"));
-    assert_eq!(pane["link"], serde_json::json!(link_id),
-        "pane must be reported as attached: {pane}");
+    assert_eq!(
+        pane["link"],
+        serde_json::json!(link_id),
+        "pane must be reported as attached: {pane}"
+    );
     assert!(v["status"]["pid"].as_u64().unwrap() > 0, "pid missing: {v}");
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
@@ -1027,7 +1401,11 @@ fn xscore_daemon_serve_stays_up_until_stopped() {
     );
 
     let stop = xscore().args(["daemon", "stop"]).output().unwrap();
-    assert!(ok(&stop), "daemon stop failed: {}", String::from_utf8_lossy(&stop.stderr));
+    assert!(
+        ok(&stop),
+        "daemon stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
     let exit = child.wait().expect("wait");
     assert!(exit.success(), "a stopped daemon exits cleanly, got {exit}");
 
@@ -1038,7 +1416,11 @@ fn xscore_daemon_serve_stays_up_until_stopped() {
         .args(["daemon", "serve", "--idle-exit"])
         .output()
         .unwrap();
-    assert!(ok(&quick), "idle-exit daemon failed: {}", String::from_utf8_lossy(&quick.stderr));
+    assert!(
+        ok(&quick),
+        "idle-exit daemon failed: {}",
+        String::from_utf8_lossy(&quick.stderr)
+    );
     assert!(
         start.elapsed() < std::time::Duration::from_secs(4),
         "--idle-exit must still leave on its own (took {:?})",
@@ -1053,16 +1435,25 @@ fn xscore_daemon_link_show_connected_true() {
     let xscore = || xscore_for(name);
     cleanup_daemon(name);
 
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
-    let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
+    let show = xscore()
+        .args(["link", "show", "--id", &link_id])
+        .output()
+        .unwrap();
     assert!(ok(&show));
     let link = json(&show.stdout);
-    assert_eq!(link["connected"], serde_json::json!(true),
-        "a daemon-held link is connected: {link}");
+    assert_eq!(
+        link["connected"],
+        serde_json::json!(true),
+        "a daemon-held link is connected: {link}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
@@ -1077,38 +1468,64 @@ fn xscore_daemon_stopped_link_not_connected() {
     let xscore = || xscore_for(name);
     cleanup_daemon(name);
 
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
     let stop = xscore().args(["daemon", "stop"]).output().unwrap();
-    assert!(ok(&stop), "daemon stop failed: {}", String::from_utf8_lossy(&stop.stderr));
+    assert!(
+        ok(&stop),
+        "daemon stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
 
     // The metadata is untouched; only the connection went away.
-    let show = xscore().args(["link", "show", "--id", &link_id]).output().unwrap();
+    let show = xscore()
+        .args(["link", "show", "--id", &link_id])
+        .output()
+        .unwrap();
     assert!(ok(&show));
     let link = json(&show.stdout);
-    assert_eq!(link["connected"], serde_json::json!(false),
-        "stopped daemon ⇒ connected=false: {link}");
+    assert_eq!(
+        link["connected"],
+        serde_json::json!(false),
+        "stopped daemon ⇒ connected=false: {link}"
+    );
 
-    let pane = json(&xscore()
-        .args(["pane", "show", "--id", &pane_id])
-        .output().unwrap().stdout);
-    assert_eq!(pane["link_id"], serde_json::json!(link_id),
-        "the binding must survive `daemon stop`: {pane}");
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        pane["link_id"],
+        serde_json::json!(link_id),
+        "the binding must survive `daemon stop`: {pane}"
+    );
 
     let write = xscore()
         .args(["data", "write", "--pane", &pane_id])
-        .output().unwrap();
-    assert!(!write.status.success(), "write to a stopped daemon must fail");
+        .output()
+        .unwrap();
+    assert!(
+        !write.status.success(),
+        "write to a stopped daemon must fail"
+    );
     let err = String::from_utf8_lossy(&write.stderr);
     assert!(
         err.contains("not connected") || err.contains("LinkNotConnected"),
         "expected LinkNotConnected, got: {err}"
     );
-    assert!(!err.contains("not attached"),
-        "must not report NotAttached for a bound pane: {err}");
+    assert!(
+        !err.contains("not attached"),
+        "must not report NotAttached for a bound pane: {err}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
@@ -1125,7 +1542,10 @@ fn xscore_daemon_buffer_survives_detach_across_processes() {
     cleanup_daemon(name);
 
     // Process A: link + write.
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
     assert!(ok(&add));
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
@@ -1147,28 +1567,55 @@ fn xscore_daemon_buffer_survives_detach_across_processes() {
     std::thread::sleep(std::time::Duration::from_millis(250));
 
     // Process B: detach.
-    let detach = xscore().args(["pane", "detach", "--pane", &pane_id]).output().unwrap();
-    assert!(ok(&detach), "detach failed: {}", String::from_utf8_lossy(&detach.stderr));
+    let detach = xscore()
+        .args(["pane", "detach", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&detach),
+        "detach failed: {}",
+        String::from_utf8_lossy(&detach.stderr)
+    );
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Process C: the buffer is still there (a pane is its buffer), even
     // though the pane is orphaned.
-    let read = xscore().args(["data", "read", "--pane", &pane_id]).output().unwrap();
-    assert!(ok(&read), "read after detach failed: {}", String::from_utf8_lossy(&read.stderr));
+    let read = xscore()
+        .args(["data", "read", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&read),
+        "read after detach failed: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
     let s = String::from_utf8_lossy(&read.stdout);
-    assert!(s.contains("kept"),
-        "detached pane must keep its buffer across processes, got: {s:?}");
+    assert!(
+        s.contains("kept"),
+        "detached pane must keep its buffer across processes, got: {s:?}"
+    );
 
     // Writing is refused while detached (no link to write to) ...
-    let refused = xscore().args(["data", "write", "--pane", &pane_id]).output().unwrap();
-    assert!(!refused.status.success(), "write on a detached pane must fail");
+    let refused = xscore()
+        .args(["data", "write", "--pane", &pane_id])
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "write on a detached pane must fail"
+    );
 
     // ... and re-attaching makes the pane writable again, into the SAME
     // buffer: the old bytes are still ahead of the new ones.
     let attach = xscore()
         .args(["pane", "attach", "--pane", &pane_id, "--link", &link_id])
-        .output().unwrap();
-    assert!(ok(&attach), "re-attach failed: {}", String::from_utf8_lossy(&attach.stderr));
+        .output()
+        .unwrap();
+    assert!(
+        ok(&attach),
+        "re-attach failed: {}",
+        String::from_utf8_lossy(&attach.stderr)
+    );
 
     let mut child = xscore()
         .args(["data", "write", "--pane", &pane_id])
@@ -1184,11 +1631,16 @@ fn xscore_daemon_buffer_survives_detach_across_processes() {
     assert!(child.wait_with_output().unwrap().status.success());
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let read = xscore().args(["data", "read", "--pane", &pane_id]).output().unwrap();
+    let read = xscore()
+        .args(["data", "read", "--pane", &pane_id])
+        .output()
+        .unwrap();
     assert!(ok(&read));
     let s = String::from_utf8_lossy(&read.stdout);
-    assert!(s.contains("kept") && s.contains("more"),
-        "re-attach must append to the same buffer, got: {s:?}");
+    assert!(
+        s.contains("kept") && s.contains("more"),
+        "re-attach must append to the same buffer, got: {s:?}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
@@ -1212,8 +1664,15 @@ fn xscore_daemon_survives_sighup() {
     let xscore = || xscore_for(name);
     cleanup_daemon(name);
 
-    let add = xscore().args(["link", "add", "shell:///bin/cat"]).output().unwrap();
-    assert!(ok(&add), "add failed: {}", String::from_utf8_lossy(&add.stderr));
+    let add = xscore()
+        .args(["link", "add", "shell:///bin/cat"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&add),
+        "add failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let link_id = parse_id_from_stdout(&add.stdout, "link");
     let pane_id = parse_id_from_stdout(&add.stdout, "pane");
 
@@ -1230,12 +1689,23 @@ fn xscore_daemon_survives_sighup() {
 
     // Still serving: the pid is unchanged and the link is still connected.
     let after = json(&xscore().args(["daemon", "status"]).output().unwrap().stdout);
-    assert_eq!(after["status"]["pid"], serde_json::json!(pid),
-        "daemon must survive SIGHUP: {after}");
-    let link = json(&xscore().args(["link", "show", "--id", &link_id]).output()
-        .unwrap().stdout);
-    assert_eq!(link["connected"], serde_json::json!(true),
-        "link must stay connected after SIGHUP: {link}");
+    assert_eq!(
+        after["status"]["pid"],
+        serde_json::json!(pid),
+        "daemon must survive SIGHUP: {after}"
+    );
+    let link = json(
+        &xscore()
+            .args(["link", "show", "--id", &link_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        link["connected"],
+        serde_json::json!(true),
+        "link must stay connected after SIGHUP: {link}"
+    );
 
     let _ = xscore().args(["link", "del", "--id", &link_id]).output();
     let _ = xscore().args(["pane", "del", "--id", &pane_id]).output();
@@ -1253,11 +1723,12 @@ fn xscore_native_session_new_creates_an_empty_container() {
     let name = "session_new_empty";
     let xscore = || xscore_for(name);
 
-    let out = xscore()
-        .args(["session", "new", "work"])
-        .output()
-        .unwrap();
-    assert!(ok(&out), "session new failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = xscore().args(["session", "new", "work"]).output().unwrap();
+    assert!(
+        ok(&out),
+        "session new failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let sid = parse_id_from_stdout(&out.stdout, "session");
     assert!(!out.stdout.windows(5).any(|w| w == b"link:"));
@@ -1297,16 +1768,40 @@ fn xscore_link_add_url_carries_cwd_and_geometry() {
         ])
         .output()
         .unwrap();
-    assert!(ok(&out), "link add <url> failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "link add <url> failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let pid = parse_id_from_stdout(&out.stdout, "pane");
     let lid = parse_id_from_stdout(&out.stdout, "link");
 
-    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
-    assert_eq!(pane["cols"], serde_json::json!(120), "cols from the query: {pane}");
-    assert_eq!(pane["rows"], serde_json::json!(40), "rows from the query: {pane}");
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        pane["cols"],
+        serde_json::json!(120),
+        "cols from the query: {pane}"
+    );
+    assert_eq!(
+        pane["rows"],
+        serde_json::json!(40),
+        "rows from the query: {pane}"
+    );
 
     // cwd reached the transport, so the shell really starts there.
-    let link = json(&xscore().args(["link", "show", "--id", &lid]).output().unwrap().stdout);
+    let link = json(
+        &xscore()
+            .args(["link", "show", "--id", &lid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(
         link["endpoint"]["pipe"]["cwd"],
         serde_json::json!("/tmp"),
@@ -1334,7 +1829,10 @@ fn xscore_link_add_refuses_a_missing_cwd_after_session_creation() {
         ])
         .output()
         .unwrap();
-    assert!(!out.status.success(), "a cwd that does not exist must be refused");
+    assert!(
+        !out.status.success(),
+        "a cwd that does not exist must be refused"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("is not a directory"), "got: {err}");
 
@@ -1345,7 +1843,10 @@ fn xscore_link_add_refuses_a_missing_cwd_after_session_creation() {
         1,
         "only the header should be there"
     );
-    assert!(ok(&xscore().args(["session", "show", "dev"]).output().unwrap()));
+    assert!(ok(&xscore()
+        .args(["session", "show", "dev"])
+        .output()
+        .unwrap()));
 
     cleanup_daemon(name);
 }
@@ -1360,7 +1861,10 @@ fn xscore_link_add_translates_a_windows_cwd() {
     let name = "link_add_win_cwd";
     let xscore = || xscore_for(name);
 
-    assert!(ok(&xscore().args(["session", "new", "dev"]).output().unwrap()));
+    assert!(ok(&xscore()
+        .args(["session", "new", "dev"])
+        .output()
+        .unwrap()));
     let out = xscore()
         .args([
             "link",
@@ -1390,22 +1894,52 @@ fn xscore_link_add_from_a_config_after_session_creation() {
         .args(["link", "config", "add", "local", "shell:///bin/bash"])
         .output()
         .unwrap();
-    assert!(ok(&save), "link config add failed: {}", String::from_utf8_lossy(&save.stderr));
+    assert!(
+        ok(&save),
+        "link config add failed: {}",
+        String::from_utf8_lossy(&save.stderr)
+    );
 
-    assert!(ok(&xscore().args(["session", "new", "dev"]).output().unwrap()));
+    assert!(ok(&xscore()
+        .args(["session", "new", "dev"])
+        .output()
+        .unwrap()));
     let out = xscore()
         .args(["link", "add", "-c", "local", "--session", "dev"])
         .output()
         .unwrap();
-    assert!(ok(&out), "link add -c failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "link add -c failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let lid = parse_id_from_stdout(&out.stdout, "link");
     let pid = parse_id_from_stdout(&out.stdout, "pane");
 
-    let link = json(&xscore().args(["link", "show", "--id", &lid]).output().unwrap().stdout);
-    assert_eq!(link["endpoint"]["pipe"]["command"], serde_json::json!("/bin/bash"), "{link}");
-    assert!(json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout)["cols"]
-        .as_u64()
-        .unwrap_or(0) > 0);
+    let link = json(
+        &xscore()
+            .args(["link", "show", "--id", &lid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        link["endpoint"]["pipe"]["command"],
+        serde_json::json!("/bin/bash"),
+        "{link}"
+    );
+    assert!(
+        json(
+            &xscore()
+                .args(["pane", "show", "--id", &pid])
+                .output()
+                .unwrap()
+                .stdout
+        )["cols"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
 
     cleanup_daemon(name);
 }
@@ -1432,14 +1966,23 @@ fn xscore_link_add_requires_an_existing_session() {
 fn xscore_link_add_requires_session_choice_when_multiple_exist() {
     let name = "link_add_ambiguous_session";
     let xscore = || xscore_for(name);
-    assert!(ok(&xscore().args(["session", "new", "A"]).output().unwrap()));
-    assert!(ok(&xscore().args(["session", "new", "B"]).output().unwrap()));
+    assert!(ok(&xscore()
+        .args(["session", "new", "A"])
+        .output()
+        .unwrap()));
+    assert!(ok(&xscore()
+        .args(["session", "new", "B"])
+        .output()
+        .unwrap()));
 
     let out = xscore()
         .args(["link", "add", "shell:///bin/bash"])
         .output()
         .unwrap();
-    assert!(!out.status.success(), "implicit session choice must be refused");
+    assert!(
+        !out.status.success(),
+        "implicit session choice must be refused"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("multiple sessions"), "got: {err}");
     assert!(err.contains("--session"), "got: {err}");
@@ -1450,11 +1993,12 @@ fn xscore_session_list_lists_it() {
     let name = "session_list";
     let xscore = || xscore_for(name);
 
-    let new = xscore()
-        .args(["session", "new", "work"])
-        .output()
-        .unwrap();
-    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
+    let new = xscore().args(["session", "new", "work"]).output().unwrap();
+    assert!(
+        ok(&new),
+        "session new failed: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
     let sid = parse_id_from_stdout(&new.stdout, "session");
 
     let list = xscore().args(["session", "list"]).output().unwrap();
@@ -1474,10 +2018,18 @@ fn xscore_session_kill_cascades() {
     let xscore = || xscore_for(name);
 
     let new = xscore().args(["session", "new", "work"]).output().unwrap();
-    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
+    assert!(
+        ok(&new),
+        "session new failed: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
 
     let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
-    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+    assert!(
+        ok(&kill),
+        "session kill failed: {}",
+        String::from_utf8_lossy(&kill.stderr)
+    );
 
     // No sessions left...
     let sessions = xscore().args(["session", "list"]).output().unwrap();
@@ -1488,7 +2040,11 @@ fn xscore_session_kill_cascades() {
     // ...and nothing that belonged to it.
     let links = xscore().args(["link", "list"]).output().unwrap();
     let s = String::from_utf8_lossy(&links.stdout);
-    assert_eq!(s.lines().count(), 1, "link list must be empty after kill: {s}");
+    assert_eq!(
+        s.lines().count(),
+        1,
+        "link list must be empty after kill: {s}"
+    );
 
     cleanup_daemon(name);
 }
@@ -1498,20 +2054,27 @@ fn xscore_session_detach_native_is_refused() {
     let name = "session_detach_native";
     let xscore = || xscore_for(name);
 
-    let new = xscore()
-        .args(["session", "new", "work"])
+    let new = xscore().args(["session", "new", "work"]).output().unwrap();
+    assert!(
+        ok(&new),
+        "session new failed: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+
+    let detach = xscore()
+        .args(["session", "detach", "work"])
         .output()
         .unwrap();
-    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
-
-    let detach = xscore().args(["session", "detach", "work"]).output().unwrap();
     assert!(
         !detach.status.success(),
         "`session detach` on a native session must be refused"
     );
     let err = String::from_utf8_lossy(&detach.stderr);
     assert!(err.contains("native"), "got: {err}");
-    assert!(err.contains("session kill"), "error should name the right verb: {err}");
+    assert!(
+        err.contains("session kill"),
+        "error should name the right verb: {err}"
+    );
 
     // Refused means untouched: the session is still there.
     let sessions = xscore().args(["session", "list"]).output().unwrap();
@@ -1526,35 +2089,57 @@ fn xscore_link_add_with_session_flag() {
     let name = "link_add_with_session";
     let xscore = || xscore_for(name);
 
-    let new = xscore()
-        .args(["session", "new", "A"])
-        .output()
-        .unwrap();
-    assert!(ok(&new), "session new failed: {}", String::from_utf8_lossy(&new.stderr));
+    let new = xscore().args(["session", "new", "A"]).output().unwrap();
+    assert!(
+        ok(&new),
+        "session new failed: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
     let sid = parse_id_from_stdout(&new.stdout, "session");
 
     let add = xscore()
         .args(["link", "add", "shell:///bin/cat", "--session", "A"])
         .output()
         .unwrap();
-    assert!(ok(&add), "link add --session A failed: {}", String::from_utf8_lossy(&add.stderr));
+    assert!(
+        ok(&add),
+        "link add --session A failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
     let lid = parse_id_from_stdout(&add.stdout, "link");
     let pid = parse_id_from_stdout(&add.stdout, "pane");
 
-    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
-    assert_eq!(pane["session_id"], serde_json::json!(sid), "pane joined A: {pane}");
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    assert_eq!(
+        pane["session_id"],
+        serde_json::json!(sid),
+        "pane joined A: {pane}"
+    );
 
     let show = xscore().args(["session", "show", "A"]).output().unwrap();
-    assert!(ok(&show), "session show failed: {}", String::from_utf8_lossy(&show.stderr));
+    assert!(
+        ok(&show),
+        "session show failed: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
     let s = String::from_utf8_lossy(&show.stdout);
-    assert!(s.contains(&lid), "session show A must list the link {lid}: {s}");
-    assert!(s.contains(&pid), "session show A must list the pane {pid}: {s}");
+    assert!(
+        s.contains(&lid),
+        "session show A must list the link {lid}: {s}"
+    );
+    assert!(
+        s.contains(&pid),
+        "session show A must list the pane {pid}: {s}"
+    );
 
     // A link in another session is not visible here.
-    let other = xscore()
-        .args(["session", "new", "B"])
-        .output()
-        .unwrap();
+    let other = xscore().args(["session", "new", "B"]).output().unwrap();
     assert!(ok(&other));
     let show_a = xscore().args(["session", "show", "A"]).output().unwrap();
     assert!(String::from_utf8_lossy(&show_a.stdout).contains(&lid));
@@ -1611,7 +2196,11 @@ fn xscore_session_new_tmux_creates_window_and_pane() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let sid = parse_id_from_stdout(&out.stdout, "session");
     let lid = parse_id_from_stdout(&out.stdout, "link");
@@ -1620,30 +2209,67 @@ fn xscore_session_new_tmux_creates_window_and_pane() {
 
     // A real tmux session, named after the xscore session, with one window.
     let windows = tmux_stdout(name, &["list-windows", "-t", "work", "-F", "#{window_id}"]);
-    assert_eq!(windows.lines().count(), 1, "expected one tmux window: {windows:?}");
+    assert_eq!(
+        windows.lines().count(),
+        1,
+        "expected one tmux window: {windows:?}"
+    );
 
     // The pane row is a `%N` on the session's control link — not a sink handle.
-    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert_eq!(pane["session_id"], serde_json::json!(sid));
     assert_eq!(pane["link_id"], serde_json::json!(lid));
-    let key = pane["link_key"].as_str().expect("link_key must hold the %N handle");
+    let key = pane["link_key"]
+        .as_str()
+        .expect("link_key must hold the %N handle");
     assert!(key.starts_with('%'), "pane key should be %N, got {key}");
-    assert!(pane["link_key"].is_string(), "control panes address by %N in link_key: {pane}");
-    assert!(pane["cols"].as_u64().unwrap_or(0) > 0, "geometry adopted from tmux: {pane}");
+    assert!(
+        pane["link_key"].is_string(),
+        "control panes address by %N in link_key: {pane}"
+    );
+    assert!(
+        pane["cols"].as_u64().unwrap_or(0) > 0,
+        "geometry adopted from tmux: {pane}"
+    );
 
     // The window mirrors `@N`.
-    let window = json(&xscore().args(["window", "show", "--id", &wid]).output().unwrap().stdout);
-    let handle = window["backend"]["handle"].as_str().expect("WindowBackend::Tmux handle");
-    assert!(handle.starts_with('@'), "window handle should be @N, got {handle}");
+    let window = json(
+        &xscore()
+            .args(["window", "show", "--id", &wid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let handle = window["backend"]["handle"]
+        .as_str()
+        .expect("WindowBackend::Tmux handle");
+    assert!(
+        handle.starts_with('@'),
+        "window handle should be @N, got {handle}"
+    );
 
     // `session show` names the backend and the tmux session.
     let show = String::from_utf8_lossy(
-        &xscore().args(["session", "show", "work"]).output().unwrap().stdout,
+        &xscore()
+            .args(["session", "show", "work"])
+            .output()
+            .unwrap()
+            .stdout,
     )
     .to_string();
-    assert!(show.contains("backend: tmux"), "backend line missing: {show}");
     assert!(
-        show.lines().any(|l| l.starts_with("tmux:") && l.contains("work")),
+        show.contains("backend: tmux"),
+        "backend line missing: {show}"
+    );
+    assert!(
+        show.lines()
+            .any(|l| l.starts_with("tmux:") && l.contains("work")),
         "the tmux session name is missing: {show}"
     );
 
@@ -1653,9 +2279,18 @@ fn xscore_session_new_tmux_creates_window_and_pane() {
         .args(["link", "add", "shell:///bin/cat", "--session", "work"])
         .output()
         .unwrap();
-    assert!(!link.status.success(), "a tmux session must not take a second link");
-    let again = xscore().args(["session", "new", "work", "--tmux"]).output().unwrap();
-    assert!(!again.status.success(), "a duplicate tmux session must be refused");
+    assert!(
+        !link.status.success(),
+        "a tmux session must not take a second link"
+    );
+    let again = xscore()
+        .args(["session", "new", "work", "--tmux"])
+        .output()
+        .unwrap();
+    assert!(
+        !again.status.success(),
+        "a duplicate tmux session must be refused"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -1671,28 +2306,58 @@ fn xscore_pane_add_in_a_tmux_session_splits_the_current_window() {
         .args(["session", "new", "w", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    assert!(
+        ok(&created),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let first = parse_id_from_stdout(&created.stdout, "pane");
 
     // No --window: this used to make a hollow row that no byte could reach
     // (`link add` / `pane attach` are refused in a tmux session), so "no
     // window" has to mean the window tmux is showing.
-    let added = xscore().args(["pane", "add", "--session", "w"]).output().unwrap();
-    assert!(ok(&added), "pane add failed: {}", String::from_utf8_lossy(&added.stderr));
+    let added = xscore()
+        .args(["pane", "add", "--session", "w"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&added),
+        "pane add failed: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
     let second = parse_id_from_stdout(&added.stdout, "pane");
     assert_ne!(second, first, "the split must produce a new pane row");
 
     let panes = tmux_stdout(name, &["list-panes", "-t", "w", "-F", "#{pane_id}"]);
-    assert_eq!(panes.lines().count(), 2, "tmux must have two real panes: {panes:?}");
+    assert_eq!(
+        panes.lines().count(),
+        2,
+        "tmux must have two real panes: {panes:?}"
+    );
 
     // Both rows address themselves with their own %N on the one control link.
-    let a = json(&xscore().args(["pane", "show", "--id", &first]).output().unwrap().stdout);
-    let b = json(&xscore().args(["pane", "show", "--id", &second]).output().unwrap().stdout);
+    let a = json(
+        &xscore()
+            .args(["pane", "show", "--id", &first])
+            .output()
+            .unwrap()
+            .stdout,
+    );
+    let b = json(
+        &xscore()
+            .args(["pane", "show", "--id", &second])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     for pane in [&a, &b] {
         let key = pane["link_key"].as_str().expect("link_key");
         assert!(key.starts_with('%'), "tmux pane key: {pane}");
     }
-    assert_ne!(a["link_key"], b["link_key"], "each pane has its own %N: {a} {b}");
+    assert_ne!(
+        a["link_key"], b["link_key"],
+        "each pane has its own %N: {a} {b}"
+    );
 
     let _ = xscore().args(["session", "kill", "w"]).output();
     cleanup_tmux(name);
@@ -1707,18 +2372,36 @@ fn xscore_session_attach_tmux_data_roundtrip() {
     // `cat` echoes what it reads. Create that custom tmux pane independently,
     // then attach the xscore Session to it.
     tmux_new_with_command(name, "work", "cat");
-    let out = xscore().args(["session", "attach", "work"]).output().unwrap();
-    assert!(ok(&out), "session attach failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = xscore()
+        .args(["session", "attach", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&out),
+        "session attach failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let pid = parse_id_from_stdout(&out.stdout, "pane");
 
     let payload = home_for(name).join("roundtrip.txt");
     std::fs::write(&payload, b"hello\n").unwrap();
 
     let write = xscore()
-        .args(["data", "write", "--pane", &pid, "--from-file", payload.to_str().unwrap()])
+        .args([
+            "data",
+            "write",
+            "--pane",
+            &pid,
+            "--from-file",
+            payload.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
-    assert!(ok(&write), "data write failed: {}", String::from_utf8_lossy(&write.stderr));
+    assert!(
+        ok(&write),
+        "data write failed: {}",
+        String::from_utf8_lossy(&write.stderr)
+    );
 
     // The read is a NEW process: it hydrates state, attaches its own control
     // client for the length of the command, and must still see the bytes.
@@ -1728,14 +2411,21 @@ fn xscore_session_attach_tmux_data_roundtrip() {
             .args(["data", "read", "--pane", &pid, "--bytes", "4096"])
             .output()
             .unwrap();
-        assert!(ok(&read), "data read failed: {}", String::from_utf8_lossy(&read.stderr));
+        assert!(
+            ok(&read),
+            "data read failed: {}",
+            String::from_utf8_lossy(&read.stderr)
+        );
         seen = String::from_utf8_lossy(&read.stdout).to_string();
         if seen.contains("hello") {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert!(seen.contains("hello"), "data read did not return what was written: {seen:?}");
+    assert!(
+        seen.contains("hello"),
+        "data read did not return what was written: {seen:?}"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -1751,10 +2441,23 @@ fn xscore_session_attach_tmux_write_is_literal() {
     // shows exactly what the pane's `cat` received. Plain `cat`, not `cat -v`:
     // `-v` would re-encode the non-ASCII bytes we are checking.
     tmux_new_with_command(name, "work", "stty -echo; exec cat");
-    let out = xscore().args(["session", "attach", "work"]).output().unwrap();
-    assert!(ok(&out), "session attach failed: {}", String::from_utf8_lossy(&out.stderr));
+    let out = xscore()
+        .args(["session", "attach", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&out),
+        "session attach failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let pid = parse_id_from_stdout(&out.stdout, "pane");
-    let pane = json(&xscore().args(["pane", "show", "--id", &pid]).output().unwrap().stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", &pid])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     let key = pane["link_key"].as_str().expect("link_key").to_string();
 
     // Every character that has ever broken a quoting layer: a command
@@ -1771,10 +2474,21 @@ fn xscore_session_attach_tmux_write_is_literal() {
     // the newline then flushes it. The second write is the `-H` hex form.
     for part in [&body, &newline] {
         let write = xscore()
-            .args(["data", "write", "--pane", &pid, "--from-file", part.to_str().unwrap()])
+            .args([
+                "data",
+                "write",
+                "--pane",
+                &pid,
+                "--from-file",
+                part.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
-        assert!(ok(&write), "data write failed: {}", String::from_utf8_lossy(&write.stderr));
+        assert!(
+            ok(&write),
+            "data write failed: {}",
+            String::from_utf8_lossy(&write.stderr)
+        );
     }
 
     let mut screen = String::new();
@@ -1820,18 +2534,39 @@ fn xscore_session_attach_existing_tmux() {
     let lid = parse_id_from_stdout(&out.stdout, "link");
 
     // One pane, bound to the control link the adoption created.
-    let ls = xscore().args(["pane", "list", "--link", &lid]).output().unwrap();
-    assert!(ok(&ls), "pane list failed: {}", String::from_utf8_lossy(&ls.stderr));
+    let ls = xscore()
+        .args(["pane", "list", "--link", &lid])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&ls),
+        "pane list failed: {}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
     let stdout = String::from_utf8_lossy(&ls.stdout).to_string();
-    let rows = stdout.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+    let rows = stdout
+        .lines()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .count();
     assert_eq!(rows, 1, "expected exactly one adopted pane: {stdout}");
 
     let show = String::from_utf8_lossy(
-        &xscore().args(["session", "show", "outside"]).output().unwrap().stdout,
+        &xscore()
+            .args(["session", "show", "outside"])
+            .output()
+            .unwrap()
+            .stdout,
     )
     .to_string();
-    assert!(show.contains("backend: tmux"), "backend line missing: {show}");
-    assert!(show.contains("outside"), "tmux session name missing: {show}");
+    assert!(
+        show.contains("backend: tmux"),
+        "backend line missing: {show}"
+    );
+    assert!(
+        show.contains("outside"),
+        "tmux session name missing: {show}"
+    );
 
     // `detach` drops xscore rows without touching the server session.
     let detach = xscore()
@@ -1843,8 +2578,14 @@ fn xscore_session_attach_existing_tmux() {
         "session detach failed: {}",
         String::from_utf8_lossy(&detach.stderr)
     );
-    let alive = tmux_for(name).args(["has-session", "-t", "outside"]).output().unwrap();
-    assert!(alive.status.success(), "`session detach` must leave tmux running");
+    let alive = tmux_for(name)
+        .args(["has-session", "-t", "outside"])
+        .output()
+        .unwrap();
+    assert!(
+        alive.status.success(),
+        "`session detach` must leave tmux running"
+    );
 
     cleanup_tmux(name);
 }
@@ -1859,15 +2600,32 @@ fn xscore_session_kill_tmux_ends_the_server_session() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
-    let alive_before = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
-    assert!(alive_before.status.success(), "the tmux session should exist before the kill");
+    let alive_before = tmux_for(name)
+        .args(["has-session", "-t", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        alive_before.status.success(),
+        "the tmux session should exist before the kill"
+    );
 
     let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
-    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+    assert!(
+        ok(&kill),
+        "session kill failed: {}",
+        String::from_utf8_lossy(&kill.stderr)
+    );
 
-    let alive_after = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
+    let alive_after = tmux_for(name)
+        .args(["has-session", "-t", "work"])
+        .output()
+        .unwrap();
     assert!(
         !alive_after.status.success(),
         "the tmux session survived `session kill`"
@@ -1875,7 +2633,10 @@ fn xscore_session_kill_tmux_ends_the_server_session() {
 
     // ...and the rows are gone too.
     let show = xscore().args(["session", "show", "work"]).output().unwrap();
-    assert!(!show.status.success(), "a killed session must not resolve: {show:?}");
+    assert!(
+        !show.status.success(),
+        "a killed session must not resolve: {show:?}"
+    );
 
     cleanup_tmux(name);
 }
@@ -1890,7 +2651,11 @@ fn xscore_session_tmux_sees_an_externally_created_window() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&out), "session new --tmux failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // The structure change happens outside xscore, in a different process, at a
     // moment when nothing is attached to the session.
@@ -1907,16 +2672,30 @@ fn xscore_session_tmux_sees_an_externally_created_window() {
     let mut stdout = String::new();
     while std::time::Instant::now() < deadline {
         let list = xscore().args(["window", "list"]).output().unwrap();
-        assert!(ok(&list), "window list failed: {}", String::from_utf8_lossy(&list.stderr));
+        assert!(
+            ok(&list),
+            "window list failed: {}",
+            String::from_utf8_lossy(&list.stderr)
+        );
         stdout = String::from_utf8_lossy(&list.stdout).to_string();
-        rows = stdout.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
+        rows = stdout
+            .lines()
+            .skip(1)
+            .filter(|l| !l.trim().is_empty())
+            .count();
         if rows >= 2 && stdout.contains("extra") {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert_eq!(rows, 2, "the externally created window is missing: {stdout}");
-    assert!(stdout.contains("extra"), "the window name was not adopted: {stdout}");
+    assert_eq!(
+        rows, 2,
+        "the externally created window is missing: {stdout}"
+    );
+    assert!(
+        stdout.contains("extra"),
+        "the window name was not adopted: {stdout}"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -1984,7 +2763,12 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
     assert!(created.status.success(), "tmux new-session failed");
 
     // First touch wipes this test's HOME, so the legacy file is written after.
-    assert!(xscore().args(["session", "list"]).output().unwrap().status.success());
+    assert!(xscore()
+        .args(["session", "list"])
+        .output()
+        .unwrap()
+        .status
+        .success());
     let state = home_for(name)
         .join(".config")
         .join("xscore")
@@ -1997,26 +2781,50 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
     // emptied: losing a tmux session without saying so is the failure this
     // test exists to prevent.
     let refused = xscore().args(["session", "list"]).output().unwrap();
-    assert!(!refused.status.success(), "an un-migrated v3 file must not load");
+    assert!(
+        !refused.status.success(),
+        "an un-migrated v3 file must not load"
+    );
     let err = String::from_utf8_lossy(&refused.stderr);
-    assert!(err.contains("state migrate"), "error should name the migration: {err}");
+    assert!(
+        err.contains("state migrate"),
+        "error should name the migration: {err}"
+    );
 
     let migrate = xscore().args(["state", "migrate"]).output().unwrap();
-    assert!(ok(&migrate), "state migrate failed: {}", String::from_utf8_lossy(&migrate.stderr));
+    assert!(
+        ok(&migrate),
+        "state migrate failed: {}",
+        String::from_utf8_lossy(&migrate.stderr)
+    );
     let out = String::from_utf8_lossy(&migrate.stdout);
     assert!(out.contains("1 tmux session(s) converted"), "got: {out}");
 
     // The session survived, and the next command that needs its structure
     // attaches a control client — which rebuilds the rows from tmux itself.
-    let windows = xscore().args(["window", "list", "--session", "build"]).output().unwrap();
-    assert!(ok(&windows), "window list failed: {}", String::from_utf8_lossy(&windows.stderr));
+    let windows = xscore()
+        .args(["window", "list", "--session", "build"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&windows),
+        "window list failed: {}",
+        String::from_utf8_lossy(&windows.stderr)
+    );
     let wl = String::from_utf8_lossy(&windows.stdout).to_string();
     let rows = wl.lines().skip(1).filter(|l| !l.trim().is_empty()).count();
     assert_eq!(rows, 1, "the tmux window was not re-enumerated: {wl}");
     assert!(wl.contains('@'), "the window row must mirror @N: {wl}");
 
-    let panes = xscore().args(["pane", "list", "--session", "build"]).output().unwrap();
-    assert!(ok(&panes), "pane list failed: {}", String::from_utf8_lossy(&panes.stderr));
+    let panes = xscore()
+        .args(["pane", "list", "--session", "build"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&panes),
+        "pane list failed: {}",
+        String::from_utf8_lossy(&panes.stderr)
+    );
     let pl = String::from_utf8_lossy(&panes.stdout).to_string();
     assert_eq!(
         pl.lines().skip(1).filter(|l| !l.trim().is_empty()).count(),
@@ -2028,14 +2836,26 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
         .nth(1)
         .and_then(|l| l.split_whitespace().next())
         .expect("a pane row");
-    let pane = json(&xscore().args(["pane", "show", "--id", pane_id]).output().unwrap().stdout);
+    let pane = json(
+        &xscore()
+            .args(["pane", "show", "--id", pane_id])
+            .output()
+            .unwrap()
+            .stdout,
+    );
     assert!(
-        pane["link_key"].as_str().map(|k| k.starts_with('%')).unwrap_or(false),
+        pane["link_key"]
+            .as_str()
+            .map(|k| k.starts_with('%'))
+            .unwrap_or(false),
         "the re-enumerated pane is addressed by %N: {pane}"
     );
 
     // ...and the one link is the control client, created on that attach.
-    let links = xscore().args(["link", "list", "--session", "build"]).output().unwrap();
+    let links = xscore()
+        .args(["link", "list", "--session", "build"])
+        .output()
+        .unwrap();
     let ll = String::from_utf8_lossy(&links.stdout).to_string();
     assert_eq!(
         ll.lines().skip(1).filter(|l| !l.trim().is_empty()).count(),
@@ -2068,10 +2888,21 @@ fn xscore_state_migrate_rebuilds_a_tmux_session_over_control_mode() {
 /// `data write --from-file` in its own process.
 fn write_pane(xscore: &dyn Fn() -> Command, pane: &str, path: &std::path::Path) {
     let out = xscore()
-        .args(["data", "write", "--pane", pane, "--from-file", path.to_str().unwrap()])
+        .args([
+            "data",
+            "write",
+            "--pane",
+            pane,
+            "--from-file",
+            path.to_str().unwrap(),
+        ])
         .output()
         .expect("run data write");
-    assert!(ok(&out), "data write failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        ok(&out),
+        "data write failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `data read` in a fresh process, polled until it satisfies `done` (the pane's
@@ -2088,7 +2919,11 @@ fn read_pane_until(
             .args(["data", "read", "--pane", pane, "--bytes", "4096"])
             .output()
             .expect("run data read");
-        assert!(ok(&read), "data read failed: {}", String::from_utf8_lossy(&read.stderr));
+        assert!(
+            ok(&read),
+            "data read failed: {}",
+            String::from_utf8_lossy(&read.stderr)
+        );
         last = String::from_utf8_lossy(&read.stdout).to_string();
         if done(&last) {
             return last;
@@ -2111,8 +2946,15 @@ fn xscore_tmux_data_read_across_processes_is_a_stream() {
     cleanup_daemon(name);
 
     tmux_new_with_command(name, "work", "stty -echo raw; exec cat");
-    let created = xscore().args(["session", "attach", "work"]).output().unwrap();
-    assert!(ok(&created), "session attach failed: {}", String::from_utf8_lossy(&created.stderr));
+    let created = xscore()
+        .args(["session", "attach", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&created),
+        "session attach failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let pid = parse_id_from_stdout(&created.stdout, "pane");
 
     // Process A: three bytes, deliberately unterminated.
@@ -2168,18 +3010,32 @@ fn xscore_daemon_restart_drops_tmux_buffers() {
     cleanup_daemon(name);
 
     tmux_new_with_command(name, "work", "stty -echo raw; exec cat");
-    let created = xscore().args(["session", "attach", "work"]).output().unwrap();
-    assert!(ok(&created), "session attach failed: {}", String::from_utf8_lossy(&created.stderr));
+    let created = xscore()
+        .args(["session", "attach", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        ok(&created),
+        "session attach failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
     let pid = parse_id_from_stdout(&created.stdout, "pane");
 
     let payload = home_for(name).join("kept.txt");
     std::fs::write(&payload, b"buffered-in-daemon").unwrap();
     write_pane(&xscore, &pid, &payload);
     let seen = read_pane_until(&xscore, &pid, |s| s == "buffered-in-daemon");
-    assert_eq!(seen, "buffered-in-daemon", "the daemon never buffered the pane: {seen:?}");
+    assert_eq!(
+        seen, "buffered-in-daemon",
+        "the daemon never buffered the pane: {seen:?}"
+    );
 
     let stop = xscore().args(["daemon", "stop"]).output().unwrap();
-    assert!(ok(&stop), "daemon stop failed: {}", String::from_utf8_lossy(&stop.stderr));
+    assert!(
+        ok(&stop),
+        "daemon stop failed: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
 
     // A new daemon has no history for this pane (tmux replays nothing), so the
     // read succeeds and says "nothing arrived" instead of inventing a screen.
@@ -2187,7 +3043,11 @@ fn xscore_daemon_restart_drops_tmux_buffers() {
         .args(["data", "read", "--pane", &pid, "--bytes", "4096"])
         .output()
         .unwrap();
-    assert!(ok(&read), "data read failed: {}", String::from_utf8_lossy(&read.stderr));
+    assert!(
+        ok(&read),
+        "data read failed: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
     assert!(
         read.stdout.is_empty(),
         "the buffer must be memory, like a native pane's: {:?}",
@@ -2195,8 +3055,14 @@ fn xscore_daemon_restart_drops_tmux_buffers() {
     );
 
     // ...and the tmux session itself was never touched.
-    let alive = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
-    assert!(alive.status.success(), "`daemon stop` must not end the tmux session");
+    let alive = tmux_for(name)
+        .args(["has-session", "-t", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        alive.status.success(),
+        "`daemon stop` must not end the tmux session"
+    );
 
     let _ = xscore().args(["session", "kill", "work"]).output();
     cleanup_tmux(name);
@@ -2217,21 +3083,37 @@ fn xscore_session_kill_removes_the_daemon_slot() {
         .args(["session", "new", "work", "--tmux"])
         .output()
         .unwrap();
-    assert!(ok(&created), "session new --tmux failed: {}", String::from_utf8_lossy(&created.stderr));
+    assert!(
+        ok(&created),
+        "session new --tmux failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
 
     // Creating a managed session is what brings the daemon up, and it says so.
     let status = xscore().args(["daemon", "status"]).output().unwrap();
-    assert!(ok(&status), "daemon status failed: {}", String::from_utf8_lossy(&status.stderr));
+    assert!(
+        ok(&status),
+        "daemon status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
     let v = json(&status.stdout);
     let slots = v["status"]["tmux"].as_array().expect("status.tmux array");
     let slot = slots
         .iter()
         .find(|t| t["name"] == serde_json::json!("work"))
         .unwrap_or_else(|| panic!("the daemon must hold the tmux session: {v}"));
-    assert_eq!(slot["alive"], serde_json::json!(true), "and its client must be up: {slot}");
+    assert_eq!(
+        slot["alive"],
+        serde_json::json!(true),
+        "and its client must be up: {slot}"
+    );
 
     let kill = xscore().args(["session", "kill", "work"]).output().unwrap();
-    assert!(ok(&kill), "session kill failed: {}", String::from_utf8_lossy(&kill.stderr));
+    assert!(
+        ok(&kill),
+        "session kill failed: {}",
+        String::from_utf8_lossy(&kill.stderr)
+    );
 
     // The slot is gone. The daemon may also have idle-exited by now (it has
     // nothing left to serve), which is the same answer.
@@ -2251,8 +3133,14 @@ fn xscore_session_kill_removes_the_daemon_slot() {
         );
     }
 
-    let alive = tmux_for(name).args(["has-session", "-t", "work"]).output().unwrap();
-    assert!(!alive.status.success(), "the tmux session survived `session kill`");
+    let alive = tmux_for(name)
+        .args(["has-session", "-t", "work"])
+        .output()
+        .unwrap();
+    assert!(
+        !alive.status.success(),
+        "the tmux session survived `session kill`"
+    );
 
     cleanup_tmux(name);
     cleanup_daemon(name);

@@ -6,36 +6,70 @@
 //               is answered (`SessionBackend`).
 //   - Link    = one connection inside a session: a byte pipe xscore owns, or
 //               the session's single tmux control client (`EndpointRef`).
-//   - Pane    = a buffer + its geometry; on a `Control` link it addresses
-//               itself with `link_key` (`%N`).
+//   - Buffer  = independently managed bytes and history.
+//   - SessionManager = backend conversion from Link input / tmux events to
+//               Buffers (`Raw` or `Tmux`).
+//   - Pane    = pure UI geometry and an optional Buffer reference.
 //   - Window  = a tmux window (`WindowBackend::Tmux { handle }`) or a purely
 //               xscore-side one (`Native`).
 //
-// Associations stay dynamic through `link_id` / `window_id` on the pane. A
-// `Pipe` link serves at most one pane (attach auto-detaches the previous one);
-// a `Control` link serves every pane of its session, addressed by `%N`.
+// A Pane references a Buffer through `buffer_id` and a Window through
+// `window_id`; it carries no Link or tmux handle of its own. A raw
+// SessionManager can route several Links to independent Buffers. A tmux
+// SessionManager maps each `%N` on its one control Link to an independent
+// Buffer.
 //
 // v0.6.0 PR4 removed the last traces of "tmux-ness on the link": the sink
 // enum, the URL query that selected it, the layout enum and the window handle
 // field are gone (see ADR 0010 §D7).
 
+use crate::core::{BufferId, LinkAddress, LinkId, PaneId, SessionId, WindowId};
 use serde::{Deserialize, Serialize};
-use crate::core::{LinkAddress, LinkId, PaneId, SessionId, WindowId};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 pub enum TransportConfig {
-    Shell { command: String, #[serde(default)] args: Vec<String>, #[serde(default)] cwd: Option<String> },
-    Serial { path: String, baud: u32, #[serde(default = "default_data_bits")] data_bits: u8,
-             #[serde(default = "default_parity")] parity: String, #[serde(default = "default_stop_bits")] stop_bits: u8 },
-    Ssh { host: String, #[serde(default = "default_ssh_port")] port: u16, user: String,
-          #[serde(default)] identity: Option<String>, #[serde(default)] proxy: Option<String> },
+    Shell {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    Serial {
+        path: String,
+        baud: u32,
+        #[serde(default = "default_data_bits")]
+        data_bits: u8,
+        #[serde(default = "default_parity")]
+        parity: String,
+        #[serde(default = "default_stop_bits")]
+        stop_bits: u8,
+    },
+    Ssh {
+        host: String,
+        #[serde(default = "default_ssh_port")]
+        port: u16,
+        user: String,
+        #[serde(default)]
+        identity: Option<String>,
+        #[serde(default)]
+        proxy: Option<String>,
+    },
 }
 
-fn default_ssh_port() -> u16 { 22 }
-fn default_data_bits() -> u8 { 8 }
-fn default_parity() -> String { "n".into() }
-fn default_stop_bits() -> u8 { 1 }
+fn default_ssh_port() -> u16 {
+    22
+}
+fn default_data_bits() -> u8 {
+    8
+}
+fn default_parity() -> String {
+    "n".into()
+}
+fn default_stop_bits() -> u8 {
+    1
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectSpec {
@@ -53,7 +87,9 @@ pub struct ConnectSpec {
     pub address: LinkAddress,
 }
 
-fn default_name() -> String { uuid::Uuid::now_v7().to_string() }
+fn default_name() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LinkInfo {
@@ -86,10 +122,14 @@ pub enum EndpointRef {
 }
 
 impl LinkInfo {
-    pub fn transport_str(&self) -> &'static str { self.address.kind() }
+    pub fn transport_str(&self) -> &'static str {
+        self.address.kind()
+    }
 
     /// True for the per-session control client (ADR 0010 §D2).
-    pub fn is_control(&self) -> bool { matches!(self.endpoint, EndpointRef::Control) }
+    pub fn is_control(&self) -> bool {
+        matches!(self.endpoint, EndpointRef::Control)
+    }
 }
 
 /// v0.6.0: a window belongs to a session and mirrors either nothing (native)
@@ -134,21 +174,16 @@ impl WindowBackend {
         }
     }
 
-    pub fn is_tmux(&self) -> bool { self.tmux_handle().is_some() }
+    pub fn is_tmux(&self) -> bool {
+        self.tmux_handle().is_some()
+    }
 }
 
-
-/// v0.6.0: Pane is the buffer-holder + UI geometry.
+/// A pane is a purely presentational viewport.
 ///
-/// The pane's *buffer* is the manager's per-pane `Arc<Mutex<RingBuffer>>` plus
-/// the live bridge it reads through (`DirectBridge`, `DaemonBridge` or
-/// `ControlBridge`); no bridge means the pane is orphan or detached. The buffer
-/// survives detach — the bridge is what closes, the pane stays (ADR 0008).
-///
-/// The pane's *UI info* is the geometry fields (cols/rows/x/y) +
-/// which window it lives in + which link it's currently attached to.
-/// Both `link_id` and `window_id` are `Option<...>` — the pane is
-/// orphan-creatable.
+/// It owns geometry and window placement. It does not own bytes, a link, or a
+/// tmux handle. `buffer_id` is only a UI association to independently managed
+/// bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PaneInfo {
     pub id: PaneId,
@@ -163,23 +198,36 @@ pub struct PaneInfo {
     pub rows: u16,
     pub x: u16,
     pub y: u16,
-    /// Currently attached link (None = orphan pane). Set by
-    /// `xscore pane attach --pane <pid> --link <lid>`; cleared by
-    /// `xscore pane detach` or by `del_link` / `del_pane`.
-    pub link_id: Option<LinkId>,
+    /// Buffer displayed by this viewport. `None` is an empty UI pane.
+    #[serde(default)]
+    pub buffer_id: Option<BufferId>,
     /// Currently parent window (None = orphan pane, hidden). Set by
     /// `xscore pane add-to-window --pane <pid> --window <wid>`; cleared
     /// by `xscore pane remove-from-window`.
     pub window_id: Option<WindowId>,
-    /// v0.6.0 (ADR 0010 §D3/D6): the address inside a shared link — `"%N"` for
-    /// a pane on its session's control link, `None` on a `Pipe` link (one
-    /// reader needs no address). This is what `%output %N` is routed by, so it
-    /// must be unique inside a link.
-    ///
-    /// A pane that carries a key belongs to tmux: it cannot be detached and it
-    /// cannot be re-bound to a `Pipe` link.
-    #[serde(default)]
-    pub link_key: Option<String>,
+}
+
+/// Bytes are owned by a buffer, never by a pane or a link.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BufferInfo {
+    pub id: BufferId,
+    pub session_id: SessionId,
+    pub name: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub origin: BufferOrigin,
+}
+
+/// Input source interpreted by a backend session manager.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BufferOrigin {
+    Link {
+        link_id: LinkId,
+    },
+    Tmux {
+        link_id: LinkId,
+        pane_handle: String,
+    },
 }
 
 // ===== v0.6.0 — the Session tier (ADR 0010 §1) =====
@@ -201,8 +249,8 @@ pub struct SessionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionBackend {
-    /// Links are byte pipes; the daemon owns them. Dies when xscore forgets
-    /// the session.
+    /// A RawSessionManager routes pipe Links into Buffers. The daemon owns the
+    /// live transports and buffer pumps.
     Native,
     /// This session IS a tmux session: `session` is the user-visible tmux
     /// session name on `host`, reached through the server at `socket`.
@@ -219,7 +267,10 @@ pub enum SessionBackend {
 pub enum TmuxHostConfig {
     #[default]
     Local,
-    Ssh { destination: String, args: Vec<String> },
+    Ssh {
+        destination: String,
+        args: Vec<String>,
+    },
 }
 
 /// Which tmux server on that host (ADR 0010 §6).
@@ -298,7 +349,11 @@ impl SessionInfo {
             id: SessionId::new(),
             name: name.into(),
             created_at: chrono::Utc::now(),
-            backend: SessionBackend::Tmux { host, socket, session: session.into() },
+            backend: SessionBackend::Tmux {
+                host,
+                socket,
+                session: session.into(),
+            },
         }
     }
 
@@ -344,7 +399,10 @@ mod tests {
     fn session_info_roundtrips_with_its_children() {
         let info = SessionInfo::new_tmux(
             "work",
-            TmuxHostConfig::Ssh { destination: "devbox".into(), args: vec![] },
+            TmuxHostConfig::Ssh {
+                destination: "devbox".into(),
+                args: vec![],
+            },
             TmuxSocket::Default,
             "tmux-work",
         );

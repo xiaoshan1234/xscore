@@ -9,9 +9,9 @@
 // here. Without that, every `data write` in a new process was impossible
 // by construction: the transport died with the process that created it.
 
-use std::sync::Arc;
 use clap::Parser;
-use xscore::cli::{link, pane, session, window, Cli, Commands};
+use std::sync::Arc;
+use xscore::cli::{buffer, link, pane, session, window, Cli, Commands};
 use xscore::core::SessionManager;
 
 #[tokio::main]
@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Session(c) => session::run(mgr, c).await?,
         Commands::Link(c) => link::run(mgr, c).await?,
+        Commands::Buffer(c) => buffer::run(mgr, c).await?,
         Commands::Window(c) => window::run(mgr, c).await?,
         Commands::Pane(c) => pane::run(mgr, c).await?,
         Commands::Data(c) => {

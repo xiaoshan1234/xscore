@@ -98,7 +98,9 @@ impl Handler for SshHandler {
 
 #[async_trait]
 impl super::Transport for SshTransport {
-    fn kind(&self) -> &'static str { "ssh" }
+    fn kind(&self) -> &'static str {
+        "ssh"
+    }
     fn address(&self) -> LinkAddress {
         LinkAddress::Ssh {
             host: self.host.clone(),
@@ -114,9 +116,8 @@ impl super::Transport for SshTransport {
         // so we don't open a connection we'll never be able to use.
         let key_arc: Option<Arc<russh_keys::key::KeyPair>> = match &self.identity {
             Some(path) => {
-                let kp = russh_keys::load_secret_key(path, None).map_err(|e| {
-                    Error::Transport(format!("ssh key {path}: {e}"))
-                })?;
+                let kp = russh_keys::load_secret_key(path, None)
+                    .map_err(|e| Error::Transport(format!("ssh key {path}: {e}")))?;
                 Some(Arc::new(kp))
             }
             None => None,

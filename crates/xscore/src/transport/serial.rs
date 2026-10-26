@@ -73,8 +73,14 @@ impl SerialTransport {
 
 #[async_trait]
 impl super::Transport for SerialTransport {
-    fn kind(&self) -> &'static str { "serial" }
-    fn address(&self) -> LinkAddress { LinkAddress::Serial { path: self.path.clone() } }
+    fn kind(&self) -> &'static str {
+        "serial"
+    }
+    fn address(&self) -> LinkAddress {
+        LinkAddress::Serial {
+            path: self.path.clone(),
+        }
+    }
 
     async fn open(&mut self) -> Result<()> {
         let parity = match self.parity.to_ascii_lowercase().as_str() {

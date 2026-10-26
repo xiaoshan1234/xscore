@@ -5,11 +5,11 @@
 // `pane_bridges` map separately. This is necessary because mutating
 // `PaneInfo` would otherwise destroy the bridge (Pane has both fields
 // and `Pane::new(info)` resets the bridge).
+use super::id::PaneId;
+use crate::model::PaneInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use super::id::PaneId;
-use crate::model::PaneInfo;
 
 #[derive(Default)]
 pub struct PaneRegistry {
@@ -17,7 +17,9 @@ pub struct PaneRegistry {
 }
 
 impl PaneRegistry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Insert or update a pane's info (in-place — preserves any
     /// bridge the manager has associated with this pane id).

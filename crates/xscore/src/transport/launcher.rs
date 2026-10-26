@@ -55,10 +55,7 @@ mod tests {
             Some(r"C:\src".into()),
         );
         assert_eq!(launch.command(), r"C:\Windows\System32\wsl.exe");
-        assert_eq!(
-            launch.args(),
-            ["--distribution", "Ubuntu"]
-        );
+        assert_eq!(launch.args(), ["--distribution", "Ubuntu"]);
         assert!(matches!(
             launch.transport(),
             TransportConfig::Shell {

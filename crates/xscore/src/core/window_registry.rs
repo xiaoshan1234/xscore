@@ -10,11 +10,11 @@
 //
 // What stays: `by_id` lookup, insert, remove. The `Window.panes`
 // field still tracks the window's child panes (per `pane add-to-window`).
+use super::window::Window;
+use crate::core::WindowId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::core::WindowId;
-use super::window::Window;
 
 type ArcWindow = Arc<Window>;
 
@@ -24,7 +24,9 @@ pub struct WindowRegistry {
 }
 
 impl WindowRegistry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub async fn insert(&self, window: Window) -> ArcWindow {
         let id = window.info.id;

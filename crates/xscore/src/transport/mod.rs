@@ -12,8 +12,8 @@ pub trait Transport: Send + Sync + std::fmt::Debug {
     async fn close(&self) -> Result<()>;
 }
 
-pub mod launcher;
 pub mod factory;
+pub mod launcher;
 pub mod serial;
 pub mod shell;
 pub mod ssh;
@@ -30,17 +30,30 @@ pub struct NoopTransport;
 
 #[async_trait]
 impl Transport for NoopTransport {
-    fn kind(&self) -> &'static str { "noop" }
-    fn address(&self) -> LinkAddress {
-        LinkAddress::Shell { command: String::new(), args: vec![] }
+    fn kind(&self) -> &'static str {
+        "noop"
     }
-    async fn open(&mut self) -> Result<()> { Ok(()) }
-    async fn write(&self, _: &[u8]) -> Result<usize> { Ok(0) }
-    async fn read(&self, _: &mut [u8]) -> Result<usize> { Ok(0) }
+    fn address(&self) -> LinkAddress {
+        LinkAddress::Shell {
+            command: String::new(),
+            args: vec![],
+        }
+    }
+    async fn open(&mut self) -> Result<()> {
+        Ok(())
+    }
+    async fn write(&self, _: &[u8]) -> Result<usize> {
+        Ok(0)
+    }
+    async fn read(&self, _: &mut [u8]) -> Result<usize> {
+        Ok(0)
+    }
     async fn resize(&self, _: u16, _: u16) -> Result<()> {
         Err(Error::ResizeUnsupported(self.kind()))
     }
-    async fn close(&self) -> Result<()> { Ok(()) }
+    async fn close(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -52,13 +65,30 @@ mod tests {
     struct Echo;
     #[async_trait]
     impl Transport for Echo {
-        fn kind(&self) -> &'static str { "echo" }
-        fn address(&self) -> LinkAddress { LinkAddress::Shell { command: "echo".into(), args: vec![] } }
-        async fn open(&mut self) -> Result<()> { Ok(()) }
-        async fn write(&self, data: &[u8]) -> Result<usize> { Ok(data.len()) }
-        async fn read(&self, _buf: &mut [u8]) -> Result<usize> { Ok(0) }
-        async fn resize(&self, _: u16, _: u16) -> Result<()> { Ok(()) }
-        async fn close(&self) -> Result<()> { Ok(()) }
+        fn kind(&self) -> &'static str {
+            "echo"
+        }
+        fn address(&self) -> LinkAddress {
+            LinkAddress::Shell {
+                command: "echo".into(),
+                args: vec![],
+            }
+        }
+        async fn open(&mut self) -> Result<()> {
+            Ok(())
+        }
+        async fn write(&self, data: &[u8]) -> Result<usize> {
+            Ok(data.len())
+        }
+        async fn read(&self, _buf: &mut [u8]) -> Result<usize> {
+            Ok(0)
+        }
+        async fn resize(&self, _: u16, _: u16) -> Result<()> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

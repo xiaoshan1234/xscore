@@ -24,7 +24,9 @@ struct SessionRegistryInner {
 }
 
 impl SessionRegistry {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Insert (or replace) a session. The name index follows the new row, so
     /// re-inserting an edited `SessionInfo` is safe — that is what makes

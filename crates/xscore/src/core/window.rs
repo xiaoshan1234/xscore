@@ -3,9 +3,9 @@
 // Window is a pure UI layout container. No `link_id` field — windows
 // are independent entities that may exist with zero panes and may be
 // orphan (no link relationship).
-use tokio::sync::Mutex;
 use super::id::PaneId;
 use crate::model::WindowInfo;
+use tokio::sync::Mutex;
 
 #[derive(Debug)]
 pub struct Window {
@@ -15,7 +15,10 @@ pub struct Window {
 
 impl Window {
     pub fn new(info: WindowInfo) -> Self {
-        Self { info, panes: Mutex::new(Vec::new()) }
+        Self {
+            info,
+            panes: Mutex::new(Vec::new()),
+        }
     }
 
     pub async fn add_pane(&self, pane_id: PaneId) {

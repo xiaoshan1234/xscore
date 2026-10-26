@@ -1,8 +1,8 @@
 # xscore on Linux
 
 This guide covers xscore running in Linux or inside WSL. The CLI owns session
-metadata, while a resident Unix-socket daemon owns live PTYs, serial devices,
-SSH channels, tmux control clients and pane buffers.
+metadata, while linked Raw/Tmux SessionManagers convert live input into
+independent Buffers.
 
 For the native Windows executable, full PowerShell/WSL executable paths and
 the Windows named-pipe daemon, read [`windows.md`](windows.md).
@@ -37,7 +37,8 @@ installed it.
 ```text
 Session  a workspace with a Native or Tmux backend
   Window a grouping container; a tmux window mirrors @N
-  Pane   a byte buffer and geometry; the unit of read/write
+  Pane   a pure UI viewport that references a Buffer
+  Buffer independent bytes and history
   Link   one connection: shell/ssh/serial, or a tmux control client
 ```
 
@@ -47,23 +48,16 @@ and survive across separate CLI invocations.
 
 ## Create a Session and add a shell link
 
-Create an empty native Session:
+Create a raw Session with at least one Link:
 
 ```bash
-xscore session new dev
+xscore session new dev \
+  --link 'shell:///bin/bash?cwd=/home/me/src&cols=120&rows=40'
 ```
 
-Child-creating commands require an existing Session. If exactly one Session
-exists, `--session` may be omitted; when none or multiple exist, the command
-fails instead of creating or guessing a `default`.
-
-Add a shell Link inside it:
-
-```bash
-xscore link add \
-  'shell:///bin/bash?cwd=/home/me/src&cols=120&rows=40' \
-  --session dev
-```
+Raw and tmux Sessions both require at least one Link when created. The raw
+SessionManager converts one or more Link streams into Buffers and creates UI
+Pane rows. `link add`, `window add` and `pane add` always require `--session`.
 
 When xscore itself runs inside WSL, `shell:///bin/bash` starts a shell in that
 same WSL instance. The Windows path to `wsl.exe` belongs to the native Windows
@@ -91,8 +85,7 @@ Unknown query keys are errors.
 A login Bash shell:
 
 ```bash
-xscore session new login
-xscore link add 'shell:///bin/bash?arg=-l' --session login
+xscore session new login --link 'shell:///bin/bash?arg=-l'
 ```
 
 ## Find session and pane ids
@@ -101,16 +94,15 @@ xscore link add 'shell:///bin/bash?arg=-l' --session login
 xscore session show dev
 xscore session list
 xscore pane list --session dev
+xscore buffer list --session dev
 ```
 
-`session new` prints the Session id. `link add` prints the child ids:
+`session new` prints the Session and initial child IDs:
 
 ```text
 session: 01a...
-```
-
-```text
 link:    01a...
+buffer:  01a...
 window:  01a...
 pane:    01a...
 ```
@@ -118,9 +110,7 @@ pane:    01a...
 Capture the first pane id in a script:
 
 ```bash
-xscore session new dev
-
-out=$(xscore link add 'shell:///bin/bash' --session dev)
+out=$(xscore session new dev --link 'shell:///bin/bash')
 printf '%s\n' "$out"
 
 pane=$(printf '%s\n' "$out" | awk '/^pane:/{print $NF}')
@@ -208,8 +198,8 @@ xscore pane attach --pane <pid> --link <lid>
 xscore pane detach --pane <pid>
 ```
 
-`pane detach` keeps the pane buffer. `pane attach` is also the reconnect
-operation after `daemon stop`.
+`pane detach` clears only the UI's Buffer reference. `pane attach` points the
+UI at the Buffer produced by a raw Link.
 
 ## tmux
 
@@ -219,7 +209,7 @@ Create a managed tmux session:
 xscore session new work --tmux
 ```
 
-xscore creates one `tmux -C attach` control client for the session. Every tmux
+xscore creates one `tmux -CC attach` control client for the session. Every tmux
 pane is addressed by its `%N` handle on that one link.
 
 Take over an existing tmux session:
@@ -287,19 +277,15 @@ the tmux control client uses the system `ssh`.
 Serial:
 
 ```bash
-xscore session new hw
-xscore link add \
-  'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30' \
-  --session hw
+xscore session new hw \
+  --link 'serial:///dev/ttyUSB0?baud=115200&cols=100&rows=30'
 ```
 
 SSH with key authentication:
 
 ```bash
-xscore session new server
-xscore link add \
-  'ssh://me@box:22?identity=~/.ssh/id_ed25519' \
-  --session server
+xscore session new server \
+  --link 'ssh://me@box:22?identity=~/.ssh/id_ed25519'
 ```
 
 Current limitation: the `russh`-based `ssh://` link accepts any server host key

@@ -53,25 +53,27 @@ The examples below use `.\target\release\xscore.exe`; replace it with
 ```text
 Session  a workspace
   Window a grouping container
-  Pane   a byte buffer and geometry; this is what you read and write
+  Pane   a UI viewport and geometry; it references a Buffer
+  Buffer independently managed bytes and history
   Link   one connection to a shell
 ```
 
-`session new` creates only the Session container. A native Session starts
-empty. Links, windows and panes are created separately inside that Session.
+`session new` creates the Session and requires at least one raw Link. Its
+backend SessionManager turns Link input into independent Buffers, and creates
+the initial UI Pane.
 
 ## Create a Session
 
 ```powershell
-# Empty native Session
-.\target\release\xscore.exe session new dev
+# Raw Session with one Link
+.\target\release\xscore.exe session new dev `
+  --link 'shell:///C:/Windows/System32/wsl.exe'
 
 # All child commands now resolve `dev`
 .\target\release\xscore.exe session show dev
 ```
 
-If there is exactly one Session, child commands can omit `--session`. With no
-Session they fail; with multiple Sessions they require `--session`.
+`window add`, `pane add` and `link add` always require an explicit `--session`.
 
 ## Link URL syntax
 
@@ -96,19 +98,13 @@ and is rejected.
 ### PowerShell link
 
 ```powershell
-# The Session container must already exist
-.\target\release\xscore.exe session new ps
-
 # Windows PowerShell 5.1
-.\target\release\xscore.exe link add `
-  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40' `
-  --session ps
+.\target\release\xscore.exe session new ps `
+  --link 'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40'
 
 # PowerShell 7 in ps7
-.\target\release\xscore.exe session new ps7
-.\target\release\xscore.exe link add `
-  'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40' `
-  --session ps7
+.\target\release\xscore.exe session new ps7 `
+  --link 'shell:///C:/Program%20Files/PowerShell/7/pwsh.exe?arg=-NoLogo&cwd=C:/src&cols=120&rows=40'
 ```
 
 Use forward slashes in the URL. Single-quote the complete URL in PowerShell so
@@ -117,18 +113,13 @@ that `&` is not interpreted by the shell.
 ### WSL link
 
 ```powershell
-.\target\release\xscore.exe session new wsl
-.\target\release\xscore.exe session new ubuntu
-
 # Default distribution
-.\target\release\xscore.exe link add `
-  'shell:///C:/Windows/System32/wsl.exe' `
-  --session wsl
+.\target\release\xscore.exe session new wsl `
+  --link 'shell:///C:/Windows/System32/wsl.exe'
 
 # Named distribution, directory and inner shell
-.\target\release\xscore.exe link add `
-  'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash' `
-  --session ubuntu
+.\target\release\xscore.exe session new ubuntu `
+  --link 'shell:///C:/Windows/System32/wsl.exe?arg=--distribution&arg=Ubuntu&arg=--cd&arg=/home/me/src&arg=--exec&arg=/bin/bash'
 ```
 
 Shell query parameters:
@@ -147,18 +138,14 @@ than the host-process `cwd`. The named-distribution example expands to:
 wsl.exe --distribution Ubuntu --cd /home/me/src --exec /bin/bash
 ```
 
-`link add` creates the Link and its first Window/Pane because a native Session
-only becomes useful when it has a connection. The Session itself remains the
-owner.
+The raw SessionManager owns Link-to-Buffer routing. A Pane is only a UI
+viewport that references the Buffer ID it displays.
 
 ## Create and find a session
 
 ```powershell
-.\target\release\xscore.exe session new dev
-
-$out = .\target\release\xscore.exe link add `
-  'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo' `
-  --session dev
+$out = .\target\release\xscore.exe session new dev `
+  --link 'shell:///C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe?arg=-NoLogo'
 
 $pane = ($out -match '^pane:')[0] -replace '^pane:\s*', ''
 $link = ($out -match '^link:')[0] -replace '^link:\s*', ''
@@ -169,9 +156,12 @@ The same ids can be recovered later:
 ```powershell
 .\target\release\xscore.exe session show dev
 .\target\release\xscore.exe pane list --session dev
+.\target\release\xscore.exe buffer list --session dev
 ```
 
-`pane list` prints a `PANE ID` column. Copy that value for data operations.
+`pane list` prints `PANE ID` and `BUFFER ID`. Pane IDs address UI; data commands
+resolve the attached Buffer. `buffer show/del` manage bytes independently from
+the UI pane.
 
 ## Read from a pane
 
@@ -258,7 +248,7 @@ The daemon starts on demand:
 
 `daemon status` prints JSON to stdout. A stopped daemon:
 
-- loses all in-memory pane buffers;
+- loses all in-memory Buffers;
 - closes live shell processes;
 - keeps session metadata in `state.json`.
 
@@ -287,8 +277,8 @@ tests and isolated environments.
 - Local Windows tmux is not supported. Run xscore inside WSL for WSL-local tmux.
 - The native runner manages shell byte streams; it does not launch an extra
   Windows Terminal window.
-- A pipe link serves one pane at a time. Attaching another pane auto-detaches
-  the previous one.
+- A pipe Link has one Buffer and one SessionManager route. Multiple UI panes
+  may reference that Buffer without detaching one another.
 - `cmd.exe` is not a documented launcher. Use PowerShell, `pwsh` or WSL.
 - `daemon stop` loses buffered output.
 

@@ -1,6 +1,6 @@
 // tmux/ — the control-mode client for a managed session (ADR 0010 §D2).
 //
-// This is the protocol layer only: it spawns `tmux -C attach`, parses what
+// This is the protocol layer only: it spawns `tmux -CC attach`, parses what
 // comes back and exposes commands and events, plus the text formats and
 // command lines tmux itself parses. Nothing here decides what a session or a
 // pane *is*; `core/manager.rs` owns the wiring (one control client per

@@ -24,7 +24,9 @@ pub fn save_connect_spec(path: &Path, spec: &ConnectSpec) -> Result<()> {
 
 pub fn list_link_configs() -> Result<Vec<std::path::PathBuf>> {
     let dir = super::paths::links_dir();
-    if !dir.exists() { return Ok(vec![]); }
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
     let mut out = vec![];
     for entry in std::fs::read_dir(&dir)
         .map_err(|e| crate::core::Error::Config(format!("read_dir {}: {e}", dir.display())))?

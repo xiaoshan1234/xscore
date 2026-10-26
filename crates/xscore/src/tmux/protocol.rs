@@ -1,4 +1,4 @@
-// tmux/protocol.rs — the `tmux -C` control-mode wire format, parsed without any IO.
+// tmux/protocol.rs — the `tmux -CC` control-mode wire format, parsed without any IO.
 //
 // Everything here is pure: `ProtocolParser::feed` takes bytes and returns
 // `Parsed` values, so each rule in ADR 0010 §D2 and arch.md §7 can be tested
@@ -16,12 +16,23 @@
 /// One protocol line, classified.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
-    Begin { num: u64, flags: u32 },
-    End { num: u64 },
-    Error { num: u64, message: String },
+    Begin {
+        num: u64,
+        flags: u32,
+    },
+    End {
+        num: u64,
+    },
+    Error {
+        num: u64,
+        message: String,
+    },
     /// Pane bytes. `pane` is the tmux handle (`"%3"`), which is the link key a
     /// pane addresses itself with (ADR 0010 §D3).
-    Output { pane: String, bytes: Vec<u8> },
+    Output {
+        pane: String,
+        bytes: Vec<u8>,
+    },
     Event(TmuxEvent),
     /// Neither framing nor pane bytes nor a notification this build knows:
     /// either the text output of the block that is open, or an unknown `%`
@@ -33,16 +44,32 @@ pub enum Parsed {
 /// A structural notification — "events, not polling" (arch.md §7).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TmuxEvent {
-    WindowAdd { handle: String },
-    WindowClose { handle: String },
-    WindowRenamed { handle: String },
+    WindowAdd {
+        handle: String,
+    },
+    WindowClose {
+        handle: String,
+    },
+    WindowRenamed {
+        handle: String,
+    },
     /// `layout` is the *new* layout string (the 3rd field); the old one and the
     /// trailing flags are dropped — geometry is read from the new value only.
-    LayoutChange { handle: String, layout: String },
-    SessionWindowChanged { session: String, window: String },
-    SessionChanged { session: String },
+    LayoutChange {
+        handle: String,
+        layout: String,
+    },
+    SessionWindowChanged {
+        session: String,
+        window: String,
+    },
+    SessionChanged {
+        session: String,
+    },
     SessionsChanged,
-    Exit { reason: String },
+    Exit {
+        reason: String,
+    },
 }
 
 /// Carry-over parser: feed it whatever a read returned, get completed records.
@@ -198,7 +225,9 @@ fn parse_line(line: &[u8]) -> Parsed {
         "%window-renamed" => one_arg(&text, &tokens, |handle| TmuxEvent::WindowRenamed { handle }),
         // `%session-changed $0 name` — the session's *handle* is identity; the
         // trailing name is display-only and can change under us (ADR 0008).
-        "%session-changed" => one_arg(&text, &tokens, |session| TmuxEvent::SessionChanged { session }),
+        "%session-changed" => one_arg(&text, &tokens, |session| TmuxEvent::SessionChanged {
+            session,
+        }),
         "%layout-change" => match tokens.get(1) {
             // `@N <old> <new> <flags>`; 2-field forms exist, so fall back.
             Some(handle) => Parsed::Event(TmuxEvent::LayoutChange {
@@ -324,15 +353,25 @@ mod tests {
             "escape not decoded: {:?}",
             bytes[1].1
         );
-        assert!(bytes[1].1.ends_with(b"$ "), "payload truncated: {:?}", bytes[1].1);
+        assert!(
+            bytes[1].1.ends_with(b"$ "),
+            "payload truncated: {:?}",
+            bytes[1].1
+        );
 
         // Events.
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::WindowAdd { handle: "@1".into() })));
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::SessionChanged { session: "$0".into() })));
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::SessionWindowChanged {
-            session: "$0".into(),
-            window: "@1".into(),
+        assert!(parsed.contains(&Parsed::Event(TmuxEvent::WindowAdd {
+            handle: "@1".into()
         })));
+        assert!(parsed.contains(&Parsed::Event(TmuxEvent::SessionChanged {
+            session: "$0".into()
+        })));
+        assert!(
+            parsed.contains(&Parsed::Event(TmuxEvent::SessionWindowChanged {
+                session: "$0".into(),
+                window: "@1".into(),
+            }))
+        );
         assert!(
             parsed.iter().any(|p| matches!(
                 p,
@@ -344,9 +383,13 @@ mod tests {
             "layout-change did not carry the new layout: {parsed:?}"
         );
         // `%unlinked-window-close` is today's name for `%window-close`.
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::WindowClose { handle: "@1".into() })));
+        assert!(parsed.contains(&Parsed::Event(TmuxEvent::WindowClose {
+            handle: "@1".into()
+        })));
         assert!(parsed.contains(&Parsed::Event(TmuxEvent::SessionsChanged)));
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::Exit { reason: String::new() })));
+        assert!(parsed.contains(&Parsed::Event(TmuxEvent::Exit {
+            reason: String::new()
+        })));
         // Every line in the transcript is understood — no fallthrough.
         assert!(
             !parsed.iter().any(|p| matches!(p, Parsed::Unknown(_))),
@@ -410,7 +453,9 @@ mod tests {
         let second = parser.feed(b"%window-add @3\r\n");
         assert_eq!(
             second,
-            vec![Parsed::Event(TmuxEvent::WindowAdd { handle: "@3".into() })]
+            vec![Parsed::Event(TmuxEvent::WindowAdd {
+                handle: "@3".into()
+            })]
         );
 
         // An unterminated line is buffered, not parsed.
@@ -418,7 +463,9 @@ mod tests {
         assert!(parser.feed(b"%window-a").is_empty());
         assert_eq!(
             parser.feed(b"dd @4\n"),
-            vec![Parsed::Event(TmuxEvent::WindowAdd { handle: "@4".into() })]
+            vec![Parsed::Event(TmuxEvent::WindowAdd {
+                handle: "@4".into()
+            })]
         );
     }
 
@@ -437,7 +484,9 @@ mod tests {
             vec![
                 Parsed::Begin { num: 7, flags: 0 },
                 Parsed::Unknown("line one".into()),
-                Parsed::Event(TmuxEvent::WindowAdd { handle: "@9".into() }),
+                Parsed::Event(TmuxEvent::WindowAdd {
+                    handle: "@9".into()
+                }),
                 Parsed::Unknown("line two".into()),
                 Parsed::End { num: 7 },
             ]
@@ -457,7 +506,10 @@ mod tests {
         // A bare `%error` is legal and must not be dropped as unknown.
         assert_eq!(
             parse_all("%error 1 5 0\n"),
-            vec![Parsed::Error { num: 5, message: String::new() }]
+            vec![Parsed::Error {
+                num: 5,
+                message: String::new()
+            }]
         );
     }
 
@@ -465,7 +517,9 @@ mod tests {
     fn exit_carries_reason() {
         assert_eq!(
             parse_all("%exit detached\n"),
-            vec![Parsed::Event(TmuxEvent::Exit { reason: "detached".into() })]
+            vec![Parsed::Event(TmuxEvent::Exit {
+                reason: "detached".into()
+            })]
         );
     }
 }

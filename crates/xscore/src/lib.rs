@@ -1,10 +1,10 @@
-pub mod core;
 pub mod backends;
 pub mod cli;
 pub mod config;
+pub mod core;
 pub mod daemon;
 pub mod model;
+pub mod tmux;
 pub mod transport;
 pub mod url;
-pub mod tmux;
 pub mod util;

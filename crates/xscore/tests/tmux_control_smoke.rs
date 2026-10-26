@@ -45,9 +45,15 @@ async fn control_client_streams_bytes_runs_commands_and_receives_events() {
     // tmux replays nothing.
     let started = std::process::Command::new("tmux")
         .args([
-            "-L", &sock,
-            "new-session", "-d", "-s", session,
-            "sh", "-c", "while :; do echo TICK; sleep 0.1; done",
+            "-L",
+            &sock,
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            "sh",
+            "-c",
+            "while :; do echo TICK; sleep 0.1; done",
         ])
         .status()
         .expect("start tmux");

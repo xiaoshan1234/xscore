@@ -14,6 +14,7 @@
 //             shows a TODO and exits non-zero so users get a clear
 //             message)
 
+pub mod buffer;
 pub mod daemon;
 pub mod data;
 pub mod link;
@@ -25,7 +26,11 @@ pub mod window;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "xscore", version, about = "Manage shell / ssh / serial / tmux sessions as Session → Window → Pane → Link (ADR 0010)")]
+#[command(
+    name = "xscore",
+    version,
+    about = "Manage shell / ssh / serial / tmux sessions as Session → Window → Pane → Link (ADR 0010)"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -33,16 +38,19 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Inspect / create / kill sessions (the workspace that owns windows, panes and links)
+    /// Inspect / create / kill sessions and their backend SessionManagers
     #[command(subcommand)]
     Session(session::SessionCmd),
     /// Inspect / create / remove links (one connection each: a pipe, or a session's control client)
     #[command(subcommand)]
     Link(link::LinkCmd),
+    /// Inspect / delete independent session buffers
+    #[command(subcommand)]
+    Buffer(buffer::BufferCmd),
     /// Inspect / create / remove windows (layout containers inside a session; a tmux window is mirrored)
     #[command(subcommand)]
     Window(window::WindowCmd),
-    /// Inspect / create / remove panes (a buffer with a viewport; its bytes come from its link)
+    /// Inspect / create / remove Pane UI viewports (bytes live in Buffers)
     #[command(subcommand)]
     Pane(pane::PaneCmd),
     /// Read / write / resize data on a pane
