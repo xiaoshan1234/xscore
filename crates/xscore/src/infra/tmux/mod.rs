@@ -3,7 +3,7 @@
 // This is the protocol layer only: it spawns `tmux -CC attach`, parses what
 // comes back and exposes commands and events, plus the text formats and
 // command lines tmux itself parses. Nothing here decides what a session or a
-// pane *is*; `service/session_manager/manager.rs` owns the wiring (one control client per
+// pane *is*; `service/session_service/service.rs` owns the wiring (one control client per
 // tmux-backed session, panes demultiplexed by `%N`).
 //
 //   protocol.rs — pure parsing of the control protocol, no IO. Fixed to a
@@ -17,6 +17,7 @@
 
 pub mod control;
 pub mod format;
+pub mod model;
 pub mod protocol;
 
 pub use control::{argv, socket_args, TmuxControl};
@@ -26,4 +27,5 @@ pub use format::{
     resize_pane_command, send_keys_literal, split_window_command, PaneLine, WindowLine,
     LIST_PANES_FORMAT, LIST_WINDOWS_FORMAT,
 };
+pub use model::{TmuxHostConfig, TmuxSocket};
 pub use protocol::{Parsed, ProtocolParser, TmuxEvent};

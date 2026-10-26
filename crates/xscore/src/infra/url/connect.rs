@@ -1,7 +1,8 @@
 // url/connect.rs
-use crate::domain::model::{ConnectSpec, TransportConfig};
-use crate::domain::{Error, LinkAddress, Result};
 use crate::infra::link::launcher::ShellLaunch;
+use crate::infra::link::LinkAddress;
+use crate::infra::link::{ConnectSpec, TransportConfig};
+use crate::{Error, Result};
 use percent_encoding::percent_decode_str;
 use std::collections::HashMap;
 
@@ -215,8 +216,8 @@ fn reject_unknown(pairs: &HashMap<String, String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::model::TransportConfig;
-    use crate::domain::LinkAddress;
+    use crate::infra::link::LinkAddress;
+    use crate::infra::link::TransportConfig;
 
     #[test]
     fn parse_ssh_url_with_identity() {

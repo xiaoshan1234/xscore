@@ -12,7 +12,7 @@
 use clap::Parser;
 use std::sync::Arc;
 use xscore::app::cli::{buffer, link, pane, session, window, Cli, Commands};
-use xscore::service::session_manager::SessionManager;
+use xscore::service::session_service::SessionService;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,9 +38,9 @@ async fn main() -> anyhow::Result<()> {
     // Hydrate the manager from disk (task-15). On first run, this returns
     // an empty manager. After `xscore link add`, state is saved and the
     // next invocation sees the link.
-    let mut mgr = SessionManager::load_from_state().await?;
+    let mut mgr = SessionService::load_from_state().await?;
     // v0.5.0: direct links outlive this process — the daemon owns them.
-    mgr.enable_daemon(Arc::new(xscore::infra::daemon::DaemonClient::new()));
+    mgr.enable_daemon(Arc::new(xscore::service::daemon::DaemonClient::new()));
     let mgr = Arc::new(mgr);
     match cli.command {
         Commands::Session(c) => session::run(mgr, c).await?,

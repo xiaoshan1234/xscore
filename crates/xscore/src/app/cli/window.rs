@@ -1,9 +1,11 @@
 // app/cli/window.rs (v0.6.0 — a window belongs to a session; tmux sessions get real
 // tmux windows, native ones a purely xscore-side window)
-use crate::domain::model::WindowBackend;
-use crate::domain::{Error, SessionId, WindowId};
-use crate::service::session_manager::SessionManager;
+use crate::service::session_service::SessionId;
+use crate::service::session_service::SessionService;
 use crate::ui::window::Window;
+use crate::ui::window::WindowBackend;
+use crate::ui::WindowId;
+use crate::Error;
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
@@ -62,7 +64,7 @@ pub struct WindowPaneArgs {
     pub pane: String,
 }
 
-pub async fn run(mgr: Arc<SessionManager>, cmd: WindowCmd) -> anyhow::Result<()> {
+pub async fn run(mgr: Arc<SessionService>, cmd: WindowCmd) -> anyhow::Result<()> {
     match cmd {
         WindowCmd::Add(args) => add(mgr, args).await,
         WindowCmd::List(args) => list(mgr, args).await,
@@ -73,7 +75,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: WindowCmd) -> anyhow::Result<()>
     }
 }
 
-async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()> {
+async fn add(mgr: Arc<SessionService>, args: WindowAddArgs) -> anyhow::Result<()> {
     let sid = mgr.resolve_session(Some(&args.session)).await?;
     let wid = mgr
         .add_window_in(sid, args.name, args.cols, args.rows)
@@ -82,7 +84,7 @@ async fn add(mgr: Arc<SessionManager>, args: WindowAddArgs) -> anyhow::Result<()
     Ok(())
 }
 
-async fn list(mgr: Arc<SessionManager>, args: WindowListArgs) -> anyhow::Result<()> {
+async fn list(mgr: Arc<SessionService>, args: WindowListArgs) -> anyhow::Result<()> {
     // ADR 0010 §7: a tmux session's structure is tmux's. This CLI is one
     // process per command, so between commands nothing is attached and a window
     // created outside xscore would be invisible; listing re-reads it through
@@ -111,7 +113,7 @@ async fn list(mgr: Arc<SessionManager>, args: WindowListArgs) -> anyhow::Result<
         "{:<36}  {:<24}  {:<20}  {:<5}  {:<5}  {:<8}",
         "WINDOW ID", "NAME", "SESSION", "COLS", "ROWS", "TMUX"
     );
-    let mut all: Vec<Arc<Window>> = mgr.ui.windows.list_all().await;
+    let mut all: Vec<Arc<Window>> = mgr.ui.windows().await;
     // Stable order by id (uuid v7 is chronological).
     all.sort_by_key(|w| w.info.id.to_string());
     for w in all {
@@ -151,7 +153,7 @@ impl SessionNames {
     }
 }
 
-async fn session_names(mgr: &SessionManager) -> SessionNames {
+async fn session_names(mgr: &SessionService) -> SessionNames {
     SessionNames(
         mgr.list_sessions()
             .await
@@ -162,35 +164,31 @@ async fn session_names(mgr: &SessionManager) -> SessionNames {
     )
 }
 
-async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+async fn show(mgr: Arc<SessionService>, id: &str) -> anyhow::Result<()> {
     let wid = WindowId::parse(id)?;
-    let w = mgr
-        .windows
-        .get(wid)
-        .await
-        .ok_or(Error::WindowNotFound(wid))?;
+    let w = mgr.ui.window(wid).await.ok_or(Error::WindowNotFound(wid))?;
     println!("{}", serde_json::to_string_pretty(&w.info)?);
     Ok(())
 }
 
-async fn del(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+async fn del(mgr: Arc<SessionService>, id: &str) -> anyhow::Result<()> {
     let wid = WindowId::parse(id)?;
     mgr.del_window(wid).await?;
     println!("deleted window: {wid}");
     Ok(())
 }
 
-async fn add_pane(mgr: Arc<SessionManager>, args: WindowPaneArgs) -> anyhow::Result<()> {
+async fn add_pane(mgr: Arc<SessionService>, args: WindowPaneArgs) -> anyhow::Result<()> {
     let wid = WindowId::parse(&args.window)?;
-    let pid = crate::domain::PaneId::parse(&args.pane)?;
+    let pid = crate::ui::PaneId::parse(&args.pane)?;
     mgr.add_pane_to_window(wid, pid).await?;
     println!("added pane {pid} to window {wid}");
     Ok(())
 }
 
-async fn remove_pane(mgr: Arc<SessionManager>, args: WindowPaneArgs) -> anyhow::Result<()> {
+async fn remove_pane(mgr: Arc<SessionService>, args: WindowPaneArgs) -> anyhow::Result<()> {
     let wid = WindowId::parse(&args.window)?;
-    let pid = crate::domain::PaneId::parse(&args.pane)?;
+    let pid = crate::ui::PaneId::parse(&args.pane)?;
     mgr.remove_pane_from_window(wid, pid).await?;
     println!("removed pane {pid} from window {wid}");
     Ok(())

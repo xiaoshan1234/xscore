@@ -14,7 +14,8 @@
 // That is also what fixes the old read/write starvation: the two directions no
 // longer share a lock, so a read awaiting output cannot block a write.
 
-use crate::domain::{Error, LinkAddress, Result};
+use crate::infra::link::LinkAddress;
+use crate::{Error, Result};
 use async_trait::async_trait;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::VecDeque;

@@ -5,7 +5,7 @@
 // ADR 0010 a session stores its socket, so a *new* session has to resolve one
 // at creation time: `--socket <name>` is the explicit answer, `XSCORE_SOCKET`
 // the environment default, and only then the built-in name.
-use crate::domain::model::TmuxSocket;
+use crate::infra::tmux::TmuxSocket;
 
 pub const DEFAULT_SOCKET: &str = "xscore";
 

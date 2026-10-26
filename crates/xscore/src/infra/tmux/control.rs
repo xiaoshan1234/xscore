@@ -35,8 +35,8 @@ use tokio::sync::oneshot;
 
 use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
 
-use crate::domain::model::TmuxSocket;
-use crate::domain::{Error, Result};
+use crate::infra::tmux::TmuxSocket;
+use crate::{Error, Result};
 
 use super::protocol::{Parsed, ProtocolParser, TmuxEvent};
 
@@ -72,7 +72,7 @@ pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String
 
 /// Which tmux server on that host. A named socket resolves *on the host*, so a
 /// name is not a path — that is why `TmuxSocket` is not `Option<PathBuf>`
-/// (domain/model/session.rs). Kept in one place so local and remote can never drift.
+/// (infra/tmux/model.rs). Kept in one place so local and remote can never drift.
 pub fn socket_args(socket: &TmuxSocket) -> Vec<String> {
     match socket {
         TmuxSocket::Default => Vec::new(),

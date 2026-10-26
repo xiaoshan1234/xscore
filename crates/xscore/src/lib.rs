@@ -1,10 +1,15 @@
 //! Layered xscore architecture.
 //!
-//! `app -> ui/service -> domain`, while `service -> infra` supplies concrete
-//! I/O. The domain kernel has no dependency on the outer layers.
+//! `app -> service -> ui/infra`. Persisted models live with the module that
+//! owns them; only `Error`/`Result` and the ID macro are crate-level utilities.
+
+mod error;
+#[macro_use]
+mod macros;
 
 pub mod app;
-pub mod domain;
 pub mod infra;
 pub mod service;
 pub mod ui;
+
+pub use error::{Error, Result};

@@ -11,7 +11,7 @@
 // What stays: `by_id` lookup, insert, remove. The `Window.panes`
 // field still tracks the window's child panes (per `pane add-to-window`).
 use super::window::Window;
-use crate::domain::WindowId;
+use crate::ui::WindowId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

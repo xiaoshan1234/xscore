@@ -38,7 +38,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Inspect / create / kill sessions and their backend SessionManagers
+    /// Inspect / create / kill sessions and their backend SessionServices
     #[command(subcommand)]
     Session(session::SessionCmd),
     /// Inspect / create / remove links (one connection each: a pipe, or a session's control client)

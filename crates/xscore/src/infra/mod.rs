@@ -2,7 +2,6 @@
 //! serial device or tmux control client directly.
 
 pub mod config;
-pub mod daemon;
 pub mod link;
 pub mod tmux;
 pub mod url;

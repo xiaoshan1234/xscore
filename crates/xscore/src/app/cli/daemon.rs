@@ -9,7 +9,7 @@
 
 use clap::Subcommand;
 
-use crate::infra::daemon::{client, protocol::Request};
+use crate::service::daemon::{client, protocol::Request};
 
 #[derive(Subcommand)]
 pub enum DaemonCmd {
@@ -41,7 +41,7 @@ pub enum DaemonCmd {
 pub async fn run(cmd: DaemonCmd) -> anyhow::Result<()> {
     match cmd {
         DaemonCmd::Serve { idle_exit } => {
-            crate::infra::daemon::server::run(idle_exit).await?;
+            crate::service::daemon::server::run(idle_exit).await?;
         }
         DaemonCmd::Status => {
             let resp = client::send(&Request::Status).await?;

@@ -1,12 +1,12 @@
 // ui/pane_registry.rs (v0.3.0 — buffer-per-pane, ADR 0007 v2)
 //
 // v0.3.0: PaneRegistry tracks ONLY `PaneInfo` (the JSON-serializable
-// fields). The bridge (live I/O handle) is held in the manager's
-// `pane_bridges` map separately. This is necessary because mutating
-// `PaneInfo` would otherwise destroy the bridge (Pane has both fields
-// and `Pane::new(info)` resets the bridge).
-use crate::domain::model::PaneInfo;
-use crate::domain::PaneId;
+// fields). The runtime (live I/O handle) is held in the manager's
+// `buffer_runtimes` map separately. This is necessary because mutating
+// `PaneInfo` would otherwise destroy the runtime (Pane has both fields
+// and `Pane::new(info)` resets the runtime).
+use crate::ui::pane::PaneInfo;
+use crate::ui::PaneId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,7 +22,7 @@ impl PaneRegistry {
     }
 
     /// Insert or update a pane's info (in-place — preserves any
-    /// bridge the manager has associated with this pane id).
+    /// runtime the manager has associated with this pane id).
     pub async fn insert(&self, info: PaneInfo) {
         self.inner.write().await.insert(info.id, info);
     }

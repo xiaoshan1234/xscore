@@ -1,8 +1,13 @@
-//! Application services. This is the only layer that coordinates domain
-//! metadata with UI rows and infrastructure connections.
+//! Application services.
+//!
+//! Backends interpret connections, BufferService owns byte runtimes,
+//! LinkService owns connections, UiProjection owns structure projection and
+//! SessionService coordinates use cases.
 
-pub mod buffer_manager;
-pub mod link_manager;
-pub mod session_manager;
-pub mod state;
-pub mod ui_manager;
+pub mod backend;
+pub mod buffer_service;
+pub mod daemon;
+pub mod link_service;
+pub mod persistence;
+pub mod session_service;
+pub mod ui_projection;

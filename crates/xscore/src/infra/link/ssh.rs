@@ -26,7 +26,8 @@
 
 use std::sync::Arc;
 
-use crate::domain::{Error, LinkAddress, Result};
+use crate::infra::link::LinkAddress;
+use crate::{Error, Result};
 use async_trait::async_trait;
 use russh::client::{self, Config, Handler};
 use russh::{Channel, ChannelMsg};

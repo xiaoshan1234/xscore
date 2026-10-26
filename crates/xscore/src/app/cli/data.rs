@@ -1,13 +1,13 @@
-// app/cli/data.rs (v0.4.0 — data ops route through `pane.bridge`)
+// app/cli/data.rs (v0.4.0 — data ops route through `pane.runtime`)
 //
 // `xscore data {read, write, resize}` — per-pane data ops. Read serves a
 // snapshot of the pane's buffer: the ring buffer inside the daemon (which is
 // what survives this process), or the local buffer in the no-daemon build.
-// Write sends text to the bridge. Resize forwards to the bridge and updates
+// Write sends text to the runtime. Resize forwards to the runtime and updates
 // the pane info.
 
-use crate::domain::PaneId;
-use crate::service::session_manager::SessionManager;
+use crate::service::session_service::SessionService;
+use crate::ui::PaneId;
 use clap::Subcommand;
 use std::sync::Arc;
 
@@ -23,14 +23,14 @@ pub enum DataCmd {
         #[arg(long, default_value_t = 4096)]
         bytes: usize,
     },
-    /// Write bytes to a pane's bridge (default: read from stdin; or `--from-file <path>`).
+    /// Write bytes to a pane's runtime (default: read from stdin; or `--from-file <path>`).
     Write {
         #[arg(long)]
         pane: String,
         #[arg(long)]
         from_file: Option<String>,
     },
-    /// Resize a pane's terminal dimensions (forwards to bridge if attached).
+    /// Resize a pane's terminal dimensions (forwards to runtime if attached).
     Resize {
         #[arg(long)]
         pane: String,
@@ -41,7 +41,7 @@ pub enum DataCmd {
     },
 }
 
-pub async fn run(mgr: Arc<SessionManager>, cmd: DataCmd) -> anyhow::Result<()> {
+pub async fn run(mgr: Arc<SessionService>, cmd: DataCmd) -> anyhow::Result<()> {
     match cmd {
         DataCmd::Read { pane, bytes } => {
             let pid = PaneId::parse(&pane)?;

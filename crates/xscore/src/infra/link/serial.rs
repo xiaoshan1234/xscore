@@ -23,7 +23,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{Error, LinkAddress, Result};
+use crate::infra::link::LinkAddress;
+use crate::{Error, Result};
 use async_trait::async_trait;
 use serialport::{DataBits, Parity, SerialPort, StopBits};
 use tokio::sync::oneshot;
@@ -115,8 +116,8 @@ impl super::Transport for SerialTransport {
             .data_bits(data_bits)
             .parity(parity)
             .stop_bits(stop_bits)
-            // Read timeout MUST stay below the direct-bridge pump's
-            // poll interval (see backends::bridge::READ_POLL). The
+            // Read timeout MUST stay below the direct-runtime pump's
+            // poll interval (see backends::runtime::READ_POLL). The
             // transport is synchronous, so `read` runs inside
             // `spawn_blocking` holding the port mutex; if it blocked
             // longer than the pump's timeout, every pump tick would

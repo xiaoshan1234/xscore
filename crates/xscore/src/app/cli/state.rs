@@ -24,14 +24,14 @@ pub enum StateCmd {
 pub fn run(cmd: StateCmd) -> anyhow::Result<()> {
     match cmd {
         StateCmd::Migrate => {
-            let version = crate::service::state::on_disk_version()?;
+            let version = crate::service::persistence::on_disk_version()?;
             match version {
                 2 => {
-                    let created = crate::service::state::migrate_v2_to_v3()?;
+                    let created = crate::service::persistence::migrate_v2_to_v3()?;
                     println!("migrated state.json to schema v3: {created} session(s) created");
                 }
                 3 => {
-                    let converted = crate::service::state::migrate_v3_tmux_links()?;
+                    let converted = crate::service::persistence::migrate_v3_tmux_links()?;
                     println!("upgraded state.json: {converted} tmux session(s) converted");
                 }
                 other => anyhow::bail!(

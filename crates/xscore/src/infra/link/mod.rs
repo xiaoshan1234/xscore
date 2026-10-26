@@ -1,4 +1,4 @@
-use crate::domain::{Error, LinkAddress, Result};
+use crate::{Error, Result};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -12,11 +12,16 @@ pub trait Transport: Send + Sync + std::fmt::Debug {
     async fn close(&self) -> Result<()>;
 }
 
+pub mod address;
+pub mod config;
 pub mod factory;
 pub mod launcher;
 pub mod pty;
 pub mod serial;
 pub mod ssh;
+
+pub use address::LinkAddress;
+pub use config::{ConnectSpec, TransportConfig};
 
 /// A no-op `Transport` used during state hydration (task-15) for
 /// links re-loaded from disk. The link's tmux sink is the runtime

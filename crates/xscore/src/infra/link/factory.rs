@@ -6,8 +6,8 @@
 // the Shell variant by `launcher`.
 
 use super::{pty::ShellTransport, serial::SerialTransport, ssh::SshTransport, Transport};
-use crate::domain::model::TransportConfig;
-use crate::domain::Result;
+use crate::infra::link::TransportConfig;
+use crate::Result;
 
 pub async fn transport_for(config: TransportConfig) -> Result<Box<dyn Transport>> {
     match config {

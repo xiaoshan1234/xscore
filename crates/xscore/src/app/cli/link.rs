@@ -5,8 +5,10 @@
 // --tmux` / `session attach` and cannot be added to or deleted here (ADR 0010
 // §4/§D5). The old open/close/reconcile verbs are gone with the old tmux path:
 // those jobs belong to the session verbs and to control-mode events.
-use crate::domain::{Error, LinkId, PaneId};
-use crate::service::session_manager::SessionManager;
+use crate::service::link_service::LinkId;
+use crate::service::session_service::SessionService;
+use crate::ui::PaneId;
+use crate::Error;
 
 use clap::{Args, Subcommand};
 use std::sync::Arc;
@@ -83,7 +85,7 @@ pub enum LinkConfigCmd {
     List,
 }
 
-pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
+pub async fn run(mgr: Arc<SessionService>, cmd: LinkCmd) -> anyhow::Result<()> {
     match cmd {
         LinkCmd::Add(args) => add(mgr, args).await,
         LinkCmd::Del { id } => del(mgr, &id).await,
@@ -93,7 +95,7 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: LinkCmd) -> anyhow::Result<()> {
     }
 }
 
-async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> {
+async fn add(mgr: Arc<SessionService>, args: LinkAddArgs) -> anyhow::Result<()> {
     let (spec, address, pane_params) =
         resolve_link_input(args.url.as_deref(), args.config.as_deref())?;
     let supplied_id = match args.id.as_deref() {
@@ -126,18 +128,17 @@ async fn add(mgr: Arc<SessionManager>, args: LinkAddArgs) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn del(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+async fn del(mgr: Arc<SessionService>, id: &str) -> anyhow::Result<()> {
     let lid = LinkId::parse(id)?;
     mgr.del_link(lid).await?;
     println!("deleted: {lid}");
     Ok(())
 }
 
-async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
+async fn show(mgr: Arc<SessionService>, id: &str) -> anyhow::Result<()> {
     let lid = LinkId::parse(id)?;
     let link = mgr
-        .link_manager
-        .links
+        .link_service
         .get(lid)
         .await
         .ok_or(Error::LinkNotFound(lid))?;
@@ -155,13 +156,13 @@ async fn show(mgr: Arc<SessionManager>, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn list(mgr: Arc<SessionManager>, args: LinkListArgs) -> anyhow::Result<()> {
+async fn list(mgr: Arc<SessionService>, args: LinkListArgs) -> anyhow::Result<()> {
     let only = match args.session.as_deref() {
         Some(name) => Some(mgr.resolve_session(Some(name)).await?),
         None => None,
     };
     println!("{:<36}  {:<36}  {:<16}", "LINK ID", "NAME", "KIND");
-    for link in mgr.link_manager.links.list().await {
+    for link in mgr.link_service.list().await {
         let info = &link.info;
         if let Some(sid) = only {
             if info.session_id != sid {
@@ -222,8 +223,8 @@ pub(crate) fn resolve_link_input(
     url: Option<&str>,
     config_name: Option<&str>,
 ) -> anyhow::Result<(
-    crate::domain::model::ConnectSpec,
-    crate::domain::LinkAddress,
+    crate::infra::link::ConnectSpec,
+    crate::infra::link::LinkAddress,
     crate::infra::url::PaneParams,
 )> {
     let parsed = match (url, config_name) {
@@ -244,12 +245,11 @@ pub(crate) fn resolve_link_input(
     };
     // A cwd that is not a directory is silently ignored by the pty layer (the
     // child just starts in $HOME), so check it before anything is spawned.
-    if let crate::domain::model::TransportConfig::Shell { cwd: Some(dir), .. } = &parsed.0.transport
-    {
+    if let crate::infra::link::TransportConfig::Shell { cwd: Some(dir), .. } = &parsed.0.transport {
         crate::infra::util::require_dir(dir)?;
     }
     if !cfg!(windows) {
-        if let crate::domain::model::TransportConfig::Shell { command, .. } = &parsed.0.transport {
+        if let crate::infra::link::TransportConfig::Shell { command, .. } = &parsed.0.transport {
             if crate::infra::util::paths::looks_like_windows_program(command) {
                 eprintln!(
                     "warning: `{command}` is a Windows program. WSL interop gives it no \
@@ -263,10 +263,10 @@ pub(crate) fn resolve_link_input(
 }
 
 fn merge_specs(
-    template: crate::domain::model::ConnectSpec,
-    cli: crate::domain::model::ConnectSpec,
-) -> crate::domain::model::ConnectSpec {
-    crate::domain::model::ConnectSpec {
+    template: crate::infra::link::ConnectSpec,
+    cli: crate::infra::link::ConnectSpec,
+) -> crate::infra::link::ConnectSpec {
+    crate::infra::link::ConnectSpec {
         name: if cli.name.is_empty() {
             template.name
         } else {

@@ -18,8 +18,8 @@
 
 #![cfg(unix)]
 
-use xscore::domain::model::TmuxSocket;
 use xscore::infra::tmux::TmuxControl;
+use xscore::infra::tmux::TmuxSocket;
 
 /// Kills the private server even when the test panics.
 struct Guard {

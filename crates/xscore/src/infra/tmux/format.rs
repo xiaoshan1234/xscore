@@ -17,8 +17,8 @@
 
 use std::fmt::Write as _;
 
-use crate::domain::model::{TmuxHostConfig, TmuxSocket};
-use crate::domain::{Error, Result};
+use crate::infra::tmux::{TmuxHostConfig, TmuxSocket};
+use crate::{Error, Result};
 
 /// Fields of `list-windows`, in this order. Real tabs (see the module comment).
 pub const LIST_WINDOWS_FORMAT: &str =

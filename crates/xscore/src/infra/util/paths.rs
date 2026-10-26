@@ -67,7 +67,7 @@ pub fn looks_like_windows_program(command: &str) -> bool {
 /// portable-pty falls back to `$HOME` when the child cannot chdir, so an
 /// unchecked typo used to produce a session in the wrong directory with no
 /// error at all (measured: `cwd=/nonexistent-dir` started in `$HOME`).
-pub fn require_dir(raw: &str) -> crate::domain::Result<String> {
+pub fn require_dir(raw: &str) -> crate::Result<String> {
     let path = to_linux_path(raw);
     if Path::new(&path).is_dir() {
         return Ok(path);
@@ -77,7 +77,7 @@ pub fn require_dir(raw: &str) -> crate::domain::Result<String> {
     } else {
         String::new()
     };
-    Err(crate::domain::Error::Invalid(format!(
+    Err(crate::Error::Invalid(format!(
         "cwd `{raw}` is not a directory{hint}"
     )))
 }

@@ -1,16 +1,16 @@
 // crates/xscore/tests/data_smoke.rs (v0.4.0)
 //
-// End-to-end smoke for the data path, using the public `SessionManager`
+// End-to-end smoke for the data path, using the public `SessionService`
 // API directly (not the CLI) so a full
 //   add_link → (pane) → data_write → data_read
 // round-trip happens in one process. This catches the bugs the CLI
 // multi-process tests can't (buffer lifetime, detach semantics, I/O
 // timing).
 //
-// v0.4.0 focus: the pane's buffer (DirectBridge + RingBuffer) really
+// v0.4.0 focus: the pane's buffer (local BufferRuntime + RingBuffer) really
 // holds bytes, and detach does NOT kill the link's transport.
-// The current model keeps bytes in Buffers. A raw SessionManager maps each
-// Link to one Buffer; a tmux SessionManager maps each `%N` from its one
+// The current model keeps bytes in Buffers. A raw SessionService maps each
+// Link to one Buffer; a tmux SessionService maps each `%N` from its one
 // control Link to one Buffer. Panes are UI rows that reference those Buffers.
 //
 // IMPORTANT: these tests use `std::env::set_var` for `XSCORE_SOCKET`
@@ -26,9 +26,10 @@
 #![cfg(unix)]
 
 use std::time::Duration;
-use xscore::domain::model::{BufferOrigin, TmuxHostConfig, TmuxSocket};
+use xscore::infra::tmux::{TmuxHostConfig, TmuxSocket};
 use xscore::infra::url;
-use xscore::service::session_manager::{SessionManager, TmuxCreateOptions};
+use xscore::service::buffer_service::BufferOrigin;
+use xscore::service::session_service::{SessionService, TmuxCreateOptions};
 
 fn unique_socket_name(tag: &str) -> String {
     format!("xscore-test-data-{tag}-{}", std::process::id())
@@ -54,7 +55,7 @@ async fn setup(tag: &str) -> String {
     sock
 }
 
-async fn read_all(mgr: &SessionManager, pid: xscore::domain::PaneId) -> String {
+async fn read_all(mgr: &SessionService, pid: xscore::ui::PaneId) -> String {
     let mut buf = vec![0u8; 8192];
     let n = mgr.data_read(pid, &mut buf).await.expect("data_read");
     String::from_utf8_lossy(&buf[..n]).to_string()
@@ -66,7 +67,7 @@ async fn read_all(mgr: &SessionManager, pid: xscore::domain::PaneId) -> String {
 async fn data_read_after_link_pane_attach_write() {
     let sock = setup("base").await;
 
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse shell:///bin/cat");
     let res = mgr
@@ -110,7 +111,7 @@ async fn one_control_link_serves_every_pane_of_its_session() {
     // there is no auto-detach — and exactly one link row.
     let sock = setup("tmux-multi").await;
     let _guard = SocketGuard(sock.clone());
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     let sid = mgr
         .create_tmux_session(
             "multi",
@@ -123,16 +124,16 @@ async fn one_control_link_serves_every_pane_of_its_session() {
         .expect("create tmux session");
 
     let window = mgr
-        .windows
-        .list_all()
+        .ui
+        .windows()
         .await
         .into_iter()
         .find(|w| w.info.session_id == sid && w.info.backend.tmux_handle().is_some())
         .expect("the session's tmux window");
     let wid = window.info.id;
     let first = mgr
-        .panes
-        .list_all()
+        .ui
+        .panes()
         .await
         .into_iter()
         .find(|p| p.session_id == sid)
@@ -150,7 +151,7 @@ async fn one_control_link_serves_every_pane_of_its_session() {
 
     // One link for the session, and it is the control client.
     let links: Vec<_> = mgr
-        .links
+        .link_service
         .list()
         .await
         .into_iter()
@@ -166,7 +167,7 @@ async fn one_control_link_serves_every_pane_of_its_session() {
 
     let mut keys = Vec::new();
     for pid in [first, p2, p3] {
-        let info = mgr.panes.get(pid).await.expect("pane info");
+        let info = mgr.ui.pane(pid).await.expect("pane info");
         assert_eq!(
             info.window_id,
             Some(wid),
@@ -174,7 +175,7 @@ async fn one_control_link_serves_every_pane_of_its_session() {
         );
         let buffer_id = info.buffer_id.expect("a tmux pane references a buffer");
         let buffer = mgr
-            .buffers
+            .buffer_service
             .get(buffer_id)
             .await
             .expect("the buffer row exists");
@@ -207,7 +208,7 @@ async fn one_control_link_serves_every_pane_of_its_session() {
 async fn multiple_panes_can_reference_one_raw_buffer() {
     let sock = setup("q1").await;
 
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse"); // default = raw
     let res = mgr
@@ -219,17 +220,17 @@ async fn multiple_panes_can_reference_one_raw_buffer() {
     let p2 = mgr.add_pane(None, 80, 24, 0, 0, None).await.expect("p2");
     mgr.attach_pane(p2, res.link_id).await.expect("attach p2");
 
-    let info_p1 = mgr.panes.get(p1).await.expect("info_p1");
+    let info_p1 = mgr.ui.pane(p1).await.expect("info_p1");
     assert_eq!(
         info_p1.buffer_id,
         Some(res.buffer_id),
         "p1 keeps its UI reference to the raw buffer"
     );
-    let info_p2 = mgr.panes.get(p2).await.expect("info_p2");
+    let info_p2 = mgr.ui.pane(p2).await.expect("info_p2");
     assert_eq!(
         info_p2.buffer_id,
         Some(res.buffer_id),
-        "p2 references the same SessionManager route"
+        "p2 references the same SessionService route"
     );
 
     mgr.del_link(res.link_id).await.expect("del_link");
@@ -243,7 +244,7 @@ async fn round_trip_across_two_managers() {
     let sock = setup("roundtrip").await;
 
     // Manager A: add link (raw; brings its own pane), write, persist.
-    let mgr_a = SessionManager::new();
+    let mgr_a = SessionService::new();
     mgr_a.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr_a
@@ -259,8 +260,8 @@ async fn round_trip_across_two_managers() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Manager B: hydrate from disk, verify it sees the link + pane.
-    let mgr_b = SessionManager::load_from_state().await.expect("b.load");
-    let arc_links = mgr_b.links.list().await;
+    let mgr_b = SessionService::load_from_state().await.expect("b.load");
+    let arc_links = mgr_b.link_service.list().await;
     assert_eq!(
         arc_links.len(),
         1,
@@ -269,7 +270,7 @@ async fn round_trip_across_two_managers() {
     );
     assert_eq!(arc_links[0].id, link_id_a, "hydrated link id mismatch");
 
-    let info_b = mgr_b.panes.get(pane_id_a).await.expect("b.pane_info");
+    let info_b = mgr_b.ui.pane(pane_id_a).await.expect("b.pane_info");
     assert_eq!(info_b.id, pane_id_a, "hydrated pane id mismatch");
     // v0.4.1 (P0-3): the *binding* survives a restart, but the
     // *connection* does not — a direct transport dies with the process
@@ -282,17 +283,17 @@ async fn round_trip_across_two_managers() {
         "hydrated pane keeps its Buffer reference"
     );
     let buffer = mgr_b
-        .buffers
+        .buffer_service
         .get(res.buffer_id)
         .await
         .expect("hydrated Buffer row");
     assert_eq!(
         buffer.origin,
         BufferOrigin::Link { link_id: link_id_a },
-        "the Buffer retains its raw SessionManager origin"
+        "the Buffer retains its raw SessionService origin"
     );
 
-    // Direct panes cannot rebuild their bridge (the transport died with
+    // Direct panes cannot rebuild their runtime (the transport died with
     // the old process) — data ops fail until re-attach, and they must
     // say WHY (v0.4.1 / P0-3). "Not attached" would be a lie: the pane
     // is still bound; the *connection* is gone.
@@ -315,7 +316,7 @@ async fn round_trip_across_two_managers() {
 
 #[tokio::test]
 async fn orphan_pane_data_ops_return_not_attached() {
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     mgr.add_session_native("test").await.expect("session");
     let pane_id = mgr
         .add_pane(None, 80, 24, 0, 0, None)
@@ -343,12 +344,12 @@ async fn orphan_pane_data_ops_return_not_attached() {
 
 // ===== v0.4.0 additions =====
 
-/// #14 — the DirectBridge buffer really captures bytes, and the bytes
-/// survive a detach (the buffer belongs to the pane, not the bridge).
+/// #14 — the local BufferRuntime buffer really captures bytes, and the bytes
+/// survive a detach (the buffer belongs to the pane, not the runtime).
 #[tokio::test]
-async fn direct_bridge_buffer_retains_after_detach() {
+async fn direct_runtime_buffer_retains_after_detach() {
     let sock = setup("buffer").await;
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr
@@ -373,11 +374,11 @@ async fn direct_bridge_buffer_retains_after_detach() {
         "buffer read must be non-destructive, got {second:?}"
     );
 
-    // Detach: the pane has no bridge, so data ops are refused...
+    // Detach: the pane has no runtime, so data ops are refused...
     mgr.detach_pane(pid).await.expect("detach_pane");
     assert!(
         mgr.data_read(pid, &mut [0u8; 64]).await.is_err(),
-        "a detached pane has no live bridge"
+        "a detached pane has no live runtime"
     );
 
     // ...but re-attaching resumes the SAME buffer, history included.
@@ -396,7 +397,7 @@ async fn direct_bridge_buffer_retains_after_detach() {
 #[tokio::test]
 async fn detach_keeps_transport_alive() {
     let sock = setup("detach-alive").await;
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr
@@ -421,7 +422,7 @@ async fn detach_keeps_transport_alive() {
     let out = read_all(&mgr, pid).await;
     assert!(
         out.contains("still alive"),
-        "the re-attached bridge should read the echo, got {out:?}"
+        "the re-attached runtime should read the echo, got {out:?}"
     );
 
     mgr.del_link(res.link_id).await.expect("del_link");
@@ -432,7 +433,7 @@ async fn detach_keeps_transport_alive() {
 #[tokio::test]
 async fn link_del_direct_keeps_pane_orphan() {
     let sock = setup("del-direct").await;
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     mgr.add_session_native("test").await.expect("session");
     let (spec, addr) = url::parse("shell:///bin/cat").expect("parse");
     let res = mgr
@@ -443,23 +444,19 @@ async fn link_del_direct_keeps_pane_orphan() {
 
     mgr.del_link(res.link_id).await.expect("del_link");
 
-    let info = mgr
-        .panes
-        .get(pid)
-        .await
-        .expect("pane must survive del_link");
+    let info = mgr.ui.pane(pid).await.expect("pane must survive del_link");
     assert_eq!(
         info.buffer_id,
         Some(res.buffer_id),
         "the pane keeps its independent Buffer reference"
     );
     assert!(
-        mgr.links.get(res.link_id).await.is_none(),
+        mgr.link_service.get(res.link_id).await.is_none(),
         "link must be gone"
     );
     assert!(
         mgr.data_read(pid, &mut [0u8; 8]).await.is_err(),
-        "orphaned pane has no bridge"
+        "orphaned pane has no runtime"
     );
     cleanup_socket(&sock).await;
 }
@@ -470,7 +467,7 @@ async fn link_del_direct_keeps_pane_orphan() {
 async fn session_kill_removes_the_tmux_panes() {
     let sock = setup("del-tmux").await;
     let _guard = SocketGuard(sock.clone());
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     let sid = mgr
         .create_tmux_session(
             "killme",
@@ -482,16 +479,16 @@ async fn session_kill_removes_the_tmux_panes() {
         .await
         .expect("create tmux session");
     let pane = mgr
-        .panes
-        .list_all()
+        .ui
+        .panes()
         .await
         .into_iter()
         .find(|p| p.session_id == sid)
         .expect("the session's pane")
         .id;
     let wid = mgr
-        .windows
-        .list_all()
+        .ui
+        .windows()
         .await
         .into_iter()
         .find(|w| w.info.session_id == sid)
@@ -499,7 +496,7 @@ async fn session_kill_removes_the_tmux_panes() {
         .info
         .id;
     let lid = mgr
-        .links
+        .link_service
         .list()
         .await
         .into_iter()
@@ -510,11 +507,14 @@ async fn session_kill_removes_the_tmux_panes() {
     mgr.del_session(sid).await.expect("kill the session");
 
     assert!(
-        mgr.panes.get(pane).await.is_none(),
+        mgr.ui.pane(pane).await.is_none(),
         "the tmux pane row must be removed"
     );
-    assert!(mgr.windows.get(wid).await.is_none(), "its window row too");
-    assert!(mgr.links.get(lid).await.is_none(), "and the control link");
+    assert!(mgr.ui.window(wid).await.is_none(), "its window row too");
+    assert!(
+        mgr.link_service.get(lid).await.is_none(),
+        "and the control link"
+    );
     assert!(mgr.sessions.get(sid).await.is_none());
 
     // The server session is the backend: kill means kill.
@@ -556,7 +556,7 @@ impl Drop for SocketGuard {
 async fn tmux_control_output_pump_fills_the_pane_buffer() {
     let sock = setup("tmux-pump").await;
     let _guard = SocketGuard(sock.clone());
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     let sid = mgr
         .create_tmux_session_with(
             "pump",
@@ -575,8 +575,8 @@ async fn tmux_control_output_pump_fills_the_pane_buffer() {
         .expect("create tmux session");
 
     let pane = mgr
-        .panes
-        .list_all()
+        .ui
+        .panes()
         .await
         .into_iter()
         .find(|p| p.session_id == sid)
@@ -619,7 +619,7 @@ async fn tmux_control_output_pump_fills_the_pane_buffer() {
 async fn tmux_window_add_event_becomes_a_window_row() {
     let sock = setup("tmux-window-add").await;
     let _guard = SocketGuard(sock.clone());
-    let mgr = SessionManager::new();
+    let mgr = SessionService::new();
     let sid = mgr
         .create_tmux_session(
             "events",
@@ -662,8 +662,8 @@ async fn tmux_window_add_event_becomes_a_window_row() {
         // intermediate state.
         in_window = match found.iter().find(|w| w.info.name == "extra") {
             Some(window) => mgr
-                .panes
-                .list_all()
+                .ui
+                .panes()
                 .await
                 .iter()
                 .filter(|p| p.window_id == Some(window.info.id))
@@ -702,7 +702,7 @@ async fn tmux_window_add_event_becomes_a_window_row() {
         .buffer_id
         .expect("the adopted pane references a Buffer");
     let buffer = mgr
-        .buffers
+        .buffer_service
         .get(buffer_id)
         .await
         .expect("the tmux Buffer row");
@@ -721,12 +721,12 @@ async fn tmux_window_add_event_becomes_a_window_row() {
 
 /// The session's window rows, in a stable order.
 async fn rows(
-    mgr: &SessionManager,
-    sid: xscore::domain::SessionId,
+    mgr: &SessionService,
+    sid: xscore::service::session_service::SessionId,
 ) -> Vec<std::sync::Arc<xscore::ui::window::Window>> {
     let mut windows: Vec<_> = mgr
-        .windows
-        .list_all()
+        .ui
+        .windows()
         .await
         .into_iter()
         .filter(|w| w.info.session_id == sid)

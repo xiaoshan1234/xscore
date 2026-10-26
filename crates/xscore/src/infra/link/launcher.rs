@@ -4,8 +4,8 @@
 //! child process behind ConPTY/PTY. The differences belong in the program and
 //! argv, not in the byte-transport abstraction.
 
-use crate::domain::model::TransportConfig;
-use crate::domain::LinkAddress;
+use crate::infra::link::LinkAddress;
+use crate::infra::link::TransportConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellLaunch {

@@ -3,7 +3,7 @@
 // `xscore session {list,new,attach,show,kill,detach,rename}`: the workspace verbs.
 //
 // A native `session new` creates the workspace plus at least one raw Link.
-// The backend SessionManager converts those Links into Buffers and creates the
+// The backend SessionService converts those Links into Buffers and creates the
 // initial UI Window/Pane. Links added later use `link add --session`.
 // With `--tmux` the session IS a tmux session: xscore creates it
 // (`new-session -d`), attaches the one control client that is its link, and
@@ -16,10 +16,12 @@
 // `kill` destroys the backend and the rows; `detach` only drops the rows and
 // leaves tmux running. For a native session the two cannot differ — the daemon
 // IS the backend — so `detach` refuses.
-use crate::domain::model::{SessionBackend, SessionInfo, TmuxHostConfig, TmuxSocket};
-use crate::domain::{Error, SessionId};
+use crate::infra::tmux::{TmuxHostConfig, TmuxSocket};
 use crate::infra::util::resolve_socket;
-use crate::service::session_manager::SessionManager;
+use crate::service::session_service::SessionId;
+use crate::service::session_service::SessionService;
+use crate::service::session_service::{SessionBackend, SessionInfo};
+use crate::Error;
 use clap::{Args, Subcommand};
 use std::sync::Arc;
 
@@ -28,7 +30,7 @@ pub enum SessionCmd {
     /// List sessions with the number of windows, panes, buffers and links.
     List,
 
-    /// Create a Session with its backend SessionManager. Raw sessions require
+    /// Create a Session with its backend SessionService. Raw sessions require
     /// one or more Links; `--tmux` creates the single control Link.
     New(SessionNewArgs),
 
@@ -88,7 +90,7 @@ pub struct SessionAttachArgs {
     pub ssh: Option<String>,
 }
 
-pub async fn run(mgr: Arc<SessionManager>, cmd: SessionCmd) -> anyhow::Result<()> {
+pub async fn run(mgr: Arc<SessionService>, cmd: SessionCmd) -> anyhow::Result<()> {
     match cmd {
         SessionCmd::List => list(mgr).await,
         SessionCmd::New(args) => new(mgr, args).await,
@@ -100,15 +102,15 @@ pub async fn run(mgr: Arc<SessionManager>, cmd: SessionCmd) -> anyhow::Result<()
     }
 }
 
-async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
+async fn list(mgr: Arc<SessionService>) -> anyhow::Result<()> {
     println!(
         "{:<36}  {:<24}  {:<24}  {:<7}  {:<5}  {:<5}  {:<7}",
         "SESSION ID", "NAME", "BACKEND", "WINDOWS", "PANES", "BUFFERS", "LINKS"
     );
-    let windows = mgr.ui.windows.list_all().await;
-    let panes = mgr.ui.panes.list_all().await;
-    let buffers = mgr.buffer_manager.buffers.list_all().await;
-    let links = mgr.link_manager.links.list().await;
+    let windows = mgr.ui.windows().await;
+    let panes = mgr.ui.panes().await;
+    let buffers = mgr.buffer_service.list().await;
+    let links = mgr.link_service.list().await;
     for info in mgr.list_sessions().await? {
         let w = windows
             .iter()
@@ -134,7 +136,7 @@ async fn list(mgr: Arc<SessionManager>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<()> {
+async fn new(mgr: Arc<SessionService>, args: SessionNewArgs) -> anyhow::Result<()> {
     if args.tmux {
         return new_tmux(mgr, args).await;
     }
@@ -179,7 +181,7 @@ async fn new(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<(
 }
 
 /// `session new --tmux`: a real tmux session plus its control link.
-async fn new_tmux(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Result<()> {
+async fn new_tmux(mgr: Arc<SessionService>, args: SessionNewArgs) -> anyhow::Result<()> {
     if !args.links.is_empty() {
         anyhow::bail!("--link is for raw sessions; --tmux creates its one control link");
     }
@@ -192,7 +194,7 @@ async fn new_tmux(mgr: Arc<SessionManager>, args: SessionNewArgs) -> anyhow::Res
     Ok(())
 }
 
-async fn attach(mgr: Arc<SessionManager>, args: SessionAttachArgs) -> anyhow::Result<()> {
+async fn attach(mgr: Arc<SessionService>, args: SessionAttachArgs) -> anyhow::Result<()> {
     let socket = resolve_socket(args.socket.as_deref());
     let host = host_from(args.ssh.as_deref());
     let sid = mgr.adopt_tmux_session(&args.name, host, socket).await?;
@@ -204,9 +206,9 @@ async fn attach(mgr: Arc<SessionManager>, args: SessionAttachArgs) -> anyhow::Re
 /// The `link:` / `window:` / `pane:` lines the native path prints, read back
 /// from the registries that enumerating the tmux session just filled. A tmux
 /// session has exactly one link, one window and one pane at creation.
-async fn print_structure(mgr: &SessionManager, sid: SessionId) {
+async fn print_structure(mgr: &SessionService, sid: SessionId) {
     let mut links: Vec<_> = mgr
-        .links
+        .link_service
         .list()
         .await
         .into_iter()
@@ -217,14 +219,14 @@ async fn print_structure(mgr: &SessionManager, sid: SessionId) {
         println!("link:   {}", link.info.id);
     }
 
-    let mut windows = mgr.ui.windows.list_all().await;
+    let mut windows = mgr.ui.windows().await;
     windows.retain(|w| w.info.session_id == sid);
     windows.sort_by_key(|w| w.info.created_at);
     for window in windows {
         println!("window: {}", window.info.id);
     }
 
-    let mut panes = mgr.ui.panes.list_all().await;
+    let mut panes = mgr.ui.panes().await;
     panes.retain(|p| p.session_id == sid);
     panes.sort_by_key(|p| p.created_at);
     for pane in panes {
@@ -232,7 +234,7 @@ async fn print_structure(mgr: &SessionManager, sid: SessionId) {
     }
 }
 
-async fn show(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
+async fn show(mgr: Arc<SessionService>, name: &str) -> anyhow::Result<()> {
     let sid = resolve(&mgr, name).await?;
     let info = mgr.get_session(sid).await?;
     println!("session: {}", info.id);
@@ -246,7 +248,7 @@ async fn show(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
     println!("created: {}", info.created_at.to_rfc3339());
 
     let mut links: Vec<_> = mgr
-        .links
+        .link_service
         .list()
         .await
         .into_iter()
@@ -257,21 +259,21 @@ async fn show(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
         println!("link:    {}", l.info.id);
     }
 
-    let mut buffers = mgr.buffer_manager.buffers.list_all().await;
+    let mut buffers = mgr.buffer_service.list().await;
     buffers.retain(|buffer| buffer.session_id == sid);
     buffers.sort_by_key(|buffer| buffer.created_at);
     for buffer in buffers {
         println!("buffer:  {}", buffer.id);
     }
 
-    let mut windows = mgr.ui.windows.list_all().await;
+    let mut windows = mgr.ui.windows().await;
     windows.retain(|w| w.info.session_id == sid);
     windows.sort_by_key(|w| w.info.created_at);
     for w in windows {
         println!("window:  {}", w.info.id);
     }
 
-    let mut panes = mgr.ui.panes.list_all().await;
+    let mut panes = mgr.ui.panes().await;
     panes.retain(|p| p.session_id == sid);
     panes.sort_by_key(|p| p.created_at);
     for p in panes {
@@ -280,21 +282,21 @@ async fn show(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn kill(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
+async fn kill(mgr: Arc<SessionService>, name: &str) -> anyhow::Result<()> {
     let sid = resolve(&mgr, name).await?;
     mgr.del_session(sid).await?;
     println!("killed session: {sid}");
     Ok(())
 }
 
-async fn detach(mgr: Arc<SessionManager>, name: &str) -> anyhow::Result<()> {
+async fn detach(mgr: Arc<SessionService>, name: &str) -> anyhow::Result<()> {
     let sid = resolve(&mgr, name).await?;
     mgr.detach_session(sid).await?;
     println!("detached session: {sid}");
     Ok(())
 }
 
-async fn rename(mgr: Arc<SessionManager>, old: &str, new: &str) -> anyhow::Result<()> {
+async fn rename(mgr: Arc<SessionService>, old: &str, new: &str) -> anyhow::Result<()> {
     let sid = resolve(&mgr, old).await?;
     mgr.rename_session(sid, new).await?;
     println!("renamed: {old} -> {new}");
@@ -315,7 +317,7 @@ fn host_from(ssh: Option<&str>) -> TmuxHostConfig {
 
 /// Resolve a `<ref>` to a session id. Named sessions are looked up by name and
 /// never fall back to the default: a typo must fail, not write elsewhere.
-async fn resolve(mgr: &SessionManager, name: &str) -> anyhow::Result<SessionId> {
+async fn resolve(mgr: &SessionService, name: &str) -> anyhow::Result<SessionId> {
     mgr.sessions
         .get_by_name(name)
         .await
