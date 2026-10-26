@@ -26,7 +26,7 @@ This file is the shape, not the argument. Rationale lives in the ADRs:
 
 ## 0. The model in one screen
 
-A **session is a workspace with one backend SessionManager**:
+A **session is a workspace with one backend SessionService**:
 
 ```
 Session
@@ -35,21 +35,21 @@ Session
             0..1 Buffer
 Session
   1:N Link
-  -> RawSessionManager or TmuxSessionManager
+  -> RawBackend or TmuxBackend
   -> 1:N Buffer
 ```
 
 | Layer | Owns | Does not own |
 |---|---|---|
 | UI | Window/Pane rows, geometry, placement and `buffer_id` | Bytes, Links, tmux handles |
-| Buffer service | Buffer rows, byte history, read/write/resize bridges | Window/Pane placement |
-| SessionManager | Raw/Tmux interpretation and Link -> Buffer routing | Concrete pty/ssh/serial I/O |
+| Buffer service | Buffer rows, byte history, read/write/resize runtime dispatch | Window/Pane placement |
+| SessionService | Raw/Tmux interpretation and Link -> Buffer routing | Concrete pty/ssh/serial I/O |
 | Link manager | Link rows and the connection lifetime | Buffer history or UI rows |
 | Link infrastructure | pty, ssh, serial, tmux control client | Business/session semantics |
 
-`Native` sessions have a RawSessionManager: one or more pipe Links, each routed
+`Native` sessions have a RawBackend: one or more pipe Links, each routed
 to an independent Buffer. `Tmux` sessions have one control Link and a
-TmuxSessionManager: `%output %N` is routed to the Buffer for that tmux pane and
+TmuxBackend: `%output %N` is routed to the Buffer for that tmux pane and
 control events are translated into UI events.
 
 A Pane is a pure UI viewport referencing a Buffer. Multiple Pane rows may
@@ -67,7 +67,7 @@ pub struct SessionInfo {
 }
 
 pub enum SessionBackend {
-    /// A RawSessionManager routes one or more pipe Links into Buffers.
+    /// A RawBackend routes one or more pipe Links into Buffers.
     Native,
 
     /// This session IS a tmux session. Windows and panes are read from tmux;
@@ -117,7 +117,7 @@ windows, and nothing renders native ones. A stored layout hint nobody applies
 reads like a feature. When a UI layer exists it can introduce a layout model
 shaped by what that layer actually needs.
 
-## 3. Pane, Buffer and SessionManager
+## 3. Pane, Buffer and SessionService
 
 A pane is a **pure UI viewport**. Bytes live in an independent Buffer.
 
@@ -146,11 +146,11 @@ pub enum BufferOrigin {
 }
 ```
 
-RawSessionManager owns the `LinkId -> BufferId` routes for one or more Links.
-TmuxSessionManager owns the `%N -> BufferId` routes for one control Link.
-`TmuxControl` parses `%output` and emits `TmuxEvent`; the TmuxSessionManager
+RawBackend owns the `LinkId -> BufferId` routes for one or more Links.
+TmuxBackend owns the `%N -> BufferId` routes for one control Link.
+`TmuxControl` parses `%output` and emits `TmuxEvent`; the TmuxBackend
 turns those events into Buffer routes and registry actions for the top-level
-SessionManager. Multiple Panes may reference one Buffer. Deleting a Pane
+SessionService. Multiple Panes may reference one Buffer. Deleting a Pane
 deletes only UI, not bytes.
 
 ## 4. Link, Endpoint and Sink
@@ -659,7 +659,8 @@ Invariants and what enforces each:
 
 ## 9. Module structure
 
-The code follows four operational layers plus a shared domain kernel:
+Models live with the module that owns them. There is no catch-all `domain/`
+layer.
 
 ```
 crates/xscore/src/
@@ -667,58 +668,73 @@ crates/xscore/src/
     cli/                 session, link, buffer, window, pane, data, daemon, state
     mcp/                 reserved; not implemented
   ui/
-    window.rs            Window UI row and WindowInfo/WindowBackend facade
-    pane.rs              Pane UI row and PaneInfo facade
+    window.rs            WindowId, WindowInfo, WindowBackend and Window
+    pane.rs              PaneId and PaneInfo
     *_registry.rs        UI registries
     event.rs             UiEvent consumed by the UI layer
   service/
-    buffer_manager/      BufferRegistry, RingBuffer history, PaneBridge adapters
-    ui_manager.rs        coordinates Window/Pane registries
-    link_manager/        Link row, LinkRegistry and transport ownership
-    session_manager/
-      manager.rs         application orchestration and persistence
-      runtime.rs         Raw/Tmux SessionManager dispatch
-      raw_session.rs     Link -> Buffer routes for 1..N Links
-      tmux_session.rs    one control Link, %N -> Buffer, tmux events -> UiEvent
-    state.rs             state.json snapshot and migrations
+    backend/
+      mod.rs             BackendRuntime dispatch and BackendEvent
+      raw.rs             Link -> Buffer routes for 1..N Links
+      tmux.rs            one control Link, %N -> Buffer, events -> UiEvent
+    buffer_service/
+      mod.rs             BufferService API and data operations
+      store.rs           Buffer model and registry
+      ring.rs            byte history
+      runtime.rs         Local/Daemon/Control runtime dispatch
+    ui_projection/       Window/Pane projection and CRUD
+    link_service/
+      mod.rs             LinkService lifecycle API
+      store.rs           Link model, runtime row and registry
+    session_service/
+      service.rs         session lifecycle and service composition
+      model.rs           SessionId, SessionInfo and SessionBackend
+      store.rs           Session runtime row and registry
+      link_methods.rs    Link use cases
+      tmux_methods.rs    tmux control/attach
+      tmux_reconcile_methods.rs  structure reconciliation and event pumps
+      ui_methods.rs      Window/Pane use cases
+      data_methods.rs    Pane -> Buffer data operations
+      persistence_methods.rs  save/load/hydrate
+    persistence/
+      snapshot.rs        on-disk model
+      store.rs           file IO and parse/save
+      migrate.rs         schema migrations
+    daemon/              resident transports/Buffers process and IPC
   infra/
-    link/                Transport, pty, ssh, serial, factory, launcher
-    tmux/                tmux -CC client, protocol parser, text formats
-    daemon/              resident transports/Buffers and IPC
+    link/                LinkAddress, TransportConfig, pty, ssh, serial
+    tmux/                TmuxHostConfig/TmuxSocket, tmux -CC, parser and formats
     config/, url/, util/
-  domain/
-    id.rs, error.rs, address.rs, buffer.rs, model/
+  error.rs               shared error surface
+  macros.rs              UUID ID generator
 ```
 
-The dependency direction is `app -> service -> infra` and
-`service -> ui -> domain`. Infrastructure depends only on `domain`, never on a
-service or UI module. The UI layer never reads a Link or opens a transport.
-`session_manager` is the conversion boundary: Raw converts Link input into
-Buffers; Tmux converts `%output %N` and control events into Buffers and
-`UiEvent`s.
+Dependencies flow `app -> service -> ui/infra`. Models cross the boundary only
+through the module that owns them: UI consumes Buffer/Session IDs and exposes
+Pane/Window rows; service orchestration imports those UI rows; infrastructure
+imports only link/tmux infrastructure models. The root `error.rs` is the one
+cross-cutting error surface.
 
 ```mermaid
 graph LR
     APP["app/cli"]
     UI["ui"]
     SERVICE["service"]
-    DOMAIN["domain"]
     INFRA["infra"]
+    ERROR["error.rs"]
 
     APP --> SERVICE
     APP --> INFRA
-    APP --> DOMAIN
     SERVICE --> UI
     SERVICE --> INFRA
-    SERVICE --> DOMAIN
-    UI --> DOMAIN
-    INFRA --> DOMAIN
+    UI --> SERVICE
+    INFRA --> ERROR
+    SERVICE --> ERROR
 ```
 
 `daemon/server` remains reachable only from the `daemon serve` app command. The
 daemon owns live connections and byte history; the CLI remains the only writer
 of metadata.
-
 ## 10. Command surface
 
 ```bash
@@ -765,7 +781,7 @@ Notes:
   host. No command ever fans out across hosts.
 - Raw `session new` requires one or more repeatable `--link <URL>` values.
   Link query options (`arg`, `cwd`, `cols`, `rows`) are unchanged.
-- `session new` creates a workspace plus its backend SessionManager. Raw managers can route several mixed Links into independent Buffers.
+- `session new` creates a workspace plus its backend SessionService. Raw managers can route several mixed Links into independent Buffers.
 - `link add`, `window add` and `pane add` require an explicit `--session`.
 - For a tmux session, `pane add` is atomic: `split-window`, read `%N`, insert a
   Pane/Buffer row carrying `pane_handle = %N`. No link is
@@ -800,7 +816,7 @@ amendment), and `backends/` did *not* disappear — only its buffer moved.
 | `link open` / `link close` | `session attach` / `session kill` / `session detach` |
 | `link sync [--heal]` (`SyncReport`) | replaced by control-mode events (§7): no mode flag, no global pass, no polling |
 | `TmuxBridge` (capture-pane per operation) | `ControlBridge`: `%output` fills the pane's buffer, `send-keys` is one line |
-| `backends/ring_buffer.rs` | Buffer history is `domain/buffer.rs`; runtime adapters are under `service/buffer_manager` |
+| `backends/ring_buffer.rs` | Buffer history is `service/buffer_service/ring.rs`; runtime adapters live beside it |
 
 ### Added
 
@@ -864,7 +880,7 @@ hard error naming the command.
 
 | # | Question | Lean |
 |---|---|---|
-| D1 | Does a tmux-backed session have explicit `Link`s, and if so how many? | **Decided: one per session.** The Link is the control connection; the TmuxSessionManager maps `%N` to independent Buffers. |
+| D1 | Does a tmux-backed session have explicit `Link`s, and if so how many? | **Decided: one per session.** The Link is the control connection; the TmuxBackend maps `%N` to independent Buffers. |
 | D2 | Window mirroring for tmux sessions: mirror `@N`, or keep one tmux window and treat xscore windows as private? | **Decided: mirror `@N`.** `tmux attach` must show what xscore shows; a private grouping would be a second, contradicting structure. |
 | D3 | `WindowLayout`: delete for good, or keep a hint for native windows? | **Delete.** No consumer; reintroduce with the renderer. |
 | D4 | tmux socket: private `-L xscore`, or the user's default socket? | **Decided:** the default socket; `--socket` overrides. Sessions invisible in `tmux ls` are not "managed". Tests pass `--socket` explicitly. |

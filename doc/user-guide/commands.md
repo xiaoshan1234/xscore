@@ -349,7 +349,7 @@ Prints `BufferInfo` JSON including `session_id` and `origin`.
 xscore buffer del --id <ID>
 ```
 
-Deletes the Buffer, closes its runtime bridge and clears `buffer_id` from every
+Deletes the Buffer, closes its BufferRuntime and clears `buffer_id` from every
 UI Pane that referenced it. Pane rows remain.
 
 ## window
@@ -483,7 +483,7 @@ Clears the pane's Buffer reference. The Buffer and source Link keep running.
 xscore pane resize --pane <PANE> --cols <COLS> --rows <ROWS>
 ```
 
-Updates geometry and forwards resize to an attached bridge.
+Updates geometry and forwards resize to the attached Buffer runtime.
 
 ### `pane move`
 
@@ -553,7 +553,7 @@ and cannot receive NUL.
 xscore data resize --pane <PANE> --cols <COLS> --rows <ROWS>
 ```
 
-Resizes through the pane bridge. This errors when the pane has no live
+Resizes through the pane's Buffer runtime. This errors when the pane has no live
 transport. Use `pane resize` for metadata-only geometry.
 
 ## daemon
