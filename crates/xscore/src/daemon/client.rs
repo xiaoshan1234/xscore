@@ -460,7 +460,7 @@ impl Transport for DaemonTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::daemon::protocol::BufferStatus;
+    use crate::daemon::protocol::BufferStatus;
 
     #[test]
     fn socket_path_is_under_xdg_runtime_dir_when_set() {

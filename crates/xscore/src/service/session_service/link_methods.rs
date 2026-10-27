@@ -78,7 +78,7 @@ impl SessionService {
         }
 
         let transport_arc: Arc<dyn crate::infra::link::Transport> = match &daemon {
-            Some(_) => Arc::new(crate::service::daemon::DaemonTransport::new(link_id)),
+            Some(client) => client.transport(link_id),
             None => {
                 // The transport IS the byte source of a pipe link, so it is
                 // opened once here (the other callers of `transport_for` own

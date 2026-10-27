@@ -25,7 +25,7 @@ impl SessionService {
         view: &TmuxView,
         local: Option<&Arc<TmuxControl>>,
     ) -> Result<bool> {
-        let _guard = self.tmux_reconcile.lock().await;
+        let _guard = self.tmux.reconcile_guard().await;
 
         let mut changed = false;
         let mut seen: HashSet<String> = HashSet::new();
@@ -66,7 +66,7 @@ impl SessionService {
         handle: &str,
         local: Option<&Arc<TmuxControl>>,
     ) -> Result<bool> {
-        let _guard = self.tmux_reconcile.lock().await;
+        let _guard = self.tmux.reconcile_guard().await;
 
         let Some(window) = view.windows.iter().find(|w| w.handle == handle) else {
             // Gone between the notification and the query: treat it as the
@@ -103,7 +103,7 @@ impl SessionService {
     /// Upsert one window and its panes; start a subscriber for each pane that
     /// did not exist before.
     ///
-    /// The caller holds `tmux_reconcile`.
+    /// The caller holds TmuxRuntime's reconcile guard.
     pub(super) async fn sync_window(
         &self,
         id: SessionId,

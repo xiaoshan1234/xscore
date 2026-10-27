@@ -6,7 +6,6 @@
 
 pub mod backend;
 pub mod buffer_service;
-pub mod daemon;
 pub mod link_service;
 pub mod persistence;
 pub mod session_service;

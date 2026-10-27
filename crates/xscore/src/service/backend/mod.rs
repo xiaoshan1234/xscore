@@ -8,13 +8,17 @@ use crate::service::session_service::SessionId;
 use crate::service::session_service::{SessionBackend, SessionInfo};
 use crate::{Error, Result};
 
+pub mod daemon_port;
 pub mod raw;
 pub mod tmux;
+pub mod tmux_model;
+pub(crate) mod tmux_runtime;
 
 use raw::RawBackend;
 use tmux::TmuxBackend;
 
 pub use tmux::BackendEvent;
+pub(crate) use tmux_runtime::TmuxRuntime;
 
 #[derive(Clone)]
 pub enum BackendRuntime {

@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     // next invocation sees the link.
     let mut mgr = SessionService::load_from_state().await?;
     // v0.5.0: direct links outlive this process — the daemon owns them.
-    mgr.enable_daemon(Arc::new(xscore::service::daemon::DaemonClient::new()));
+    mgr.enable_daemon(Arc::new(xscore::daemon::DaemonClient::new()));
     let mgr = Arc::new(mgr);
     match cli.command {
         Commands::Session(c) => session::run(mgr, c).await?,

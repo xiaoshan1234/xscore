@@ -120,39 +120,7 @@ pub struct BufferStatus {
     pub buffered: usize,
 }
 
-/// One tmux window in a `Structure` answer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TmuxWindowRow {
-    /// `@N` — identity, never the index.
-    pub handle: String,
-    pub name: String,
-    pub cols: u16,
-    pub rows: u16,
-}
-
-/// One tmux pane in a `Structure` answer.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TmuxPaneRow {
-    /// `%N` — the pane's `link_key`.
-    pub handle: String,
-    pub cols: u16,
-    pub rows: u16,
-    pub x: u16,
-    pub y: u16,
-    /// The `@N` this pane lives in.
-    pub window_handle: String,
-}
-
-/// A tmux session's structure, enumerated through the control client.
-///
-/// Panes carry their window explicitly because the CLI builds one view from
-/// this and must not run a second listing per window to find out.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct TmuxStructure {
-    pub windows: Vec<TmuxWindowRow>,
-    pub panes: Vec<TmuxPaneRow>,
-}
-
+pub use crate::service::backend::tmux_model::{TmuxPaneRow, TmuxStructure, TmuxWindowRow};
 /// One tmux control slot, as `daemon status` reports it: enough to see that
 /// the daemon is holding a client and buffering bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

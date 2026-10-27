@@ -19,6 +19,7 @@
 // resident server, so `tmux control runtime` keeps driving `tmux` commands directly.
 pub mod client;
 pub mod ipc;
+pub mod port;
 pub mod protocol;
 pub mod server;
 

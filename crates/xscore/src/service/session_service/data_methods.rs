@@ -136,12 +136,8 @@ impl SessionService {
         link_id: LinkId,
     ) -> Result<Arc<BufferRuntime>> {
         if let Some(client) = &self.daemon {
-            let link_live = crate::service::daemon::client::probe_link(link_id)
-                .await
-                .unwrap_or(false);
-            let buffer_live = crate::service::daemon::client::probe_buffer(info.id)
-                .await
-                .unwrap_or(false);
+            let link_live = client.probe_link(link_id).await.unwrap_or(false);
+            let buffer_live = client.probe_buffer(info.id).await.unwrap_or(false);
             if !link_live && !buffer_live {
                 return Err(Error::LinkNotConnected(link_id));
             }

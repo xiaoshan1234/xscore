@@ -129,14 +129,14 @@ impl SessionService {
     /// replaced. Output produced while nothing was attached is gone — tmux
     /// replays nothing (ADR 0010 §D2) — but the session itself keeps running.
     pub(super) async fn ensure_local_control(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
-        // Held across the check-and-spawn: see `tmux_attach`.
-        let _guard = self.tmux_attach.lock().await;
-        let existing = { self.tmux_controls.lock().await.get(&id).cloned() };
+        // Held across the check-and-spawn by TmuxRuntime.
+        let _guard = self.tmux.attach_guard().await;
+        let existing = { self.tmux.control(id).await };
         if let Some(control) = existing {
             if !control.is_closed() {
                 return Ok(control);
             }
-            self.tmux_controls.lock().await.remove(&id);
+            self.tmux.take_control(id).await;
         }
         self.attach_local_control(id).await
     }
@@ -144,7 +144,7 @@ impl SessionService {
     /// Spawn the in-process control client, enumerate the session, start the
     /// pumps.
     ///
-    /// The caller serialises attaches (`tmux_attach`); this is not reentrant.
+    /// The caller serialises attaches through TmuxRuntime; this is not reentrant.
     /// A session that has no control link yet (one whose rows were converted by
     /// `state migrate`) gets it here: attaching IS what creates it.
     pub(super) async fn attach_local_control(&self, id: SessionId) -> Result<Arc<TmuxControl>> {
@@ -182,10 +182,7 @@ impl SessionService {
             return Err(e);
         }
 
-        self.tmux_controls
-            .lock()
-            .await
-            .insert(id, Arc::clone(&control));
+        self.tmux.put_control(id, Arc::clone(&control)).await;
         self.record_control(id, &control).await;
         self.start_event_pump(id, Arc::clone(&control), events);
         Ok(control)

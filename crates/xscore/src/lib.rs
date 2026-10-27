@@ -8,6 +8,7 @@ mod error;
 mod macros;
 
 pub mod app;
+pub mod daemon;
 pub mod infra;
 pub mod service;
 pub mod ui;

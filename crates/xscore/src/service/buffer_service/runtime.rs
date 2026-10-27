@@ -14,7 +14,7 @@ use super::ring::{RingBuffer, DIRECT_BUFFER_CAPACITY};
 use super::store::BufferId;
 use crate::infra::link::Transport;
 use crate::infra::tmux::TmuxControl;
-use crate::service::daemon::client::DaemonClient;
+use crate::service::backend::daemon_port::DaemonPort;
 use crate::{Error, Result};
 
 const READ_WAIT: Duration = Duration::from_millis(200);
@@ -31,7 +31,7 @@ impl BufferRuntime {
         Self::Local(LocalRuntime::new(transport, buffer))
     }
 
-    pub(crate) fn daemon(client: Arc<DaemonClient>, buffer: BufferId) -> Self {
+    pub(crate) fn daemon(client: Arc<dyn DaemonPort>, buffer: BufferId) -> Self {
         Self::Daemon(DaemonRuntime { client, buffer })
     }
 
@@ -115,7 +115,7 @@ impl LocalRuntime {
 }
 
 pub(crate) struct DaemonRuntime {
-    client: Arc<DaemonClient>,
+    client: Arc<dyn DaemonPort>,
     buffer: BufferId,
 }
 

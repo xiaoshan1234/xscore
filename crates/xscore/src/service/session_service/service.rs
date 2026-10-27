@@ -52,7 +52,7 @@ use tokio::sync::Mutex;
 
 use crate::infra::link::{LinkAddress, TransportConfig};
 use crate::infra::tmux::{TmuxHostConfig, TmuxSocket};
-use crate::service::backend::BackendRuntime;
+use crate::service::backend::{BackendRuntime, TmuxRuntime};
 use crate::service::buffer_service::{BufferId, BufferInfo};
 use crate::service::buffer_service::{BufferService, RingBuffer};
 use crate::service::link_service::LinkService;
@@ -65,7 +65,7 @@ use crate::ui::{PaneId, WindowId};
 use crate::{Error, Result};
 
 use crate::infra::tmux::{PaneLine, TmuxControl, WindowLine};
-use crate::service::daemon::client::DaemonClient;
+use crate::service::backend::daemon_port::DaemonPort;
 
 /// What `link add` produced: a Link, its independent Buffer and the initial UI
 /// Pane/Window that reference it.
@@ -87,24 +87,11 @@ pub struct SessionService {
     pub buffer_service: Arc<BufferService>,
     pub(super) backends: Arc<Mutex<HashMap<SessionId, BackendRuntime>>>,
     /// Resident daemon client. Buffer runtimes and byte history are owned by
+    /// Resident daemon client. Buffer runtimes and byte history are owned by
     /// BufferService in-process; in daemon mode the daemon owns both.
-    pub(super) daemon: Option<Arc<DaemonClient>>,
-    /// v0.6.0 (ADR 0010 §D2): the live control client of every tmux-backed
-    /// session this process attached, **in-process mode only**. With a daemon
-    /// the client belongs to the daemon (`tmux: HashMap<SessionId,
-    /// ControlSlot>` there), because a client that dies with the CLI cannot
-    /// stream anything into the next one. One per session — a tmux session is
-    /// driven by exactly one client, and a second subscriber for the same
-    /// `%output %N` would append every byte twice.
-    pub(super) tmux_controls: Arc<Mutex<HashMap<SessionId, Arc<TmuxControl>>>>,
-    /// Serialises structure reconciliation. The event pump and a command can
-    /// both reconcile at once (a `%window-add` arriving during `window ls`),
-    /// and two reconciles racing would insert two rows for one `%N`.
-    pub(super) tmux_reconcile: Arc<Mutex<()>>,
-    /// Serialises *attaching*. Two clients on one tmux session would mean two
-    /// subscribers for the same `%output %N`, i.e. every byte appended twice —
-    /// the one-mechanism rule, one level down.
-    pub(super) tmux_attach: Arc<Mutex<()>>,
+    pub(super) daemon: Option<Arc<dyn DaemonPort>>,
+    /// In-process tmux clients and their serialization locks.
+    pub(super) tmux: Arc<TmuxRuntime>,
 }
 
 /// Rest of what `create_tmux_session` needs beyond the five structural
@@ -135,9 +122,7 @@ impl SessionService {
             buffer_service,
             backends: Arc::new(Mutex::new(HashMap::new())),
             daemon: None,
-            tmux_controls: Arc::new(Mutex::new(HashMap::new())),
-            tmux_reconcile: Arc::new(Mutex::new(())),
-            tmux_attach: Arc::new(Mutex::new(())),
+            tmux: Arc::new(TmuxRuntime::new()),
         }
     }
 
@@ -147,7 +132,7 @@ impl SessionService {
     /// `add_link` / `attach_pane` send the transport to the daemon and
     /// install a `daemon BufferRuntime`, so the link keeps working after this
     /// process exits — which is the whole reason v0.5.0 exists.
-    pub fn enable_daemon(&mut self, client: Arc<DaemonClient>) {
+    pub fn enable_daemon(&mut self, client: Arc<dyn DaemonPort>) {
         self.daemon = Some(client);
     }
 
@@ -172,10 +157,8 @@ impl SessionService {
             // session, `connected` is false: nothing is streaming, and asking
             // the server would put a `has-session` exec behind every `link
             // show`, which is what moving the client here was meant to end.)
-            if self.daemon.is_some() {
-                if let Ok(alive) = crate::service::daemon::client::probe_tmux(sid).await {
-                    return alive;
-                }
+            if let Some(client) = &self.daemon {
+                return client.probe_tmux(sid).await;
             }
             // In-process: the attached client, then the session-keyed map (a
             // stale handle closed by `%exit` must not count as connected).
@@ -184,7 +167,7 @@ impl SessionService {
                     return true;
                 }
             }
-            let held = { self.tmux_controls.lock().await.get(&sid).cloned() };
+            let held = { self.tmux.control(sid).await };
             if let Some(control) = held {
                 return !control.is_closed();
             }
@@ -208,9 +191,7 @@ impl SessionService {
             };
         }
         match &self.daemon {
-            Some(_) => crate::service::daemon::client::probe_link(lid)
-                .await
-                .unwrap_or(false),
+            Some(client) => client.probe_link(lid).await.unwrap_or(false),
             None => link.connected,
         }
     }
@@ -349,7 +330,7 @@ impl SessionService {
                     let _ = client.close_tmux(id).await;
                 }
                 None => {
-                    let control = { self.tmux_controls.lock().await.remove(&id) };
+                    let control = { self.tmux.take_control(id).await };
                     if let Some(control) = control {
                         let _ = control.close().await;
                     }
@@ -461,7 +442,7 @@ impl SessionService {
                 let _ = client.close_tmux(id).await;
             }
             None => {
-                let control = { self.tmux_controls.lock().await.remove(&id) };
+                let control = { self.tmux.take_control(id).await };
                 if let Some(control) = control {
                     let _ = control.close().await;
                 }
@@ -594,7 +575,7 @@ impl TmuxView {
     /// Build a view from a `Structure` answer (one round trip for the windows,
     /// one per window for the panes — all on the daemon's resident client).
     pub(super) fn from_structure(
-        structure: crate::service::daemon::protocol::TmuxStructure,
+        structure: crate::service::backend::tmux_model::TmuxStructure,
     ) -> Self {
         let mut panes: HashMap<String, Vec<PaneLine>> = HashMap::new();
         for pane in structure.panes {
