@@ -6,17 +6,20 @@
 // later invocation impossible by construction. This module is the fix: a
 // small resident process that owns
 //
-//   * every live direct-link transport, and
-//   * every pane's byte buffer,
+//   * every live direct-link transport,
+//   * every tmux control client, and
+//   * every Buffer's byte history.
 //
 // while the CLI keeps owning the metadata in `state.json`.
 //
 //     daemon/protocol.rs   wire format (length-prefixed JSON + hex)
 //     daemon/server.rs     `xscore daemon serve`: the state + pumps
 //     daemon/client.rs     auto-start, requests, `DaemonTransport`
+//     daemon/port.rs       implementation of service::DaemonPort
 //
-// tmux-backed links do NOT go through the daemon: tmux already is a
-// resident server, so `tmux control runtime` keeps driving `tmux` commands directly.
+// The daemon is a process boundary above service. Service code depends only on
+// its outbound DaemonPort; this layer implements that port and may depend on
+// service DTOs.
 pub mod client;
 pub mod ipc;
 pub mod port;
