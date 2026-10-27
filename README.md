@@ -27,7 +27,7 @@ Both backends end in the same place — independent ring Buffers in the daemon �
 > `link sync`, `link open/close`, `WindowLayout` and the `Sink` layer are gone.
 
 There are two supported Windows shapes. The native `xscore.exe` can own a WSL,
-PowerShell or `pwsh` shell through `shell:///...`, and bridges the daemon over a
+PowerShell or `pwsh` shell through `shell:///...`, and reaches the daemon over a
 Windows named pipe. Every shell-family URL is the same PTY/ConPTY Shell
 transport with a different program and argv. Running xscore itself inside WSL
 remains the way to manage local or remote tmux sessions on the WSL side.
@@ -38,7 +38,7 @@ remains the way to manage local or remote tmux sessions on the WSL side.
 # 1. Build (one-time). Rust 1.95+, tokio.
 cargo build --release
 
-# 2. A raw Session requires at least one Link. The SessionManager converts
+# 2. A raw Session requires at least one Link. The SessionService converts
 #    Link bytes into independent Buffers and creates the initial UI Pane.
 ./target/release/xscore session new dev \
   --link 'shell:///bin/bash?cwd=/tmp&cols=120&rows=40'
@@ -54,7 +54,7 @@ echo 'echo hi from xscore' | ./target/release/xscore data write --pane <pid>
 ./target/release/xscore data read --pane <pid>
 # hi from xscore
 #
-# The Link's SessionManager handed the pty and buffer to the
+# The Link's SessionService handed the pty and buffer to the
 # resident daemon (ADR 0009), which keeps pumping while no CLI is running.
 # `data read` returns the bytes that arrived, never a screen.
 
@@ -127,7 +127,7 @@ Session 1:N Buffer      Link 1:N Buffer        UI Pane   0..1 Buffer
 | attaches a human | n/a | `session attach` → `exec tmux attach` |
 
 `session new` creates a Session with at least one Link. A backend-specific
-SessionManager converts Link input into independent Buffers. Panes are pure UI
+SessionService converts Link input into independent Buffers. Panes are pure UI
 viewports that reference Buffers; they do not own bytes or Links.
 
 **Exclusivity is per link kind.** A `Pipe` link serves at most one pane — two
@@ -282,26 +282,27 @@ parameters, including `--distribution`, `--exec` and `--cd`.
 
 ## Architecture
 
-Source dependencies flow through five layers:
+Models are owned by the layer/module that uses them:
 
 ```text
 app/cli                    user input and command dispatch
-  -> service               coordination and Raw/Tmux conversion
+  -> daemon                resident connections, tmux slots and pumps
+       -> service           coordination and Raw/Tmux conversion
        -> ui               Window/Pane rows and UiEvent application
-       -> infra            pty/ssh/serial, tmux -CC and daemon I/O
-  -> domain                shared IDs, errors and persisted model
+       -> infra            pty/ssh/serial and tmux -CC I/O
+  error.rs                 shared error surface
 ```
 
 The UI layer is currently headless and only builds core Window/Pane rows. A
 Pane references a Buffer; it never owns a Link or a byte stream. Raw/Tmux
-SessionManagers decode Link input into Buffer writes and UI events. Link-layer
+backends decode Link input into Buffer writes and UI events. Link-layer
 infrastructure owns the actual connection.
 
 ```
 CLI (one process per command)                    daemon (resident)
-  SessionManager                                   links  : LinkId → Transport
+  SessionService                                   links  : LinkId → Transport
     ├ SessionRegistry   (session_id → Session)     raw    : Link/Buffer routes + pumps
-    ├ SessionManagers   (Raw routes 1..N Links)    buffers: BufferId → RingBuffer
+    ├ backends   (Raw routes 1..N Links)    buffers: BufferId → RingBuffer
     ├ LinkRegistry      (link_id → Link)           tmux   : SessionId → ControlSlot
     ├ BufferRegistry    (buffer_id → BufferInfo)            { control, buffers, alive }
     ├ WindowRegistry    (window_id → Window)
@@ -319,14 +320,13 @@ every live connection — pipe transports *and* tmux control clients — and the
 buffers those connections feed. The split is the whole point: a command can be
 short-lived, a connection cannot.
 
-A pane reaches its bytes through a `PaneBridge`:
+A Buffer reaches its runtime through one `BufferRuntime` dispatch:
 
-- `DaemonBridge` — the normal path: read/write/resize are requests to the daemon,
-  which routes to a pipe transport or to `send-keys` / `resize-pane` on the
-  session's control client.
-- `DirectBridge` — in-process (tests, and `SessionManager::new()` with no daemon).
-- `ControlBridge` — in-process tmux: the buffer is filled by the local client.
-
+- daemon runtime: read/write/resize are requests to the daemon, which routes to
+  a pipe transport or to `send-keys` / `resize-pane` on the session's control
+  client.
+- local runtime: in-process tests and `SessionService::new()` without a daemon.
+- control runtime: in-process tmux; the Buffer is filled by the local client.
 ## Status (v0.6.0)
 
 **Working end-to-end, with tests:**
@@ -345,7 +345,7 @@ A pane reaches its bytes through a `PaneBridge`:
 - URL parsing, `link config` templates, Q1 (one pane per pipe link), pane geometry,
   per-session filters on every list.
 - Native Windows daemon IPC over named pipes, plus WSL and PowerShell shells
-  launched through ConPTY. Raw/Tmux SessionManagers own Link-to-Buffer routing.
+  launched through ConPTY. Raw/Tmux backends own Link-to-Buffer routing.
 
 **Implemented but not exercised by the suite:** `serial://` (needs hardware) and
 `ssh://` links (needs a server; key auth only, `check_server_key` accepts any key).
@@ -380,7 +380,7 @@ are platform-gated; run them on Linux or inside WSL.
 
 On Unix, `cli_smoke` is deliberately cross-process: create in A, write in B,
 read in C. `data_smoke` runs without a daemon on purpose, to keep
-`DirectBridge` honest.
+the local Buffer runtime honest.
 `tmux_control_smoke` is ignored by default because it needs `tmux` on `PATH`; it
 uses a private socket and kills it on the way out.
 
@@ -390,29 +390,33 @@ uses a private socket and kills it on the way out.
 crates/xscore/src/
   app/
     cli/                 command parsing and dispatch; mcp/ is reserved
+  daemon/                resident process, IPC, DaemonPort implementation
   ui/
     window.rs            Window UI row and registry
     pane.rs              Pane UI row and registry
     event.rs             events consumed by the headless UI model
   service/
-    buffer_manager/      Buffer rows, ring history and PaneBridge adapters
-    ui_manager.rs        UI registry coordinator
-    link_manager/        Link rows and connection ownership
-    session_manager/     orchestration, Raw/Tmux backends and persistence
+    backend/             Raw/Tmux interpretation and BackendEvent
+    buffer_service/      Buffer rows, ring history and BufferRuntime dispatch
+    ui_projection/       Window/Pane projection and registry operations
+    link_service/        Link rows and connection ownership
+    session_service/     use-case facade split by link/ui/data/tmux flow
+    persistence/         state snapshot, storage and migrations
   infra/
     link/                pty, ssh, serial and transport factory
     tmux/                control-mode client, parser and text formats
-    daemon/              resident transports/Buffers process and IPC
     config/, url/, util/
-  domain/                shared IDs, errors and persisted model types
+  error.rs               shared error surface
+  macros.rs              UUID ID generator
 crates/xscore/tests/
   cli_smoke.rs, data_smoke.rs, tmux_control_smoke.rs, windows_smoke.rs
 ```
 
 ## Release process
 
-See [`RELEASE.md`](RELEASE.md). Design decisions live in [`doc/dev/adr/`](doc/dev/adr/);
-the target architecture is [`doc/dev/arch/arch.md`](doc/dev/arch/arch.md).
+See [`RELEASE.md`](RELEASE.md). Design decisions live in [`doc/adr/`](doc/adr/);
+the 4+1 architecture views are indexed in
+[`doc/arch/README.md`](doc/arch/README.md).
 
 ## License
 

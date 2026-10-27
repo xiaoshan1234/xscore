@@ -19,18 +19,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Source layered into `app`, `ui`, `service`, `infra` and `domain`.**
+- **Service layer is responsibility-oriented instead of manager-oriented.**
+  Top-level orchestration is `SessionService`; Raw/Tmux live under
+  `service/backend`; Buffer, Link and UI responsibilities are exposed through
+  `BufferService`, `LinkService` and `UiProjection`. SessionService's tmux,
+  link, UI, data and persistence use cases are split into separate files.
+  Small model/runtime/registry modules were merged into per-service `store.rs`
+  files, and persistence is split into snapshot/store/migrate.
+- **TmuxRuntime owns in-process tmux state.** Control clients, attach locking
+  and reconciliation locking moved out of SessionService into
+  `service/backend/tmux_runtime.rs`; UI mutation now routes through
+  `UiProjection`.
+- **PaneBridge adapters removed.** Buffer I/O now dispatches through one
+  internal `BufferRuntime` enum (`Local`, `Daemon`, `Control`) owned by the
+  Buffer service. The `PaneBridge` trait and `DirectBridge` / `DaemonBridge` /
+  `ControlBridge` concrete wrappers are gone.
+- **Source layered into `app`, `ui`, `service` and `infra`.**
   CLI commands now live under `app/cli`; Window/Pane rows and `UiEvent` under
   `ui`; Buffer/Link/Session managers under `service`; pty/ssh/serial, tmux and
-  daemon adapters under `infra`. Raw and Tmux backend files are separate.
-- **Sessions require a Link and a SessionManager.** Raw Sessions accept one or
+  URL adapters under `infra`; resident daemon runtime in its own `daemon` layer.
+  Models live beside their owning module rather than in a shared domain layer.
+  Raw and Tmux backend files are separate.
+- **Daemon is a separate layer above service.** Resident client/server, IPC and
+  pumps moved to top-level `daemon/`. Service depends only on the outbound
+  `DaemonPort`, implemented by `daemon/port.rs`, so source dependencies flow
+  `app -> daemon -> service`.
+- **Sessions require a Link and a backend runtime.** Raw Sessions accept one or
   more repeatable `--link` URLs; tmux Sessions create their one control Link.
   `window add`, `pane add` and `link add` require an explicit `--session`.
 - **Buffers are independent of Pane UI.** Buffers have their own persisted
   `BufferId` and source origin. Pane stores only geometry, window placement and
   `buffer_id`; Link IDs and tmux handles no longer live on Pane.
-- **Raw and Tmux SessionManagers convert Link input into Buffers.** Raw managers
-  route one or more Links; tmux managers route `%output %N` from one control
+- **Raw and Tmux backends convert Link input into Buffers.** Raw backends
+  route one or more Links; tmux backends route `%output %N` from one control
   Link and reconcile window/pane events. The control client now uses `-CC` on a
   dedicated PTY.
 - **Session takeover verbs are `attach` and `detach`.** `session adopt` is now

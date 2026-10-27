@@ -1,5 +1,8 @@
 # Architecture — as built (v0.6.0)
 
+The 4+1 view set is indexed in [README.md](./README.md): logical,
+development, runtime/process and deployment views.
+
 **Status: as-built for v0.6.0.** This describes the architecture the code
 implements; the design rationale is [ADR 0010](../adr/0010-session-layer-and-control-mode.md),
 and [§11 Delta](#11-delta-from-v051) records what changed from v0.5.1.
@@ -667,6 +670,12 @@ crates/xscore/src/
   app/
     cli/                 session, link, buffer, window, pane, data, daemon, state
     mcp/                 reserved; not implemented
+  daemon/
+    client.rs            daemon requests and DaemonTransport
+    port.rs              DaemonPort implementation
+    protocol.rs          wire framing and request/response types
+    server.rs            resident transports, tmux slots and pumps
+    ipc.rs               Unix socket / Windows named pipe
   ui/
     window.rs            WindowId, WindowInfo, WindowBackend and Window
     pane.rs              PaneId and PaneInfo
@@ -677,6 +686,7 @@ crates/xscore/src/
       mod.rs             BackendRuntime dispatch and BackendEvent
       raw.rs             Link -> Buffer routes for 1..N Links
       tmux.rs            one control Link, %N -> Buffer, events -> UiEvent
+      tmux_runtime.rs    in-process control clients and serialization locks
     buffer_service/
       mod.rs             BufferService API and data operations
       store.rs           Buffer model and registry
@@ -700,7 +710,6 @@ crates/xscore/src/
       snapshot.rs        on-disk model
       store.rs           file IO and parse/save
       migrate.rs         schema migrations
-    daemon/              resident transports/Buffers process and IPC
   infra/
     link/                LinkAddress, TransportConfig, pty, ssh, serial
     tmux/                TmuxHostConfig/TmuxSocket, tmux -CC, parser and formats
@@ -709,7 +718,7 @@ crates/xscore/src/
   macros.rs              UUID ID generator
 ```
 
-Dependencies flow `app -> service -> ui/infra`. Models cross the boundary only
+Dependencies flow `app -> daemon -> service -> ui/infra`. Models cross the boundary only
 through the module that owns them: UI consumes Buffer/Session IDs and exposes
 Pane/Window rows; service orchestration imports those UI rows; infrastructure
 imports only link/tmux infrastructure models. The root `error.rs` is the one
@@ -718,12 +727,15 @@ cross-cutting error surface.
 ```mermaid
 graph LR
     APP["app/cli"]
+    DAEMON["daemon"]
     UI["ui"]
     SERVICE["service"]
     INFRA["infra"]
     ERROR["error.rs"]
 
     APP --> SERVICE
+    APP --> DAEMON
+    DAEMON --> SERVICE
     APP --> INFRA
     SERVICE --> UI
     SERVICE --> INFRA
@@ -732,9 +744,10 @@ graph LR
     SERVICE --> ERROR
 ```
 
-`daemon/server` remains reachable only from the `daemon serve` app command. The
-daemon owns live connections and byte history; the CLI remains the only writer
-of metadata.
+`daemon/server` remains reachable only from the `daemon serve` app command.
+Service depends on the outbound `DaemonPort`, while the daemon implements it;
+there is no service-to-daemon source dependency. The daemon owns live
+connections and byte history; the CLI remains the only writer of metadata.
 ## 10. Command surface
 
 ```bash
