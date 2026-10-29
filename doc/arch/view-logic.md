@@ -1,186 +1,177 @@
 # 逻辑视图
 
-本文采用 4+1 视图中的逻辑视图，描述 xscore 的核心实体、职责边界、协作关系和必须保持的业务不变量。实现细节和目录结构见[开发视图](./view-dev.md)。
+本文采用 4+1 视图中的逻辑视图，描述终端模拟器的核心实体、职责边界、协作关系
+和必须保持的不变量。权威模型见 [terminal-emulator.md](./terminal-emulator.md)，
+目录结构见[开发视图](./view-dev.md)，进程与数据流见[运行视图](./view-process.md)。
 
 ## 1. 目标
 
-xscore 把终端工作区拆成两条相互正交的链：
+本终端模拟器把“连接”与“窗格”拆成两个正交概念，并用六层严格单向依赖组织：
 
 ```text
-Session -> Window -> Pane -> Buffer
-Session -> Link(s) -> BackendRuntime -> Buffer
+L5 应用/协调 -> L4 渲染 -> L3 组合窗格树 -> L2 终端核心 -> L1 域/连接 -> L0 平台抽象
 ```
 
-- UI 链只表达布局和视口，不拥有字节。
-- 连接链负责传输和协议解释，不拥有布局。
-- Buffer 是两条链的汇合点。
-- SessionService 负责用例和跨模块事务。
-- daemon 是拥有长期连接和 Buffer 内存的独立进程边界。
+- 连接链（L0/L1）负责 I/O 与协议解释，不负责布局。
+- 窗格与布局链（L2/L3）负责屏幕状态与几何，不感知连接类型。
+- L1 的 `Domain` 是枢纽：PaneHandle 工厂 + pane 注册表 + 输出路由器。
+- 硬约束“tmux pane 不与本地窗格并排”由 L3 的节点类型在结构上保证，不靠运行时
+  检查。
 
 ## 2. 角色与外部系统
 
 | 参与者 | 作用 |
 |---|---|
-| 用户 | 通过 CLI 创建、查看、操作 Session |
-| xscore CLI | 每条命令一个短生命周期进程 |
-| xscore daemon | 每个用户配置路径一个长期进程，拥有 live transport、tmux control client 和 Buffer 内存 |
-| Shell 子进程 | Bash、PowerShell、pwsh、WSL 等，通过 PTY/ConPTY 运行 |
-| tmux server | 本地或远端 tmux 会话宿主，结构的事实来源 |
-| SSH 目标机 | native SSH Link 或远端 tmux 所在主机 |
-| 串口设备 | `serial://` Link 的字节源 |
+| 用户 | 通过窗口、快捷键与键盘输入操作终端 |
+| 前端（L4/L5，当前模拟） | 渲染、窗口/Tab、焦点、快捷键、全局编排 |
+| 后端（L0–L2，本项目实现） | 平台 I/O、Domain 路由、VT 状态机 |
+| PTY 子进程 | 本地 Shell、`tmux -CC attach` 控制进程 |
+| SSH server | RemoteSshDomain 的远端 PTY channel |
+| tmux server | TmuxDomain 的结构与字节事实来源 |
 
 ## 3. 核心实体
 
 ```mermaid
 classDiagram
-    Session "1" --> "*" Window
-    Window "1" --> "*" Pane
-    Pane "0..1" --> "1" Buffer : buffer_id
-    Session "1" --> "*" Link
-    Session "1" --> "*" Buffer
-    Session "1" --> "1" BackendRuntime
-    BackendRuntime "1" --> "*" Buffer : routes bytes
-    Link "1" --> "0..1" Buffer : raw source
+    Domain "1" --> "1..N" PaneHandle : 工厂 + 注册表
+    PaneHandle "1" --> "1" TerminalCore : 绑定
+    Node "1" --> "1" PaneHandle : LocalLeaf
+    Node "1" --> "1" TmuxContainer : TmuxMirror
+    TmuxContainer "1" --> "*" PaneHandle : 私有 panes
+    TmuxContainer "1" --> "1" TmuxLayoutTree : layout_tree
 ```
 
 | 实体 | 所有者 | 说明 |
 |---|---|---|
-| `Session` | SessionService | 工作区，也是 backend 的选择边界 |
-| `Window` | UiProjection | UI 布局容器；tmux window 保存 `@N` |
-| `Pane` | UiProjection | 纯 UI 视口，保存几何、窗口归属和可选 `buffer_id` |
-| `Buffer` | BufferService | 独立字节历史和 runtime |
-| `Link` | LinkService | 一条连接；`Pipe` 或 `Control` |
-| `BackendRuntime` | SessionService/backend | `RawBackend` 或 `TmuxBackend` |
-| `TmuxRuntime` | backend | 进程内 tmux control client 与串行锁 |
+| `Connection` | L1 Domain | 实际 I/O 通道（PTY / SSH channel / tmux 控制 PTY） |
+| `PaneHandle` | L1 Domain | 逻辑窗格句柄：绑定模拟核心 + 输入路由 + 输出事件流 |
+| `Domain` | L5 DomainRegistry | PaneHandle 工厂 + 注册表 + 输出路由器；Local/Ssh/Tmux 三种实现 |
+| `TerminalCore` | L3 叶子 | 每 pane 独立的 VT 状态机 + 网格缓冲区 |
+| `Node` | L3 | 本地布局树：Branch / LocalLeaf / TmuxMirror |
+| `TmuxContainer` | L3 | 不可拆分的 tmux 布局原子，内部 pane 私有 |
+| `TmuxLayoutTree` | L3 容器 | 由 `%layout-change` 驱动，容器内 pane 布局 |
 
-具体模型位置遵循“模型跟随所有者”：
+## 4. 层与职责
 
-- Session 模型在 `service/session_service/model.rs`
-- Window/Pane 模型在 `ui/`
-- Buffer 模型在 `service/buffer_service/store.rs`
-- Link 模型在 `service/link_service/store.rs`
-- Link/tmux 目标配置在 `infra/link` 和 `infra/tmux`
-
-## 4. 层与 Service 职责
-
-| 组件 | 负责 | 不负责 |
+| 层 | 负责 | 不负责 |
 |---|---|---|
-| `SessionService` | 用例、事务、Session 生命周期、backend 选择 | 具体 PTY/SSH/串口/tmux IO |
-| `RawBackend` | 多 Link -> 多 Buffer 路由 | 打开具体连接 |
-| `TmuxBackend` | 单 control Link、`%N -> Buffer`、tmux event 转换 | 拥有 control client 状态 |
-| `TmuxRuntime` | 进程内 tmux client、attach/reconcile 锁 | UI 行持久化 |
-| `BufferService` | Buffer registry、ring、runtime、read/write/resize | Pane 布局 |
-| `LinkService` | Link registry 和连接生命周期 API | Session 事务 |
-| `UiProjection` | Window/Pane CRUD、关联、几何和 orphan 处理 | 字节和连接 |
-| `Daemon` | 长期 transport/control client、Buffer 内存、IPC | `state.json` 元数据 |
-| `infra` | PTY、ConPTY、SSH、串口、tmux 协议、文件路径 | Session 业务语义 |
+| L0 平台抽象 | PTY/ConPTY、子进程、SSH 传输、尺寸原语 | tmux 协议、布局 |
+| L1 域/连接 | Connection 抽象、PaneHandle 工厂/路由、tmux 控制协议 | VT 解析、布局几何 |
+| L2 终端核心 | 字节 → 网格、VT 状态机、脏区事件 | 连接类型、布局 |
+| L3 组合窗格树 | 本地分屏树 + tmux 镜像容器、两级布局与焦点 | I/O、协议、渲染 |
+| L4 渲染 | 网格/布局 → 像素、分隔条、字形缓存 | 持有 PaneHandle、协议 |
+| L5 应用/协调 | DomainRegistry、焦点、快捷键、配置、生命周期编排 | 协议/VT/几何计算 |
 
-## 5. Backend 语义
+横切设施（事件总线、焦点管理器、生命周期管理器）由 L5 持有并注入，不构成独立层。
 
-### RawBackend
+## 5. 三种 Domain 语义
 
-```text
-Link A (shell)  -> Buffer A
-Link B (serial) -> Buffer B
-Link C (ssh)    -> Buffer C
-```
+### LocalDomain（1:1）
 
-- 一个 Session 可以有 1..N 个 Link。
-- 每个 Link 产生一个独立 Buffer。
-- 多个 Pane 可以显示同一个 Buffer。
-- 删除 Pane 不删除 Buffer；删除 Buffer 不删除 Link。
+`spawn_pane` 调 L0 `PtyTransport::spawn` 启动 Shell，返回唯一 PaneHandle。输入直写
+PTY，输出即 PTY 读流，resize 直调 PTY 尺寸。
 
-### TmuxBackend
+### RemoteSshDomain（1:1）
 
-```text
-one Control Link
-  %output %0 -> Buffer for tmux pane %0
-  %output %1 -> Buffer for tmux pane %1
-  %window-add/%layout-change/%exit -> BackendEvent
-```
+`spawn_pane` 建立 SSH 连接并申请 PTY channel，返回唯一 PaneHandle。输入输出直通
+channel，resize 转成 `window-change` 请求。
 
-- 一个 tmux Session 恰好有一个 Link。
-- `%N` 是稳定路由键，不是窗口索引。
-- tmux 是结构和 pane 生命周期的权威来源。
-- `BackendEvent` 被投影为 Window/Pane 行，不直接持有 UI。
+### TmuxDomain（1:N）
+
+唯一 Connection 是运行 `tmux -CC attach` 的本地 PTY。常驻 reader 解析控制协议：
+`%output %id` 按 pane-id 路由到对应 `output_stream`；结构通知更新内部
+pane_registry 并广播给 L3；输入为 `send-keys -t %id -H <hex>`；`%layout-change`
+解析为 `TmuxLayoutTree` 交给容器持有。
 
 ## 6. 必须保持的不变量
 
-1. Pane 不保存 Link、transport 或 tmux handle；它只通过 `buffer_id` 引用字节。
-2. Buffer 的 `origin` 只能是 `Link { link_id }` 或 `Tmux { link_id, pane_handle }`。
-3. Window 和 Pane 必须属于同一个 Session。
-4. Raw Session 创建时至少有一个 Link。
-5. Tmux Session 创建时自动创建且只创建一个 control Link。
-6. 删除 Pane 只删除 UI；删除 Buffer 才结束 Buffer 的生命周期。
-7. 删除 control Link 必须经由 `session kill` 或 `session detach`。
-8. daemon 不读取也不写入 `state.json`；元数据由 CLI 持有。
-9. service 不能依赖 daemon；只能依赖 `DaemonPort` 抽象。
-10. UI 的 Window/Pane 行可能滞后于 tmux，下一次结构刷新或事件必须收敛。
+1. 依赖严格单向 L5 → L4 → L3 → L2 → L1 → L0，下层不感知上层。
+2. L3 只认识 `PaneHandle`，不出现 SSH/tmux 分支。
+3. `TmuxContainer` 的内部 pane 只存在于私有 `panes` 映射，不出现在本地 `Node` 枚举。
+4. 两套分隔条的几何边界 = 容器整体矩形，互不越界。
+5. 尺寸只对容器整体对话；本地不直接对容器内单个 pane 发 resize。
+6. `%output` 解码后原样直送 L2，不经 tmux 字符渲染，保证字节保真。
+7. 每个 PaneHandle 绑定独立 `TerminalCore`，状态互不共享。
+8. 焦点两级：本地焦点遍历本地树；容器内焦点由 `active_pane` 与
+   `%window-pane-changed` 驱动。
 
 ## 7. 关键场景
 
-### 场景 A：创建 PowerShell Session
+### 输出路径
 
 ```mermaid
 sequenceDiagram
-    actor U as 用户
-    participant C as CLI
-    participant S as SessionService
-    participant L as LinkService
-    participant B as BufferService
-    participant UI as UiProjection
-    participant D as Daemon
-    participant P as PowerShell/ConPTY
+    participant IO as L0 传输
+    participant D as L1 Domain
+    participant PH as PaneHandle
+    participant TC as L2 TerminalCore
+    participant L3 as L3 布局树
+    participant L4 as L4 渲染
 
-    U->>C: session new ps --link shell:///.../powershell.exe
-    C->>S: create raw session
-    S->>L: create Link
-    L->>D: create transport
-    D->>P: spawn through ConPTY
-    S->>B: create independent Buffer
-    S->>UI: create initial Window/Pane
-    S->>D: attach Buffer to Link
-    C-->>U: session/link/buffer/window/pane ids
+    IO->>D: 字节（PTY/SSH/tmux 控制流）
+    D->>PH: 按 pane-id 路由（1:1 域直通）
+    PH->>TC: output_stream
+    TC->>L3: 网格脏区事件
+    L3->>L4: 叶子矩形 + 脏区
+    L4-->>L4: 重绘该叶子
 ```
 
-### 场景 B：读取 Pane 数据
+### 输入路径
 
 ```mermaid
 sequenceDiagram
-    participant C as CLI
-    participant S as SessionService
-    participant UI as UiProjection
-    participant B as BufferService
-    participant D as Daemon
+    participant U as 用户按键
+    participant L3 as L3 布局树
+    participant TC as TmuxContainer
+    participant PH as PaneHandle
+    participant D as L1 Domain
+    participant IO as L0 传输
 
-    C->>S: data read --pane P
-    S->>UI: resolve Pane -> buffer_id
-    S->>B: ensure runtime
-    B->>D: read(buffer_id)
-    D-->>B: bytes snapshot
-    B-->>C: bytes (non-destructive)
+    U->>L3: 解析本地焦点
+    alt 本地叶子
+        L3->>PH: send_input
+    else tmux 镜像
+        L3->>TC: 取 active_pane
+        TC->>PH: send_input
+    end
+    PH->>D: 域内封装
+    D->>IO: PTY 直写 / SSH channel / send-keys -t %id
 ```
 
-### 场景 C：tmux 结构变化
+### 布局变更
 
 ```mermaid
 sequenceDiagram
     participant T as tmux server
-    participant TC as TmuxControl
-    participant BE as BackendRuntime
-    participant S as SessionService
-    participant UI as UiProjection
+    participant D as TmuxDomain
+    participant L3 as L3 布局树
+    participant L4 as L4 渲染
 
-    T-->>TC: %window-add @N
-    TC-->>BE: TmuxEvent
-    BE-->>S: BackendEvent::WindowChanged
-    S->>UI: refresh/project window and panes
+    T-->>D: %layout-change
+    D->>D: 解析 layout string -> TmuxLayoutTree
+    D->>L3: 更新容器 layout_tree
+    L3->>L4: 容器内 pane 新矩形
+```
+
+### 生命周期（本地关闭叶子）
+
+```mermaid
+sequenceDiagram
+    participant U as 用户关闭
+    participant L3 as L3 布局树
+    participant D as L1 Domain
+    participant L5 as L5 协调
+
+    U->>L3: 关闭叶子
+    L3->>D: kill/detach（tmux 域）/ 关闭连接（本地、SSH）
+    D-->>L3: on_closed
+    L3->>L3: 移除节点并收缩
+    L3->>L5: 回收无 PaneHandle 的 Domain
 ```
 
 ## 8. 非目标
 
-- Pane 不是字节容器，也不是 Link 的所有者。
-- Link 不保存 Window/Pane 结构。
-- daemon 不是 UI 或 Session 元数据的权威来源。
-- service 不直接依赖 daemon 实现。
-- xscore 不实现自己的终端渲染器；UI 行目前是 headless 模型。
+- 不讨论渲染后端选型（Metal/Vulkan 等）。
+- 不讨论配置格式与插件系统。
+- 不做运行时校验来补“tmux pane 不与本地窗格并排”——该约束由节点类型保证。
+- 后端（L0–L2）不实现布局与渲染。

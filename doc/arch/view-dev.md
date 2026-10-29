@@ -1,191 +1,145 @@
 # 开发视图
 
-本文描述当前代码的模块划分、依赖方向、构建方式和扩展点。逻辑职责见[逻辑视图](./view-logic.md)。
+本文描述目标模块划分、依赖方向、构建方式与扩展点。逻辑职责见
+[逻辑视图](./view-logic.md)，权威模型见 [terminal-emulator.md](./terminal-emulator.md)。
 
-## 1. 仓库与构建单元
+## 1. 范围与构建单元
 
-当前 workspace 只有一个库 crate 和一个 CLI binary：
+本项目只实现后端层 L0–L2；前端层 L3–L5 用模拟/桩运行以验证后端。目标 workspace
+划分为两个 crate：
 
 ```text
 Cargo.toml
-crates/xscore/
-  Cargo.toml
-  src/
-    lib.rs
-    main.rs
-  tests/
-    cli_smoke.rs
-    data_smoke.rs
-    tmux_control_smoke.rs
-    windows_smoke.rs
+crates/
+  emulator/              # 后端库（L0–L2），本项目实现
+    src/
+      platform/          # L0
+      domain/            # L1
+      term/              # L2
+      event.rs
+      error.rs
+      lib.rs
+  emulator-frontend/     # 前端模拟（L3–L5），桩实现
+    src/
+      tree.rs            # L3 Node / TmuxContainer
+      render.rs          # L4 桩渲染（文本/帧输出）
+      app.rs             # L5 协调
+      main.rs            # 模拟驱动：喂字节、打印网格
 ```
 
-- `lib.rs` 暴露 `app`、`daemon`、`service`、`ui`、`infra` 模块。
-- `main.rs` 解析 CLI、装配 `SessionService` 和 `DaemonClient`，然后分发命令。
-- Lua、MCP 或独立渲染器尚未接入。
-- 当前发布产物是一个 `xscore`/`xscore.exe` 可执行文件。
+当前 `crates/xscore`（CLI + daemon）是旧架构的前身，不属于本视图描述的目标结构；
+新后端以独立 crate 构建，迁移方式不在本视图范围内。
 
-## 2. 源码结构
+## 2. 后端模块结构（L0–L2）
 
 ```text
-crates/xscore/src/
-  app/
-    cli/
-      buffer.rs
-      daemon.rs
-      data.rs
-      link.rs
-      pane.rs
-      session.rs
-      state.rs
-      window.rs
-    mcp/
-      mod.rs                 future adapter, not implemented
+crates/emulator/src/
+  platform/                  # L0 平台抽象
+    mod.rs                   # PtyTransport / SshTransport 接口
+    pty.rs                   # Unix /dev/ptmx，Windows ConPTY
+    process.rs               # 子进程 + PTY 绑定 + TIOCSWINSZ/SIGWINCH
+    ssh.rs                   # TCP、认证、channel、pty-req/window-change
+    size.rs                  # 尺寸原语
 
-  ui/
-    event.rs                 UiEvent
-    pane.rs                  PaneId, PaneInfo
-    pane_registry.rs
-    window.rs                WindowId, WindowInfo, WindowBackend, Window
-    window_registry.rs
-
-  daemon/
-    client.rs                requests, auto-start, DaemonTransport
-    ipc.rs                   Unix socket / Windows named pipe
-    port.rs                  DaemonPort implementation
-    protocol.rs              wire messages
-    server.rs                daemon state, pumps and request handling
-
-  service/
-    backend/
-      daemon_port.rs         outbound runtime port
-      mod.rs                 BackendRuntime, BackendEvent
-      raw.rs                 raw Link -> Buffer routing
-      tmux.rs                %N -> Buffer and tmux event translation
-      tmux_model.rs          tmux structure DTOs
-      tmux_runtime.rs        in-process tmux clients and locks
-    buffer_service/
-      mod.rs                 BufferService API and data-plane methods
-      store.rs               Buffer model + registry
-      ring.rs                64 KiB non-destructive ring
-      runtime.rs             Local/Daemon/Control runtime dispatch
-    link_service/
-      mod.rs                 LinkService API
-      store.rs               Link model, runtime row and registry
-    session_service/
-      service.rs             Session lifecycle and composition
-      model.rs               Session model
-      store.rs               Session row + registry
-      link_methods.rs
-      tmux_methods.rs
-      tmux_reconcile_methods.rs
-      ui_methods.rs
-      data_methods.rs
-      persistence_methods.rs
-    ui_projection/
-      mod.rs                 Window/Pane use cases
-    persistence/
-      snapshot.rs            serialized state model
-      store.rs               save/load/parse
-      migrate.rs             schema migrations
-
-  infra/
-    link/
-      address.rs
-      config.rs
-      pty.rs                 PTY/ConPTY
-      ssh.rs                 russh transport
-      serial.rs
-      factory.rs
+  domain/                    # L1 域/连接抽象
+    mod.rs                   # Domain / PaneHandle trait、PaneKind
+    registry.rs              # DomainRegistry
+    local.rs                 # LocalDomain
+    ssh.rs                   # RemoteSshDomain
     tmux/
-      control.rs             tmux -CC process and protocol reader
-      protocol.rs
-      format.rs
-      model.rs
-    url/
-    config/
-    util/
+      mod.rs                 # TmuxDomain（1:N）
+      protocol.rs            # %output/%layout-change/%begin/%end 解析
+      layout.rs              # layout string -> TmuxLayoutTree
 
+  term/                      # L2 终端模拟核心
+    mod.rs                   # TerminalCore trait、GridSnapshot
+    vte.rs                   # VT100/xterm 状态机
+    grid.rs                  # 网格缓冲区、光标、滚动区
+
+  event.rs                   # 层间单向事件
   error.rs
-  macros.rs
+  lib.rs
 ```
 
 ## 3. 模块依赖
 
 ```mermaid
 graph TD
-    APP["app/cli"]
-    DAEMON["daemon"]
-    SERVICE["service"]
-    UI["ui"]
-    INFRA["infra"]
+    L5["L5 应用/协调"]
+    L4["L4 渲染"]
+    L3["L3 组合窗格树"]
+    L2["L2 终端核心"]
+    L1["L1 域/连接"]
+    L0["L0 平台抽象"]
 
-    APP --> DAEMON
-    APP --> SERVICE
-    DAEMON --> SERVICE
-    DAEMON --> INFRA
-    SERVICE --> UI
-    SERVICE --> INFRA
-    UI --> SERVICE
+    L5 --> L4
+    L5 --> L3
+    L4 --> L3
+    L4 --> L2
+    L3 --> L2
+    L3 --> L1
+    L1 --> L0
 ```
 
 依赖说明：
 
-- `app` 是组合根，负责 CLI、路径解析和依赖注入。
-- `daemon` 实现 service 定义的 `DaemonPort`，反向依赖 service 的 ID/DTO。
-- `service` 不知道 `daemon` 实现，只依赖 `DaemonPort`。
-- `infra` 不依赖 app、service、daemon 或 UI。
-- `ui` 当前通过 `BufferId`/`SessionId` 引用 service 模型，因此 `ui <-> service` 在模型层是有意存在的窄循环。该循环不得扩展到 runtime 或 I/O。
+- L0 只依赖操作系统原语，不依赖上层任何模块。
+- L1 只依赖 L0；tmux 控制协议解析封装在 `TmuxDomain` 内部。
+- L2 是纯逻辑层，不依赖 L0/L1；它消费经上层注入的字节流与 `GridSnapshot`。
+- L3 组合 L1 的 `PaneHandle` 与 L2 的 `TerminalCore`，不感知具体连接类型。
+- L4 只读 L2 的 `GridSnapshot` 与 L3 的布局树，不持有 `PaneHandle`。
+- L5 是组合根，持有 `DomainRegistry`、焦点与生命周期管理器。
 
 ### 依赖矩阵
 
-| 来源 | 允许依赖 | 禁止依赖 |
+| 层 | 允许依赖 | 禁止依赖 |
 |---|---|---|
-| app | service、daemon、infra 入口 | 具体 runtime 内部状态 |
-| daemon | service 的模型/端口、infra | SessionService 业务编排 |
-| service | ui 的投影 API、infra 的适配器接口 | daemon 实现 |
-| ui | service 的 ID/DTO | PTY、SSH、tmux、daemon |
-| infra | 本层模块、crate error | service 业务逻辑、daemon、app |
+| L0 | OS 原语 | L1–L5 |
+| L1 | L0 | L2–L5 |
+| L2 | 无（纯逻辑） | L0/L1、L3–L5 |
+| L3 | L1（PaneHandle）、L2（TerminalCore） | L0、L4/L5 |
+| L4 | L2（snapshot）、L3（布局树） | L0/L1、L5 |
+| L5 | L3/L4、L1（DomainRegistry） | 直接触达 L0/L2 内部状态 |
 
-## 4. Service 内部职责
+## 4. 分层职责
 
-| 模块 | 事务边界 | 持久化 | Runtime |
+| 层 | 事务边界 | 持久化 | 运行时 |
 |---|---|---|---|
-| `SessionService` | Session 生命周期和跨 Service 用例 | 通过 persistence 保存快照 | 协调 backend/tmux |
-| `BufferService` | Buffer 数据和 runtime | Buffer 元数据 | ring、Local/Daemon/Control |
-| `LinkService` | Link 生命周期 API | Link 元数据 | transport handle |
-| `UiProjection` | Window/Pane 行 | 行由 SessionService 保存 | 无字节 runtime |
-| `BackendRuntime` | 无持久化 | 无 | Raw/Tmux 路由 |
-| `TmuxRuntime` | 无持久化 | 无 | control client 和锁 |
+| L0 | 单次 I/O 原语 | 无 | reader/writer 线程或协程 |
+| L1 | Connection 与 PaneHandle 生命周期 | 无 | 每连接 reader、tmux 常驻 reader |
+| L2 | 单 pane 网格状态 | 无 | feed 增量解析 |
+| L3 | 布局树与容器生命周期 | 无（前端模拟） | 布局计算、事件转发 |
+| L4 | 帧渲染 | 无 | 脏区重绘 |
+| L5 | 全局编排 | 由前端决定（当前模拟） | 主事件循环 |
 
 ## 5. 扩展点
 
-### 新连接类型
+### 新连接类型（新 Domain）
 
-在 `infra/link/` 增加具体 `Transport`，并在 factory/URL parser 中注册。不要修改 Pane。
+在 `domain/` 增加一个 `Domain` 实现：维护自己的 `Connection` 与 pane 注册表，向
+上层暴露统一的 `PaneHandle`。不修改 L2/L3。
 
-### 新 Backend
+### 新传输后端（L0）
 
-1. 在 `service/backend/` 增加 backend 路由类型。
-2. 扩展 `SessionBackend` 和 `BackendRuntime`。
-3. 将 backend 输出转换为 Buffer 写入或 `BackendEvent`。
-4. 在 SessionService 只增加用例编排，不把协议细节写回 UI。
+实现 `PtyTransport` / `SshTransport` 同形接口，并在 `platform` 注册。上层不感知。
 
-### 新 Daemon 实现
+### 新渲染后端（L4）
 
-实现 `service::backend::DaemonPort`，在 app 组合根注入。service 不需要知道 IPC 是 socket、pipe 还是未来的 RPC。
+替换 `emulator-frontend` 的桩渲染：只消费 `GridSnapshot` 与布局树，不得持有
+`PaneHandle`、不得打开连接。
 
-### 新 UI
+### 从模拟前端升级到真实前端
 
-只消费 `WindowInfo`、`PaneInfo`、`UiEvent` 和 Buffer ID。UI 不得打开 Link，也不得读取 transport。
+保留 `emulator`（L0–L2）不变，替换 `emulator-frontend` 为真实渲染与窗口实现；L3
+的节点类型与 `TmuxContainer` 契约保持不变。
 
 ## 6. 数据模型规则
 
-- 每个模型跟随拥有它的模块，不设统一 `domain/` 目录。
-- ID 类型通过 `macros.rs` 的 `uuid_id!` 在所有者模块定义。
-- Persistence snapshot 只引用模型，不复制运行态 bridge/runtime。
-- `BufferOrigin` 是数据源事实，不能被 Pane 字段替代。
-- tmux handle 只出现在 WindowBackend、BufferOrigin 和 DTO 中。
+- L1 对外只暴露 `PaneHandle` 与 `PaneKind`，连接基数的差异封装在域内路由表。
+- L2 每个 PaneHandle 独立实例，状态不跨 pane 共享。
+- `TmuxContainer` 的内部 pane 不出现在本地 `Node` 枚举，类型上不可表达混排。
+- `%output` 解码后的原始字节不经任何字符渲染，直接进入对应 pane 的 L2 实例。
+- 尺寸只通过容器整体同步，不对容器内单个 pane 发 resize。
 
 ## 7. 构建与测试
 
@@ -200,17 +154,16 @@ cargo fmt --all -- --check
 
 | 测试 | 目的 | 平台 |
 |---|---|---|
-| unit tests | 协议、解析、state、Buffer、服务路由 | 所有平台 |
-| `windows_smoke` | named pipe、ConPTY、PowerShell、CLI rollback | Windows |
-| `cli_smoke` | 多进程 CLI、daemon、断线恢复 | Unix |
-| `data_smoke` | in-process raw/tmux 数据路径 | Unix |
-| `tmux_control_smoke` | 真 tmux 控制模式，默认 ignored | Unix |
+| L0 unit | PTY/ConPTY、子进程、SSH channel、尺寸原语 | 按平台 |
+| L1 unit | 路由表、tmux 控制协议解析、layout string | 所有平台 |
+| L2 unit | VT 状态机、网格/滚动/脏区 | 所有平台 |
+| 前端模拟 smoke | 喂字节 → 网格 → 桩渲染输出 | 所有平台 |
+| tmux 集成（ignored 默认） | 真 `tmux -CC attach` 控制模式 | Unix/WSL |
 
 ## 8. 开发约束
 
-- 新代码优先增加在拥有该状态的 Service 内。
-- 不新增 `XXXBridge` 或仅做转发的 manager。
-- 不把 daemon 实现重新放回 service。
-- 不让 UI 依赖进程和连接。
-- tmux/reconciliation 只通过事件或明确的结构快照更新 UI。
-- 所有跨 Session 的关联必须在修改前校验，不能做隐式转移。
+- 不新增跨层直连：上层只通过接口访问下层。
+- 不在 L1 之外解析 tmux 控制协议，不在 L2 内感知连接类型。
+- 不把布局几何放进 L0/L1；不把 I/O 放进 L3/L4。
+- 不新增仅做转发的 manager/桥接类。
+- tmux 结构变更只通过事件或明确的结构快照驱动 L3。

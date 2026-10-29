@@ -1,164 +1,144 @@
 # 运行视图
 
-本文描述进程、线程/异步任务、数据流、并发控制和故障恢复。部署拓扑见[部署视图](./view-deploy.md)。
+本文描述进程、异步任务、数据流、并发控制与故障恢复。部署拓扑见
+[部署视图](./view-deploy.md)，权威模型见 [terminal-emulator.md](./terminal-emulator.md)。
 
 ## 1. 运行单元
 
+后端（L0–L2）以库形式运行在宿主进程中；前端（L3–L5，当前模拟）在同一进程内作
+为驱动，负责注入事件与拉取网格快照。
+
 ```mermaid
 flowchart LR
-    subgraph CLI["CLI process (short-lived)"]
-        P["clap parser"]
-        SS["SessionService"]
-        DC["DaemonClient / DaemonPort"]
+    subgraph APP["宿主进程（前端模拟 + 后端库）"]
+        L5["L5 协调 / DomainRegistry / 焦点"]
+        L3["L3 布局树"]
+        L2["L2 每 pane TerminalCore"]
+        L1["L1 Domain / PaneHandle 路由"]
+        L0["L0 platform"]
     end
 
-    subgraph DAEMON["daemon process (resident)"]
-        IPC["IPC accept loop"]
-        DS["DaemonState"]
-        BP["Buffer pumps"]
-        TC["tmux control slots"]
+    subgraph EXT["外部运行时"]
+        PTY["本地 Shell PTY/ConPTY"]
+        SSH["远端 SSH channel"]
+        TMUXPTY["tmux -CC attach 控制 PTY"]
+        TMUX["tmux server"]
     end
 
-    subgraph EXTERNAL["external runtimes"]
-        SHELL["PTY/ConPTY child"]
-        SSH["SSH connection"]
-        SERIAL["serial device"]
-        TMUX["local/remote tmux server"]
-    end
-
-    P --> SS
-    SS --> DC
-    DC <-->|length-prefixed JSON| IPC
-    IPC --> DS
-    DS --> BP
-    DS --> TC
-    BP <--> SHELL
-    BP <--> SSH
-    BP <--> SERIAL
-    TC <--> TMUX
+    L5 --> L3 --> L2
+    L3 --> L1 --> L0
+    L0 <--> PTY
+    L0 <--> SSH
+    L0 <--> TMUXPTY
+    TMUXPTY <--> TMUX
 ```
 
-### CLI 进程
+### 后端
 
-- 每条命令通常启动一次、执行一次并退出。
-- 使用 Tokio runtime；命令解析由 clap 完成。
-- 从 `state.json` hydrate 元数据，然后构造 `SessionService`。
-- 正常 CLI 路径注入 `DaemonClient`，使 transport 和 Buffer 不随 CLI 退出。
-- `daemon serve` 和 `state migrate` 不 hydrate 状态。
+- 每个 `Connection` 有一个 reader（PTY reader、SSH channel reader，或 tmux 控制
+  流 reader），把字节交给 L1 路由。
+- 1:1 域直通；TmuxDomain 的常驻 reader 按 `%pane-id` 查表路由到对应
+  `output_stream`。
+- 每个 PaneHandle 的 `output_stream` 喂给该 pane 独立的 L2 `TerminalCore.feed`。
 
-### daemon 进程
+### 前端模拟
 
-- 每个配置目录/用户最多一个实例。
-- 启动前通过 lock 文件取得单实例权。
-- 拥有所有 native transport、tmux control client 和 64 KiB Buffer 内存。
-- 不读取 `state.json`，不拥有 Session/Window/Pane 元数据。
-- Unix 使用 Unix domain socket；Windows 使用由配置路径派生的 named pipe。
-- 自动启动版本带 `--idle-exit`，空闲 5 秒且无 Link/control slot 时退出。
-- 用户显式运行的前台 `daemon serve` 默认持续运行，直到 Stop/Ctrl-C/SIGTERM。
+- 单进程持有 L3 布局树与 L5 协调逻辑。
+- 模拟驱动把脚本化的输入写进焦点 PaneHandle，并周期拉取 `GridSnapshot` 输出。
+- 不启动真实窗口系统或 GPU 渲染。
 
-## 2. 主要请求的数据流
+## 2. 主要数据流
 
-### Native Link 写入
+### 输出路径
 
 ```mermaid
 sequenceDiagram
-    participant CLI
-    participant SS as SessionService
-    participant BS as BufferService
-    participant DC as DaemonPort
-    participant DM as daemon
-    participant T as Transport
-    participant R as RingBuffer
+    participant IO as L0 传输
+    participant D as L1 Domain
+    participant PH as PaneHandle
+    participant TC as L2 TerminalCore
+    participant L3 as L3 布局树
+    participant L4 as L4 渲染
 
-    CLI->>SS: data write --pane P
-    SS->>SS: Pane -> buffer_id
-    SS->>BS: write(buffer_id, data)
-    BS->>DC: write(buffer_id, data)
-    DC->>DM: IPC Write
-    DM->>T: transport.write(data)
-    T-->>DM: input output/echo
-    DM->>R: pump read -> push bytes
-    CLI->>SS: data read --pane P
-    SS->>BS: read(buffer_id)
-    BS->>DC: read(buffer_id)
-    DC->>DM: IPC Read
-    DM-->>BS: non-destructive ring snapshot
+    IO->>D: 字节（PTY / SSH / tmux 控制流）
+    D->>D: tmux 域按 %pane-id 查表，其余直通
+    D->>PH: output_stream
+    PH->>TC: feed(bytes)
+    TC->>L3: 网格脏区事件
+    L3->>L4: 叶子矩形 + 脏区
+    L4-->>L4: 合并重绘
 ```
 
-### Tmux `%output` 路径
+### 输入路径
 
-1. daemon 为 tmux Session 持有一个 `tmux -CC attach` control client。
-2. `TmuxControl` reader 解析 `%output %N <escaped bytes>`。
-3. daemon 将 `%N` 映射到 Buffer，并把解码后的字节追加到 ring。
-4. CLI 的 `data read` 通过 `DaemonPort` 读取同一个 Buffer 快照。
-5. 结构通知通过 `TmuxEvent` 转为 `BackendEvent`，再投影到 Window/Pane 行。
+```mermaid
+sequenceDiagram
+    participant L5 as L5 焦点解析
+    participant L3 as L3 布局树
+    participant PH as PaneHandle
+    participant D as L1 Domain
+    participant IO as L0 传输
 
-`%output` 在 attach 之后才存在；tmux 不重放历史，因此新 attach 的 Pane 从当前流开始。
+    L5->>L3: 当前聚焦 Node
+    alt 本地叶子
+        L3->>PH: send_input
+    else tmux 镜像
+        L3->>L3: 取容器 active_pane
+        L3->>PH: send_input
+    end
+    PH->>D: 域内封装
+    D->>IO: PTY 直写 / SSH channel / send-keys -t %id -H <hex>
+```
 
 ## 3. 并发模型
 
-### CLI
+- 每个 `Connection` 一个 reader 任务；读写独立，避免阻塞读饿死写。
+- TmuxDomain 常驻 reader 解析协议，结构通知经事件总线单向流向 L3。
+- 每个 PaneHandle 一个 L2 实例，各自维护脏区，互不共享状态。
+- L3 的布局变更与渲染读取通过快照/事件同步，渲染不直接持锁长跑。
 
-- Tokio 主任务执行一个命令。
-- state 保存通过 blocking task 写临时文件并原子 rename。
-- in-process 模式下，`LocalRuntime` 为每个 Buffer 启动读取任务。
-- in-process tmux 模式由 `TmuxRuntime` 保存 control client，并为每个 Pane 输出启动订阅任务。
+### 主要同步点
 
-### daemon
-
-- 主循环接受 IPC 连接；每个连接由独立 Tokio task 处理。
-- 每个 native Link 有独立读取 pump，将数据追加到对应 Buffer。
-- 每个 tmux Pane 有独立输出订阅任务。
-- `tmux_open`、control slot、Buffer slot 和 idle 状态由各自 Mutex 串行化。
-- `TmuxControl` 内部有 reader/writer 线程，并通过 channel 与 Tokio 任务通信。
-- PTY/ConPTY 的读写由 `portable-pty` 的 reader/writer 完成。
-
-### 主要锁
-
-| 锁 | 保护对象 |
+| 同步点 | 保护对象 |
 |---|---|
-| `SessionService.backends` | SessionId -> BackendRuntime |
-| `TmuxRuntime.attach` | 同一 Session 不重复 attach |
-| `TmuxRuntime.reconcile` | 结构事件与查询不并发写重复行 |
-| `BufferService.runtimes` | BufferId -> runtime |
-| `BufferService.memory` | in-process BufferId -> ring |
-| daemon `buffers` | native BufferSlot 和 pump |
-| daemon `tmux` | SessionId -> tmux ControlSlot |
+| `DomainRegistry` | domain_id → Domain 实例 |
+| TmuxDomain `pane_registry` | `%pane-id` → PaneHandle / output 路由 |
+| `TmuxContainer.panes` | 容器内 pane 映射（私有，不暴露给本地树） |
+| `TmuxContainer.layout_tree` | `%layout-change` 驱动的内层布局 |
+| `TmuxContainer.active_pane` | `%window-pane-changed` 驱动的容器内焦点 |
+| L3 本地树 | 节点增删、ratio 更新与收缩 |
 
 ## 4. 生命周期
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Stopped
-    Stopped --> Starting: first request / daemon serve
-    Starting --> Running: bind IPC + acquire lock
-    Running --> Running: create/attach/read/write/resize
-    Running --> Draining: Stop / SIGINT / SIGTERM
-    Running --> Draining: idle timeout (auto-start only)
-    Draining --> Stopped: close transports/control clients
+    [*] --> Connecting: spawn_pane / attach_pane
+    Connecting --> Live: 连接建立
+    Live --> Live: 输入/输出/resize
+    Live --> Closing: 本地关闭
+    Live --> Closing: 远端断开
+    Closing --> Closed: on_closed
+    Closed --> [*]
 ```
 
-- `daemon stop` 关闭所有 transport/control client，清空 Buffer 内存并删除 IPC 端点。
-- `link del` 只关闭一个连接，不删除历史 Buffer。
-- `session kill` 是逻辑模型的唯一级联删除。
-- `session detach` 丢弃 xscore 元数据并停止管理；外部 tmux server 继续运行。
+- 本地关闭叶子：L1 发 `kill-pane`/`kill-window`（tmux）或关闭连接（本地/SSH）。
+- 远端关闭 pane：`%window-close`/`%layout-change` 触发对应 PaneHandle 的
+  `on_closed`，L3 收缩布局或整体移除容器。
+- 域在其下所有 PaneHandle 均关闭后由 L5 回收。
 
 ## 5. 故障与恢复
 
-| 故障 | 当前行为 |
+| 故障 | 行为 |
 |---|---|
-| daemon 未运行 | `DaemonClient` 自动拉起；连接失败转为 `Error::Daemon` |
-| daemon 重启 | transport 和 Buffer 内存丢失；state.json 保留；可重建 Link transport |
-| shell 子进程退出 | native pump 结束，已收到的 Buffer 历史保留 |
-| SSH 断开 | native transport/pump 失败；连接状态显示为未连接 |
-| tmux control client `%exit` | slot 标记非 alive；Buffer 历史保留；重新 open 后恢复结构 |
-| tmux server 消失 | `session attach` 失败；已有 xscore 行可能在后续刷新中清理 |
-| 并发 CLI 写 state | 当前策略是 last-writer-wins |
+| 本地 Shell 子进程退出 | 对应 PaneHandle `on_closed`；已收到的网格历史保留 |
+| SSH 连接断开 | 对应 PaneHandle `on_closed`，连接状态标记为断开 |
+| tmux control client `%exit` | 容器整体失效；tmux server 本身可继续运行，重 attach 恢复 |
+| tmux server 消失 | 容器内 pane 全部 `on_closed`，本地树移除容器 |
+| 尺寸竞争 | 本地只对容器整体发 resize，避免对同一 pane 的竞争写 |
 
 ## 6. 数据时效性
 
-- tmux control stream 是实时字节流，不是 `capture-pane` 快照。
-- Pane/Buffer read 是非破坏性的 ring copy。
-- daemon 重启会丢失内存 Buffer。
-- tmux Pane 在订阅前产生的输出不可恢复。
-- Window/Pane 结构按事件刷新；CLI 列表操作也会主动重新枚举 tmux。
+- tmux `%output` 是实时字节流，不重放历史；订阅前的输出不可恢复。
+- L2 网格是内存状态，不承诺持久化。
+- `%output` 解码后的原始字节直达 L2，保证 Sixel/OSC 8 等序列保真。
+- L4 通过 `GridSnapshot` 拉取或订阅脏区，不直接触碰 I/O。
