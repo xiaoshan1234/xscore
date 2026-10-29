@@ -1,6 +1,8 @@
 //! CLI 模式前端（L3–L5 模拟）：一个进程内维护 Domain 与 pane，提供操作与数据
 //! 读取。
 
+mod layout;
+
 use anyhow::{anyhow, Context, Result};
 use emulator::domain::{
     Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind, RemoteSshDomain, TmuxDomain,
@@ -15,6 +17,8 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
+use layout::{Direction, Layout};
+
 struct PaneEntry {
     handle: Arc<dyn PaneHandle>,
     term: Arc<Mutex<VtTerm>>,
@@ -22,12 +26,14 @@ struct PaneEntry {
 
 struct App {
     panes: HashMap<PaneId, PaneEntry>,
+    layout: Layout,
 }
 
 impl App {
     fn new() -> Self {
         Self {
             panes: HashMap::new(),
+            layout: Layout::new(),
         }
     }
 
@@ -35,46 +41,45 @@ impl App {
         if words.len() < 2 {
             return Err(anyhow!("usage: shell <program> [args...]"));
         }
+        let id = self
+            .spawn_local(words[1].clone(), words[2..].to_vec())
+            .await?;
+        self.layout.add(id);
+        println!("pane: {id}  kind: local  80x24");
+        Ok(())
+    }
+
+    async fn split(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 3 {
+            return Err(anyhow!("usage: split h|v <program> [args...]"));
+        }
+        let direction = match words[1].as_str() {
+            "h" => Direction::Horizontal,
+            "v" => Direction::Vertical,
+            other => return Err(anyhow!("split direction must be h or v, got {other}")),
+        };
+        let id = self
+            .spawn_local(words[2].clone(), words[3..].to_vec())
+            .await?;
+        self.layout.split_focused(direction, id);
+        println!("pane: {id}  kind: local  80x24");
+        Ok(())
+    }
+
+    async fn spawn_local(&mut self, command: String, args: Vec<String>) -> Result<PaneId> {
         let cols = 80u16;
         let rows = 24u16;
-        // LocalDomain 是 1:1 域：一个连接对应一个 pane。
         let domain = LocalDomain::new();
         let handle = domain
             .spawn_pane(&PaneConfig::Local {
-                command: words[1].clone(),
-                args: words[2..].to_vec(),
+                command,
+                args,
                 cwd: None,
                 cols,
                 rows,
             })
             .await?;
-        let id = self.attach_pane(handle, cols, rows);
-        println!("pane: {id}  kind: local  {cols}x{rows}");
-        Ok(())
-    }
-
-    async fn ssh(&mut self, words: &[String]) -> Result<()> {
-        if words.len() < 2 {
-            return Err(anyhow!("usage: ssh <user@host[:port]> [identity]"));
-        }
-        let (user, host, port) = parse_ssh_target(&words[1])?;
-        let identity = words.get(2).cloned();
-        let cols = 80u16;
-        let rows = 24u16;
-        let domain = RemoteSshDomain::new();
-        let handle = domain
-            .spawn_pane(&PaneConfig::Ssh {
-                host,
-                port,
-                user,
-                identity,
-                cols,
-                rows,
-            })
-            .await?;
-        let id = self.attach_pane(handle, cols, rows);
-        println!("pane: {id}  kind: ssh  {cols}x{rows}");
-        Ok(())
+        Ok(self.register_pane(handle, cols, rows))
     }
 
     async fn tmux(&mut self, words: &[String]) -> Result<()> {
@@ -119,7 +124,31 @@ impl App {
         Ok(())
     }
 
-    fn attach_pane(&mut self, handle: Arc<dyn PaneHandle>, cols: u16, rows: u16) -> PaneId {
+    async fn ssh(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 2 {
+            return Err(anyhow!("usage: ssh <user@host[:port]> [identity]"));
+        }
+        let (user, host, port) = parse_ssh_target(&words[1])?;
+        let identity = words.get(2).cloned();
+        let cols = 80u16;
+        let rows = 24u16;
+        let domain = RemoteSshDomain::new();
+        let handle = domain
+            .spawn_pane(&PaneConfig::Ssh {
+                host,
+                port,
+                user,
+                identity,
+                cols,
+                rows,
+            })
+            .await?;
+        let id = self.attach_pane(handle, cols, rows);
+        println!("pane: {id}  kind: ssh  {cols}x{rows}");
+        Ok(())
+    }
+
+    fn register_pane(&mut self, handle: Arc<dyn PaneHandle>, cols: u16, rows: u16) -> PaneId {
         let id = handle.id();
         let term = Arc::new(Mutex::new(VtTerm::new(cols, rows)));
         let mut rx = handle.subscribe();
@@ -130,6 +159,12 @@ impl App {
             }
         });
         self.panes.insert(id, PaneEntry { handle, term });
+        id
+    }
+
+    fn attach_pane(&mut self, handle: Arc<dyn PaneHandle>, cols: u16, rows: u16) -> PaneId {
+        let id = self.register_pane(handle, cols, rows);
+        self.layout.add(id);
         id
     }
 
@@ -192,6 +227,26 @@ impl App {
         }
     }
 
+    fn focus(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 2 {
+            return Err(anyhow!("usage: focus <pane-id>"));
+        }
+        let id = PaneId::new(words[1].parse().context("pane id")?);
+        if !self.panes.contains_key(&id) {
+            return Err(anyhow!("pane not found: {id}"));
+        }
+        self.layout.focus(id);
+        println!("focused: {id}");
+        Ok(())
+    }
+
+    fn layout_cmd(&self) {
+        println!("{}", self.layout.render());
+        if let Some(focused) = self.layout.focused() {
+            println!("focused: {focused}");
+        }
+    }
+
     fn get_pane(&self, s: &str) -> Result<&PaneEntry> {
         let id = PaneId::new(s.parse().context("pane id")?);
         self.panes
@@ -205,9 +260,12 @@ fn help() {
     println!("  shell <program> [args...]   spawn a local shell pane");
     println!("  ssh <user@host[:port]> [identity]   spawn a remote ssh pane");
     println!("  tmux <session> [-L <socket>]   attach to a tmux session");
+    println!("  split h|v <program> [args...]   split the focused pane");
     println!("  write <pane-id> <text>      send text + newline to the pane");
     println!("  read  <pane-id>             print accumulated output");
     println!("  resize <pane-id> <c> <r>    resize the pane");
+    println!("  focus <pane-id>             move focus");
+    println!("  layout                      print the pane tree");
     println!("  list                        list panes");
     println!("  quit | exit                 leave");
 }
@@ -231,9 +289,12 @@ async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
         "shell" => app.shell(words).await?,
         "ssh" => app.ssh(words).await?,
         "tmux" => app.tmux(words).await?,
+        "split" => app.split(words).await?,
         "write" => app.write(words).await?,
         "read" => app.read(words).await?,
         "resize" => app.resize(words).await?,
+        "focus" => app.focus(words)?,
+        "layout" => app.layout_cmd(),
         "list" => app.list().await,
         "help" => help(),
         "quit" | "exit" => return Ok(true),

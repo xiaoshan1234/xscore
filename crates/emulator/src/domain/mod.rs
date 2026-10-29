@@ -7,6 +7,7 @@ pub mod tmux;
 use crate::platform::Size;
 use crate::Result;
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -21,6 +22,12 @@ pub struct PaneId(u64);
 impl PaneId {
     pub fn new(n: u64) -> Self {
         Self(n)
+    }
+
+    /// 进程内全局唯一的下一个 pane id。
+    pub fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     pub fn as_u64(&self) -> u64 {

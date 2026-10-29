@@ -5,18 +5,15 @@ use crate::platform::ssh::SshConnection;
 use crate::platform::Size;
 use crate::{Error, Result};
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Default)]
-pub struct RemoteSshDomain {
-    next_pane: AtomicU64,
-}
+pub struct RemoteSshDomain;
 
 impl RemoteSshDomain {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -39,7 +36,7 @@ impl Domain for RemoteSshDomain {
             return Err(Error::Invalid("ssh domain requires Ssh pane config".into()));
         };
 
-        let id = PaneId::new(self.next_pane.fetch_add(1, Ordering::Relaxed) + 1);
+        let id = PaneId::next();
         let conn = Arc::new(SshConnection::new(
             user.clone(),
             host.clone(),

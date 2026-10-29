@@ -8,18 +8,15 @@ use crate::platform::tmux::{
 use crate::platform::Size;
 use crate::Result;
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Default)]
-pub struct TmuxDomain {
-    next_pane: AtomicU64,
-}
+pub struct TmuxDomain;
 
 impl TmuxDomain {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// 连接到一个 tmux session，枚举其 window/pane，为每个 pane 返回句柄。
@@ -55,7 +52,7 @@ impl TmuxDomain {
         cols: u16,
         rows: u16,
     ) -> Arc<TmuxPane> {
-        let id = PaneId::new(self.next_pane.fetch_add(1, Ordering::Relaxed) + 1);
+        let id = PaneId::next();
         let mut rx = control.output(&handle);
         let (tx, _) = broadcast::channel::<Vec<u8>>(256);
         let tx_pump = tx.clone();

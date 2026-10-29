@@ -4,18 +4,15 @@ use crate::domain::{Domain, PaneConfig, PaneHandle, PaneId, PaneKind};
 use crate::platform::{LocalPty, Size};
 use crate::{Error, Result};
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Default)]
-pub struct LocalDomain {
-    next_pane: AtomicU64,
-}
+pub struct LocalDomain;
 
 impl LocalDomain {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 }
 
@@ -38,7 +35,7 @@ impl Domain for LocalDomain {
                 "local domain requires Local pane config".into(),
             ));
         };
-        let id = PaneId::new(self.next_pane.fetch_add(1, Ordering::Relaxed) + 1);
+        let id = PaneId::next();
         let pty = Arc::new(LocalPty::new(command.clone(), args.clone(), cwd.clone()));
         let mut rx = pty.spawn(Size::new(*cols, *rows))?;
 
