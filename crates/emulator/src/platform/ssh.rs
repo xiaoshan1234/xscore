@@ -31,6 +31,7 @@ pub struct SshConnection {
     host: String,
     port: u16,
     identity: Option<String>,
+    password: Option<String>,
     handle: Arc<Mutex<Option<client::Handle<SshHandler>>>>,
     channel: Arc<Mutex<Option<Channel<client::Msg>>>>,
 }
@@ -46,12 +47,19 @@ impl std::fmt::Debug for SshConnection {
 }
 
 impl SshConnection {
-    pub fn new(user: String, host: String, port: u16, identity: Option<String>) -> Self {
+    pub fn new(
+        user: String,
+        host: String,
+        port: u16,
+        identity: Option<String>,
+        password: Option<String>,
+    ) -> Self {
         Self {
             user,
             host,
             port,
             identity,
+            password,
             handle: Arc::new(Mutex::new(None)),
             channel: Arc::new(Mutex::new(None)),
         }
@@ -86,12 +94,18 @@ impl SshConnection {
                 .authenticate_publickey(&self.user, key)
                 .await
                 .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
-            None => {
-                return Err(Error::Transport(format!(
-                    "ssh: identity= is required for {}@{}",
-                    self.user, self.host
-                )));
-            }
+            None => match &self.password {
+                Some(password) => handle
+                    .authenticate_password(&self.user, password.clone())
+                    .await
+                    .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
+                None => {
+                    return Err(Error::Transport(format!(
+                        "ssh: provide identity= or password for {}@{}",
+                        self.user, self.host
+                    )));
+                }
+            },
         };
         if !auth_ok {
             return Err(Error::Transport(format!(

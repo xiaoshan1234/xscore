@@ -29,6 +29,7 @@ impl Domain for RemoteSshDomain {
             port,
             user,
             identity,
+            password,
             cols,
             rows,
         } = config
@@ -42,6 +43,7 @@ impl Domain for RemoteSshDomain {
             host.clone(),
             *port,
             identity.clone(),
+            password.clone(),
         ));
         let mut rx = conn.connect(Size::new(*cols, *rows)).await?;
 

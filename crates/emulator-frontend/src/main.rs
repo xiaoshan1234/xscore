@@ -15,7 +15,6 @@ use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -153,6 +152,13 @@ impl App {
         }
         let (user, host, port) = parse_ssh_target(&words[1])?;
         let identity = words.get(2).cloned();
+        let password = if identity.is_none() {
+            Some(rpassword::prompt_password(format!(
+                "Password for {user}@{host}: "
+            ))?)
+        } else {
+            None
+        };
         let cols = 80u16;
         let rows = 24u16;
         let domain = RemoteSshDomain::new();
@@ -162,6 +168,7 @@ impl App {
                 port,
                 user,
                 identity,
+                password,
                 cols,
                 rows,
             })
@@ -430,15 +437,15 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("warning: logging disabled: {e:#}");
     }
     let mut app = App::new();
-    let stdin = tokio::io::stdin();
-    let mut lines = BufReader::new(stdin).lines();
+    let stdin = std::io::stdin();
 
     loop {
         print!("xscore> ");
         std::io::stdout().flush()?;
-        let Some(line) = lines.next_line().await? else {
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
             break;
-        };
+        }
         let line = line.trim();
         if line.is_empty() {
             continue;

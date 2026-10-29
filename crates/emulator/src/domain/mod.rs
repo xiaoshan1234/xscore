@@ -64,6 +64,7 @@ pub enum PaneConfig {
         port: u16,
         user: String,
         identity: Option<String>,
+        password: Option<String>,
         cols: u16,
         rows: u16,
     },
