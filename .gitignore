@@ -11,3 +11,4 @@
 
 # Build artifacts that may leak in during doctoring
 Cargo.lock.bak
+emulator.log
