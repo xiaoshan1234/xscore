@@ -4,7 +4,6 @@ use crate::infra::tmux::TmuxEvent;
 use crate::service::buffer_service::BufferId;
 use crate::service::buffer_service::BufferInfo;
 use crate::service::link_service::LinkId;
-use crate::service::session_service::SessionId;
 use crate::service::session_service::{SessionBackend, SessionInfo};
 use crate::{Error, Result};
 
@@ -43,11 +42,7 @@ impl BackendRuntime {
                         "a raw session requires at least one link".into(),
                     ));
                 }
-                Ok(Self::Raw(RawBackend::from_buffers(
-                    session.id,
-                    links.to_vec(),
-                    &own_buffers,
-                )))
+                Ok(Self::Raw(RawBackend::from_buffers(links, &own_buffers)))
             }
             SessionBackend::Tmux { .. } => {
                 if links.len() != 1 {
@@ -55,26 +50,8 @@ impl BackendRuntime {
                         "a tmux session requires exactly one control link".into(),
                     ));
                 }
-                Ok(Self::Tmux(TmuxBackend::from_buffers(
-                    session.id,
-                    links[0],
-                    &own_buffers,
-                )))
+                Ok(Self::Tmux(TmuxBackend))
             }
-        }
-    }
-
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Raw(_) => "raw",
-            Self::Tmux(_) => "tmux",
-        }
-    }
-
-    pub fn session_id(&self) -> SessionId {
-        match self {
-            Self::Raw(manager) => manager.session_id,
-            Self::Tmux(manager) => manager.session_id,
         }
     }
 
@@ -82,25 +59,6 @@ impl BackendRuntime {
         match self {
             Self::Raw(manager) => manager.buffer_for_link(link),
             Self::Tmux(_) => None,
-        }
-    }
-
-    pub fn buffer_for_tmux_handle(&self, handle: &str) -> Option<BufferId> {
-        match self {
-            Self::Raw(_) => None,
-            Self::Tmux(manager) => manager.buffer_for_handle(handle),
-        }
-    }
-
-    pub fn route_output(
-        &self,
-        link: LinkId,
-        handle: &str,
-        bytes: &[u8],
-    ) -> Option<(BufferId, Vec<u8>)> {
-        match self {
-            Self::Raw(manager) => manager.route(link, bytes),
-            Self::Tmux(manager) => manager.route_output(link, handle, bytes),
         }
     }
 
@@ -118,6 +76,7 @@ mod tests {
     use super::*;
     use crate::infra::tmux::{TmuxHostConfig, TmuxSocket};
     use crate::service::buffer_service::BufferOrigin;
+    use crate::service::session_service::SessionId;
     use chrono::Utc;
 
     fn buffer(id: BufferId, session: SessionId, origin: BufferOrigin) -> BufferInfo {
@@ -142,42 +101,17 @@ mod tests {
             buffer(b2, info.id, BufferOrigin::Link { link_id: l2 }),
         ];
         let manager = BackendRuntime::from_parts(&info, &[l1, l2], &buffers).unwrap();
-        assert_eq!(manager.session_id(), info.id);
         assert_eq!(manager.buffer_for_link(l1), Some(b1));
         assert_eq!(manager.buffer_for_link(l2), Some(b2));
-        assert_eq!(manager.kind(), "raw");
     }
 
     #[test]
-    fn tmux_manager_routes_one_link_by_pane_handle() {
+    fn tmux_backend_requires_exactly_one_control_link() {
         let info =
             SessionInfo::new_tmux("tmux", TmuxHostConfig::Local, TmuxSocket::Default, "tmux");
         let link = LinkId::new();
-        let first = BufferId::new();
-        let second = BufferId::new();
-        let buffers = vec![
-            buffer(
-                first,
-                info.id,
-                BufferOrigin::Tmux {
-                    link_id: link,
-                    pane_handle: "%0".into(),
-                },
-            ),
-            buffer(
-                second,
-                info.id,
-                BufferOrigin::Tmux {
-                    link_id: link,
-                    pane_handle: "%1".into(),
-                },
-            ),
-        ];
-        let manager = BackendRuntime::from_parts(&info, &[link], &buffers).unwrap();
-        assert_eq!(manager.kind(), "tmux");
-        assert_eq!(manager.buffer_for_tmux_handle("%0"), Some(first));
-        assert_eq!(manager.buffer_for_tmux_handle("%1"), Some(second));
-        assert_eq!(manager.buffer_for_tmux_handle("%2"), None);
+        BackendRuntime::from_parts(&info, &[link], &[]).unwrap();
+        assert!(BackendRuntime::from_parts(&info, &[link, LinkId::new()], &[]).is_err());
     }
 
     #[test]

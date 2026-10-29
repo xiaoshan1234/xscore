@@ -308,15 +308,7 @@ impl SessionService {
     pub(super) async fn forget_pane_row(&self, pid: PaneId) {
         let buffer_id = self.ui.pane(pid).await.and_then(|pane| pane.buffer_id);
         if let Some(buffer_id) = buffer_id {
-            let runtime = self.buffer_service.take_runtime(buffer_id).await;
-            if let Some(runtime) = runtime {
-                let _ = runtime.close().await;
-            }
-            self.buffer_service.remove_memory(buffer_id).await;
-            self.buffer_service.remove(buffer_id).await;
-            if let Some(client) = &self.daemon {
-                let _ = client.delete_buffer(buffer_id).await;
-            }
+            self.discard_buffer(buffer_id).await;
         }
         self.ui.remove_pane(pid).await;
     }
@@ -432,7 +424,7 @@ impl SessionService {
         buffer_id: BufferId,
         key: String,
     ) {
-        let buffer = self.buffer_for(buffer_id).await;
+        let buffer = self.buffer_service.ring(buffer_id).await;
         let mut rx = match control.output(&key).await {
             Ok(rx) => rx,
             Err(e) => {

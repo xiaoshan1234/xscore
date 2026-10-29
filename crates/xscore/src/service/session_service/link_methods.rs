@@ -116,7 +116,7 @@ impl SessionService {
                 let runtime: Arc<BufferRuntime> = match &daemon {
                     Some(client) => Arc::new(BufferRuntime::daemon(Arc::clone(client), buffer_id)),
                     None => {
-                        let buf = self.buffer_for(buffer_id).await;
+                        let buf = self.buffer_service.ring(buffer_id).await;
                         Arc::new(BufferRuntime::local(Arc::clone(&transport_arc), buf))
                     }
                 };
@@ -142,7 +142,7 @@ impl SessionService {
                 let runtime: Arc<BufferRuntime> = match &daemon {
                     Some(client) => Arc::new(BufferRuntime::daemon(Arc::clone(client), buffer_id)),
                     None => {
-                        let buf = self.buffer_for(buffer_id).await;
+                        let buf = self.buffer_service.ring(buffer_id).await;
                         Arc::new(BufferRuntime::local(Arc::clone(&transport_arc), buf))
                     }
                 };
@@ -206,8 +206,7 @@ impl SessionService {
         if let Some(client) = &daemon {
             if let Err(e) = client.attach_buffer(buffer_id, link_id).await {
                 let _ = client.delete_link(link_id).await;
-                let _ = client.delete_buffer(buffer_id).await;
-                self.buffer_service.remove(buffer_id).await;
+                self.discard_buffer(buffer_id).await;
                 return Err(e);
             }
         }
@@ -219,9 +218,8 @@ impl SessionService {
             // (and a daemon that can therefore never idle-exit) behind.
             if let Some(client) = &daemon {
                 let _ = client.delete_link(link_id).await;
-                let _ = client.delete_buffer(buffer_id).await;
             }
-            self.buffer_service.remove(buffer_id).await;
+            self.discard_buffer(buffer_id).await;
             let _ = self.rebuild_backend(session).await;
             return Err(e);
         }
@@ -263,13 +261,9 @@ impl SessionService {
             })
             .collect();
         for buffer_id in linked_buffers {
-            let runtime = self.buffer_service.take_runtime(buffer_id).await;
-            if let Some(b) = runtime {
-                // local BufferRuntime::close() stops the pump only (in daemon
-                // mode: Detach), so the transport below is closed
-                // exactly once, on purpose.
-                let _ = b.close().await;
-            }
+            // Stop this Buffer's runtime, but keep the Buffer history: the
+            // Link is being removed, not the Buffer.
+            self.buffer_service.stop_runtime(buffer_id).await;
         }
         match &self.daemon {
             // ADR 0009: the daemon owns the transport. DeleteLink

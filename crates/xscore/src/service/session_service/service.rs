@@ -53,8 +53,8 @@ use tokio::sync::Mutex;
 use crate::infra::link::{LinkAddress, TransportConfig};
 use crate::infra::tmux::{TmuxHostConfig, TmuxSocket};
 use crate::service::backend::{BackendRuntime, TmuxRuntime};
-use crate::service::buffer_service::{BufferId, BufferInfo};
-use crate::service::buffer_service::{BufferService, RingBuffer};
+use crate::service::buffer_service::BufferId;
+use crate::service::buffer_service::BufferService;
 use crate::service::link_service::LinkService;
 use crate::service::link_service::{EndpointRef, LinkId};
 use crate::service::session_service::{
@@ -86,7 +86,6 @@ pub struct SessionService {
     pub ui: Arc<UiProjection>,
     pub buffer_service: Arc<BufferService>,
     pub(super) backends: Arc<Mutex<HashMap<SessionId, BackendRuntime>>>,
-    /// Resident daemon client. Buffer runtimes and byte history are owned by
     /// Resident daemon client. Buffer runtimes and byte history are owned by
     /// BufferService in-process; in daemon mode the daemon owns both.
     pub(super) daemon: Option<Arc<dyn DaemonPort>>,
@@ -325,17 +324,7 @@ impl SessionService {
             // v0.6.0 PR5: in daemon mode the client (and its buffers) is the
             // daemon's, so `CloseTmux` is the whole teardown; `kill-session`
             // stays a one-shot exec (arch.md §6 allows exactly that shape).
-            match &self.daemon {
-                Some(client) => {
-                    let _ = client.close_tmux(id).await;
-                }
-                None => {
-                    let control = { self.tmux.take_control(id).await };
-                    if let Some(control) = control {
-                        let _ = control.close().await;
-                    }
-                }
-            }
+            self.close_tmux_control(id).await;
             let _ = self
                 .run_tmux(
                     host,
@@ -367,50 +356,8 @@ impl SessionService {
             self.del_link(lid).await?;
         }
 
-        let straggling_buffers: Vec<BufferInfo> = self
-            .buffer_service
-            .list()
-            .await
-            .into_iter()
-            .filter(|buffer| buffer.session_id == id)
-            .collect();
-        for info in &straggling_buffers {
-            let runtime = self.buffer_service.take_runtime(info.id).await;
-            self.buffer_service.remove_memory(info.id).await;
-            // Releasing a runtime only stops a pump: a direct runtime's `close`
-            // is "stop my reader", a control runtime's is a no-op, and the tmux
-            // session is already gone either way.
-            if let Some(b) = runtime {
-                let _ = b.close().await;
-            }
-            self.buffer_service.remove(info.id).await;
-            if let Some(client) = &self.daemon {
-                let _ = client.delete_buffer(info.id).await;
-            }
-        }
-        let pane_ids: Vec<PaneId> = self
-            .ui
-            .panes()
-            .await
-            .into_iter()
-            .filter(|pane| pane.session_id == id)
-            .map(|pane| pane.id)
-            .collect();
-        for pid in pane_ids {
-            self.ui.remove_pane(pid).await;
-        }
-
-        let doomed_windows: Vec<WindowId> = self
-            .ui
-            .windows()
-            .await
-            .iter()
-            .filter(|w| w.info.session_id == id)
-            .map(|w| w.info.id)
-            .collect();
-        for wid in doomed_windows {
-            self.ui.remove_window(wid).await;
-        }
+        self.discard_buffers_for_session(id).await;
+        self.ui.remove_session_rows(id).await;
 
         self.sessions.remove(id).await;
         self.backends.lock().await.remove(&id);
@@ -437,17 +384,7 @@ impl SessionService {
         // Detach: the control client is closed (in daemon mode: `CloseTmux`,
         // which drops the slot and therefore its buffers), and tmux keeps
         // running (arch.md §8, "session detach leaves the backend running").
-        match &self.daemon {
-            Some(client) => {
-                let _ = client.close_tmux(id).await;
-            }
-            None => {
-                let control = { self.tmux.take_control(id).await };
-                if let Some(control) = control {
-                    let _ = control.close().await;
-                }
-            }
-        }
+        self.close_tmux_control(id).await;
 
         // No `del_link`, no `close()`: both would terminate something that
         // belongs to tmux. Dropping the rows (and the runtimes) is the whole
@@ -463,41 +400,8 @@ impl SessionService {
         for lid in link_ids {
             self.link_service.remove(lid).await;
         }
-        let buffers: Vec<BufferId> = self
-            .buffer_service
-            .list()
-            .await
-            .into_iter()
-            .filter(|buffer| buffer.session_id == id)
-            .map(|buffer| buffer.id)
-            .collect();
-        for buffer_id in buffers {
-            let _ = self.buffer_service.take_runtime(buffer_id).await;
-            self.buffer_service.remove_memory(buffer_id).await;
-            self.buffer_service.remove(buffer_id).await;
-        }
-        let pane_ids: Vec<PaneId> = self
-            .ui
-            .panes()
-            .await
-            .iter()
-            .filter(|p| p.session_id == id)
-            .map(|p| p.id)
-            .collect();
-        for pid in pane_ids {
-            self.ui.remove_pane(pid).await;
-        }
-        let window_ids: Vec<WindowId> = self
-            .ui
-            .windows()
-            .await
-            .iter()
-            .filter(|w| w.info.session_id == id)
-            .map(|w| w.info.id)
-            .collect();
-        for wid in window_ids {
-            self.ui.remove_window(wid).await;
-        }
+        self.buffer_service.forget_all_for_session(id).await;
+        self.ui.remove_session_rows(id).await;
         self.sessions.remove(id).await;
         self.backends.lock().await.remove(&id);
         self.save_state().await?;
@@ -524,12 +428,6 @@ impl SessionService {
     // daemon: `%exit` flips the slot's `alive` flag).
 
     // ===== internal helpers =====
-
-    /// The buffer, created on first use and kept independently of its UI panes.
-    /// detach/re-attach.
-    pub(super) async fn buffer_for(&self, buffer_id: BufferId) -> Arc<Mutex<RingBuffer>> {
-        self.buffer_service.ring(buffer_id).await
-    }
 
     pub(super) async fn rebuild_backend(&self, session_id: SessionId) -> Result<()> {
         let info = self.get_session(session_id).await?;

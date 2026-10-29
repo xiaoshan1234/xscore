@@ -56,6 +56,18 @@ impl BufferService {
         self.runtimes.lock().await.remove(&id)
     }
 
+    pub(crate) async fn stop_runtime(&self, id: BufferId) {
+        if let Some(runtime) = self.take_runtime(id).await {
+            let _ = runtime.close().await;
+        }
+    }
+
+    pub(crate) async fn forget(&self, id: BufferId) {
+        self.stop_runtime(id).await;
+        self.remove_memory(id).await;
+        self.remove(id).await;
+    }
+
     pub(crate) async fn ring(&self, id: BufferId) -> Arc<Mutex<RingBuffer>> {
         let mut memory = self.memory.lock().await;
         memory.entry(id).or_insert_with(fresh_ring).clone()
@@ -93,27 +105,27 @@ impl BufferService {
             .collect()
     }
 
+    pub(crate) async fn forget_all_for_session(&self, session_id: SessionId) {
+        for buffer in self.list_for_session(session_id).await {
+            self.forget(buffer.id).await;
+        }
+    }
+
     pub(crate) async fn read(&self, id: BufferId, out: &mut [u8]) -> Result<usize> {
-        self.runtime(id)
-            .await
-            .ok_or_else(|| Error::Invalid(format!("buffer {id} has no runtime")))?
-            .read(out)
-            .await
+        self.runtime_required(id).await?.read(out).await
     }
 
     pub(crate) async fn write(&self, id: BufferId, data: &[u8]) -> Result<usize> {
-        self.runtime(id)
-            .await
-            .ok_or_else(|| Error::Invalid(format!("buffer {id} has no runtime")))?
-            .write(data)
-            .await
+        self.runtime_required(id).await?.write(data).await
     }
 
     pub(crate) async fn resize(&self, id: BufferId, cols: u16, rows: u16) -> Result<()> {
+        self.runtime_required(id).await?.resize(cols, rows).await
+    }
+
+    async fn runtime_required(&self, id: BufferId) -> Result<Arc<BufferRuntime>> {
         self.runtime(id)
             .await
-            .ok_or_else(|| Error::Invalid(format!("buffer {id} has no runtime")))?
-            .resize(cols, rows)
-            .await
+            .ok_or_else(|| Error::Invalid(format!("buffer {id} has no runtime")))
     }
 }

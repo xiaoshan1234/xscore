@@ -1,6 +1,7 @@
 use super::*;
 use crate::service::buffer_service::{BufferId, BufferInfo, BufferOrigin, BufferRuntime};
 use crate::service::link_service::LinkId;
+use crate::service::session_service::SessionId;
 use crate::ui::PaneId;
 use crate::{Error, Result};
 use std::sync::Arc;
@@ -122,7 +123,7 @@ impl SessionService {
             }
             None => {
                 let control = self.ensure_local_control(info.session_id).await?;
-                let buffer = self.buffer_for(info.id).await;
+                let buffer = self.buffer_service.ring(info.id).await;
                 let runtime: Arc<BufferRuntime> =
                     Arc::new(BufferRuntime::control(control, key.to_string(), buffer));
                 Ok(runtime)
@@ -154,10 +155,25 @@ impl SessionService {
         if !link.connected {
             return Err(Error::LinkNotConnected(link_id));
         }
-        let buffer = self.buffer_for(info.id).await;
+        let buffer = self.buffer_service.ring(info.id).await;
         Ok(Arc::new(BufferRuntime::local(
             Arc::clone(&link.transport),
             buffer,
         )))
+    }
+
+    /// Forget a Buffer everywhere: runtime, in-process ring, registry and
+    /// daemon slot. Pane references are intentionally left to the caller.
+    pub(super) async fn discard_buffer(&self, buffer_id: BufferId) {
+        self.buffer_service.forget(buffer_id).await;
+        if let Some(client) = &self.daemon {
+            let _ = client.delete_buffer(buffer_id).await;
+        }
+    }
+
+    pub(super) async fn discard_buffers_for_session(&self, session_id: SessionId) {
+        for buffer in self.buffer_service.list_for_session(session_id).await {
+            self.discard_buffer(buffer.id).await;
+        }
     }
 }

@@ -8,6 +8,19 @@ use crate::{Error, Result};
 use std::sync::Arc;
 
 impl SessionService {
+    pub(super) async fn close_tmux_control(&self, id: SessionId) {
+        match &self.daemon {
+            Some(client) => {
+                let _ = client.close_tmux(id).await;
+            }
+            None => {
+                if let Some(control) = self.tmux.take_control(id).await {
+                    let _ = control.close().await;
+                }
+            }
+        }
+    }
+
     pub async fn create_tmux_session(
         &self,
         name: &str,

@@ -152,4 +152,32 @@ impl UiProjection {
         self.put_pane(info).await;
         Ok(())
     }
+
+    /// Remove all UI rows owned by one Session.
+    pub async fn remove_session_rows(
+        &self,
+        session_id: crate::service::session_service::SessionId,
+    ) {
+        let pane_ids: Vec<PaneId> = self
+            .panes()
+            .await
+            .into_iter()
+            .filter(|pane| pane.session_id == session_id)
+            .map(|pane| pane.id)
+            .collect();
+        for pane_id in pane_ids {
+            self.remove_pane(pane_id).await;
+        }
+
+        let window_ids: Vec<WindowId> = self
+            .windows()
+            .await
+            .iter()
+            .filter(|window| window.info.session_id == session_id)
+            .map(|window| window.info.id)
+            .collect();
+        for window_id in window_ids {
+            self.remove_window(window_id).await;
+        }
+    }
 }

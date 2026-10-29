@@ -246,15 +246,7 @@ impl SessionService {
             .get(id)
             .await
             .ok_or_else(|| Error::Invalid(format!("buffer not found: {id}")))?;
-        let runtime = self.buffer_service.take_runtime(id).await;
-        if let Some(runtime) = runtime {
-            let _ = runtime.close().await;
-        }
-        self.buffer_service.remove_memory(id).await;
-        self.buffer_service.remove(id).await;
-        if let Some(client) = &self.daemon {
-            let _ = client.delete_buffer(id).await;
-        }
+        self.discard_buffer(id).await;
         for mut pane in self.ui.panes().await {
             if pane.buffer_id == Some(id) {
                 pane.buffer_id = None;
