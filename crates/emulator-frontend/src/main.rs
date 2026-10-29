@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
-use layout::{Direction, Layout};
+use layout::{Direction, Layout, TmuxContainer};
 
 struct PaneEntry {
     handle: Arc<dyn PaneHandle>,
@@ -27,6 +27,7 @@ struct PaneEntry {
 struct App {
     panes: HashMap<PaneId, PaneEntry>,
     layout: Layout,
+    tmux_window: HashMap<PaneId, String>,
 }
 
 impl App {
@@ -34,6 +35,7 @@ impl App {
         Self {
             panes: HashMap::new(),
             layout: Layout::new(),
+            tmux_window: HashMap::new(),
         }
     }
 
@@ -116,10 +118,29 @@ impl App {
         let panes = domain
             .attach(&TmuxHostConfig::Local, &socket, &session)
             .await?;
+
+        let mut groups: Vec<(String, Vec<PaneId>)> = Vec::new();
+        let mut index: HashMap<String, usize> = HashMap::new();
         for pane in panes {
             let (cols, rows) = (pane.cols(), pane.rows());
-            let id = self.attach_pane(pane, cols, rows);
-            println!("pane: {id}  kind: tmux  {cols}x{rows}");
+            let window = pane.window().to_string();
+            let id = self.register_pane(pane, cols, rows);
+            self.tmux_window.insert(id, window.clone());
+            let group = *index.entry(window.clone()).or_insert_with(|| {
+                groups.push((window, Vec::new()));
+                groups.len() - 1
+            });
+            groups[group].1.push(id);
+        }
+        for (window, pane_ids) in groups {
+            let active = pane_ids.first().copied();
+            let container = TmuxContainer {
+                window: window.clone(),
+                panes: pane_ids.clone(),
+                active,
+            };
+            self.layout.add_mirror(container);
+            println!("tmux window {window}: {} pane(s)", pane_ids.len());
         }
         Ok(())
     }
@@ -235,7 +256,13 @@ impl App {
         if !self.panes.contains_key(&id) {
             return Err(anyhow!("pane not found: {id}"));
         }
-        self.layout.focus(id);
+        if let Some(window) = self.tmux_window.get(&id).cloned() {
+            if !self.layout.set_mirror_active(&window, id) {
+                return Err(anyhow!("tmux window not found in layout: {window}"));
+            }
+        } else {
+            self.layout.focus(id);
+        }
         println!("focused: {id}");
         Ok(())
     }

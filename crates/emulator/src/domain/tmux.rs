@@ -38,7 +38,13 @@ impl TmuxDomain {
                 let Some(pane) = parse_pane_line(&line) else {
                     continue;
                 };
-                panes.push(self.make_pane(control.clone(), pane.handle, pane.cols, pane.rows));
+                panes.push(self.make_pane(
+                    control.clone(),
+                    window.handle.clone(),
+                    pane.handle,
+                    pane.cols,
+                    pane.rows,
+                ));
             }
         }
 
@@ -48,6 +54,7 @@ impl TmuxDomain {
     fn make_pane(
         &self,
         control: Arc<TmuxControl>,
+        window: String,
         handle: String,
         cols: u16,
         rows: u16,
@@ -65,6 +72,7 @@ impl TmuxDomain {
         });
         Arc::new(TmuxPane {
             id,
+            window,
             handle,
             cols,
             rows,
@@ -76,6 +84,7 @@ impl TmuxDomain {
 
 pub struct TmuxPane {
     id: PaneId,
+    window: String,
     handle: String,
     cols: u16,
     rows: u16,
@@ -90,6 +99,10 @@ impl TmuxPane {
 
     pub fn rows(&self) -> u16 {
         self.rows
+    }
+
+    pub fn window(&self) -> &str {
+        &self.window
     }
 }
 
