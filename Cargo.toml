@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/xscore"]
+members = ["crates/xscore", "crates/emulator", "crates/emulator-frontend"]
 
 [workspace.package]
 edition = "2021"

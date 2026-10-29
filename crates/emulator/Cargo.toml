@@ -1,0 +1,12 @@
+[package]
+name = "emulator"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+portable-pty.workspace = true
+tracing.workspace = true

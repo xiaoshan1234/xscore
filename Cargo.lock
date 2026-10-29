@@ -559,6 +559,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "emulator"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "portable-pty",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "emulator-frontend"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "emulator",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
