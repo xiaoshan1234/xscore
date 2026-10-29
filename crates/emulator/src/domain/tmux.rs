@@ -27,8 +27,22 @@ impl TmuxDomain {
         session: &str,
     ) -> Result<Vec<Arc<TmuxPane>>> {
         let prefix = host_prefix(host);
-        tracing::debug!(session, ?socket, ?host, "tmux attach");
-        let control = Arc::new(TmuxControl::spawn(&prefix, socket, session)?);
+        let host_desc = match host {
+            TmuxHostConfig::Local => "local".to_string(),
+            TmuxHostConfig::Ssh { destination, .. } => format!("ssh:{destination}"),
+            TmuxHostConfig::Wsl { .. } => "wsl".to_string(),
+        };
+        tracing::debug!(session, ?socket, host = %host_desc, "tmux attach");
+        let (password, askpass) = match host {
+            TmuxHostConfig::Ssh {
+                password, askpass, ..
+            } => (password.as_deref(), askpass.as_deref()),
+            _ => (None, None),
+        };
+        let use_pty = !matches!(host, TmuxHostConfig::Ssh { .. });
+        let control = Arc::new(TmuxControl::spawn(
+            &prefix, socket, session, password, askpass, use_pty,
+        )?);
         let mut panes = Vec::new();
 
         for line in control.send(&list_windows_command(session)).await? {

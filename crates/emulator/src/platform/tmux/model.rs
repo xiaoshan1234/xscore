@@ -7,6 +7,8 @@ pub enum TmuxHostConfig {
     Ssh {
         destination: String,
         args: Vec<String>,
+        password: Option<String>,
+        askpass: Option<String>,
     },
     Wsl {
         args: Vec<String>,

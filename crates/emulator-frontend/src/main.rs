@@ -116,7 +116,24 @@ impl App {
     }
 
     async fn tmux(&mut self, words: &[String]) -> Result<()> {
-        let (session, socket, host) = parse_tmux_args(words)?;
+        let (session, socket, mut host, want_password) = parse_tmux_args(words)?;
+        if want_password {
+            let password =
+                match std::env::var("XSCORE_SSH_PASSWORD").or_else(|_| std::env::var("PASSWD")) {
+                    Ok(password) => password,
+                    Err(_) => rpassword::prompt_password("Password: ")?,
+                };
+            let askpass = std::env::current_exe()?.to_string_lossy().into_owned();
+            if let TmuxHostConfig::Ssh {
+                password: slot,
+                askpass: ap,
+                ..
+            } = &mut host
+            {
+                *slot = Some(password);
+                *ap = Some(askpass);
+            }
+        }
         let domain = TmuxDomain::new();
         let panes = domain.attach(&host, &socket, &session).await?;
 
@@ -212,7 +229,12 @@ impl App {
         }
         let entry = self.get_pane(&words[1])?;
         let mut data = words[2..].join(" ").into_bytes();
-        data.push(b'\n');
+        let eol: &[u8] = if entry.handle.kind() == PaneKind::Local && cfg!(windows) {
+            b"\r\n"
+        } else {
+            b"\n"
+        };
+        data.extend_from_slice(eol);
         entry.handle.send_input(&data).await?;
         Ok(())
     }
@@ -304,7 +326,7 @@ fn help() {
     println!("  shell <program> [args...]   spawn a local shell pane");
     println!("  ssh <user@host[:port]> [identity]   spawn a remote ssh pane");
     println!("  wsl [args...]               spawn a WSL shell pane (Windows)");
-    println!("  tmux <session> [-L <socket>] [--ssh <dest> | --wsl]   attach to a tmux session");
+    println!("  tmux <session> [-L <socket>] [--ssh <dest> | --wsl] [--password]   attach to a tmux session");
     println!("  split h|v <program> [args...]   split the focused pane");
     println!("  write <pane-id> <text>      send text + newline to the pane");
     println!("  read  <pane-id>             print accumulated output");
@@ -329,7 +351,7 @@ fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
     Ok((user.to_string(), host, port))
 }
 
-fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConfig)> {
+fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConfig, bool)> {
     if words.len() < 2 {
         return Err(anyhow!(
             "usage: tmux <session> [-L <name> | -S <path>] [--ssh <dest> | --wsl] [--*-arg <arg>]"
@@ -340,6 +362,7 @@ fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConf
     let mut host = TmuxHostConfig::Local;
     let mut ssh_seen = false;
     let mut wsl_seen = false;
+    let mut want_password = false;
     let mut i = 2;
     while i < words.len() {
         match words[i].as_str() {
@@ -371,6 +394,8 @@ fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConf
                 host = TmuxHostConfig::Ssh {
                     destination: destination.clone(),
                     args: Vec::new(),
+                    password: None,
+                    askpass: None,
                 };
                 ssh_seen = true;
             }
@@ -404,11 +429,15 @@ fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConf
                     _ => return Err(anyhow!("--wsl-arg requires --wsl first")),
                 }
             }
+            "--password" => want_password = true,
             other => return Err(anyhow!("unknown tmux option: {other}")),
         }
         i += 1;
     }
-    Ok((session, socket, host))
+    if want_password && !matches!(&host, TmuxHostConfig::Ssh { .. }) {
+        return Err(anyhow!("--password requires --ssh"));
+    }
+    Ok((session, socket, host, want_password))
 }
 
 async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
@@ -433,6 +462,13 @@ async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 作为 SSH_ASKPASS 辅助程序被 ssh 调用时，输出密码并退出。
+    if std::env::var("XSCORE_ASKPASS").is_ok() {
+        if let Ok(password) = std::env::var("XSCORE_SSH_PASSWORD") {
+            println!("{password}");
+        }
+        return Ok(());
+    }
     if let Err(e) = init_logging() {
         eprintln!("warning: logging disabled: {e:#}");
     }
@@ -488,15 +524,17 @@ mod tests {
 
     #[test]
     fn tmux_args_default_local() {
-        let (session, socket, host) = parse_tmux_args(&words("tmux work -L x")).unwrap();
+        let (session, socket, host, want_password) =
+            parse_tmux_args(&words("tmux work -L x")).unwrap();
         assert_eq!(session, "work");
         assert_eq!(socket, TmuxSocket::Named("x".into()));
         assert_eq!(host, TmuxHostConfig::Local);
+        assert!(!want_password);
     }
 
     #[test]
     fn tmux_args_ssh_with_extra_args() {
-        let (_, _, host) = parse_tmux_args(&words(
+        let (_, _, host, _) = parse_tmux_args(&words(
             "tmux work --ssh dev@box --ssh-arg -p --ssh-arg 2222",
         ))
         .unwrap();
@@ -505,6 +543,8 @@ mod tests {
             TmuxHostConfig::Ssh {
                 destination: "dev@box".into(),
                 args: vec!["-p".into(), "2222".into()],
+                password: None,
+                askpass: None,
             }
         );
     }
@@ -516,7 +556,7 @@ mod tests {
 
     #[test]
     fn tmux_args_wsl() {
-        let (_, _, host) = parse_tmux_args(&words(
+        let (_, _, host, _) = parse_tmux_args(&words(
             "tmux work --wsl --wsl-arg --distribution --wsl-arg Ubuntu",
         ))
         .unwrap();
@@ -531,5 +571,18 @@ mod tests {
     #[test]
     fn tmux_args_ssh_and_wsl_conflict() {
         assert!(parse_tmux_args(&words("tmux work --ssh dev@box --wsl")).is_err());
+    }
+
+    #[test]
+    fn tmux_args_ssh_password() {
+        let (_, _, host, want_password) =
+            parse_tmux_args(&words("tmux work --ssh dev@box --password")).unwrap();
+        assert!(want_password);
+        assert!(matches!(host, TmuxHostConfig::Ssh { .. }));
+    }
+
+    #[test]
+    fn tmux_args_password_requires_ssh() {
+        assert!(parse_tmux_args(&words("tmux work --password")).is_err());
     }
 }

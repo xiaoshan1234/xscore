@@ -108,8 +108,17 @@ pub fn send_keys_literal(handle: &str, payload: &str) -> Result<String> {
 pub fn host_prefix(host: &TmuxHostConfig) -> Vec<String> {
     match host {
         TmuxHostConfig::Local => Vec::new(),
-        TmuxHostConfig::Ssh { destination, args } => {
-            let mut argv: Vec<String> = vec!["ssh".into(), "-o".into(), "BatchMode=yes".into()];
+        TmuxHostConfig::Ssh {
+            destination,
+            args,
+            password,
+            ..
+        } => {
+            let mut argv: Vec<String> = vec!["ssh".into()];
+            if password.is_none() {
+                argv.extend(["-o".into(), "BatchMode=yes".into()]);
+            }
+            argv.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
             argv.extend(args.iter().cloned());
             argv.push(destination.clone());
             argv
@@ -198,6 +207,29 @@ mod tests {
         assert_eq!(
             host_prefix(&host),
             ["wsl.exe", "--distribution", "Ubuntu", "--exec"]
+        );
+    }
+
+    #[test]
+    fn host_prefix_ssh_accepts_new_host_keys() {
+        let host = TmuxHostConfig::Ssh {
+            destination: "dev@box".into(),
+            args: vec!["-p".into(), "2222".into()],
+            password: None,
+            askpass: None,
+        };
+        assert_eq!(
+            host_prefix(&host),
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-p",
+                "2222",
+                "dev@box"
+            ]
         );
     }
 }

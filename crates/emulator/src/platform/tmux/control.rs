@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
+use std::process::{Command, Stdio};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -85,9 +86,36 @@ impl Shared {
     }
 }
 
+enum ChildHandle {
+    Pty(Box<dyn PtyChild + Send + Sync>),
+    Process(std::process::Child),
+}
+
+impl ChildHandle {
+    fn kill(&mut self) {
+        match self {
+            ChildHandle::Pty(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            ChildHandle::Process(child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+}
+
+type SpawnIo = (
+    ChildHandle,
+    Option<Box<dyn MasterPty + Send>>,
+    Box<dyn std::io::Read + Send>,
+    Box<dyn std::io::Write + Send>,
+);
+
 pub struct TmuxControl {
     session: String,
-    child: Mutex<Option<Box<dyn PtyChild + Send + Sync>>>,
+    child: Mutex<Option<ChildHandle>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<UnboundedSender<String>>>,
     reader: Mutex<Option<JoinHandle<()>>>,
@@ -95,7 +123,14 @@ pub struct TmuxControl {
 }
 
 impl TmuxControl {
-    pub fn spawn(prefix: &[String], socket: &TmuxSocket, session: &str) -> Result<TmuxControl> {
+    pub fn spawn(
+        prefix: &[String],
+        socket: &TmuxSocket,
+        session: &str,
+        password: Option<&str>,
+        askpass: Option<&str>,
+        use_pty: bool,
+    ) -> Result<TmuxControl> {
         if session.is_empty() {
             return Err(Error::Invalid("tmux session name must not be empty".into()));
         }
@@ -105,32 +140,64 @@ impl TmuxControl {
             .split_first()
             .ok_or_else(|| Error::Transport("empty tmux command line".into()))?;
 
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 40,
-                cols: 120,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| Error::Transport(format!("tmux control openpty: {e}")))?;
-        let mut command = CommandBuilder::new(program);
-        for arg in args {
-            command.arg(arg);
-        }
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
-        drop(pair.slave);
-
-        let stdout = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| Error::Transport(format!("tmux control reader: {e}")))?;
-        let stdin = pair
-            .master
-            .take_writer()
-            .map_err(|e| Error::Transport(format!("tmux control writer: {e}")))?;
+        let (child, master, stdout, stdin): SpawnIo = if use_pty {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 40,
+                    cols: 120,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| Error::Transport(format!("tmux control openpty: {e}")))?;
+            let mut command = CommandBuilder::new(program);
+            for arg in args {
+                command.arg(arg);
+            }
+            let child = pair
+                .slave
+                .spawn_command(command)
+                .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
+            drop(pair.slave);
+            let stdout = pair
+                .master
+                .try_clone_reader()
+                .map_err(|e| Error::Transport(format!("tmux control reader: {e}")))?;
+            let stdin = pair
+                .master
+                .take_writer()
+                .map_err(|e| Error::Transport(format!("tmux control writer: {e}")))?;
+            (ChildHandle::Pty(child), Some(pair.master), stdout, stdin)
+        } else {
+            let mut command = Command::new(program);
+            command
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            if let (Some(password), Some(askpass)) = (password, askpass) {
+                command.env("SSH_ASKPASS", askpass);
+                command.env("SSH_ASKPASS_REQUIRE", "force");
+                command.env("XSCORE_SSH_PASSWORD", password);
+                command.env("XSCORE_ASKPASS", "1");
+            }
+            let mut child = command
+                .spawn()
+                .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| Error::Transport("tmux stdout unavailable".into()))?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| Error::Transport("tmux stdin unavailable".into()))?;
+            (
+                ChildHandle::Process(child),
+                None,
+                Box::new(stdout),
+                Box::new(stdin),
+            )
+        };
 
         let shared = Arc::new(Shared::new());
         let (write_tx, write_rx) = mpsc::unbounded_channel::<String>();
@@ -148,7 +215,7 @@ impl TmuxControl {
         Ok(TmuxControl {
             session: session.to_string(),
             child: Mutex::new(Some(child)),
-            master: Mutex::new(Some(pair.master)),
+            master: Mutex::new(master),
             writer: Mutex::new(Some(write_tx)),
             reader: Mutex::new(Some(reader)),
             shared,
@@ -156,6 +223,9 @@ impl TmuxControl {
     }
 
     pub async fn send(&self, command: &str) -> Result<Vec<String>> {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err(gone(&self.session));
+        }
         tracing::debug!(command, "tmux control: send");
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(gone(&self.session));
@@ -215,8 +285,7 @@ impl TmuxControl {
         self.shared.closed.store(true, Ordering::SeqCst);
         drop(lock(&self.writer).take());
         if let Some(mut child) = lock(&self.child).take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill();
         }
         drop(lock(&self.master).take());
         if let Some(reader) = lock(&self.reader).take() {
@@ -231,8 +300,7 @@ impl Drop for TmuxControl {
     fn drop(&mut self) {
         drop(lock(&self.writer).take());
         if let Some(mut child) = lock(&self.child).take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill();
         }
         drop(lock(&self.master).take());
     }
@@ -250,12 +318,97 @@ fn writer_loop<W: Write>(mut stdin: W, mut rx: mpsc::UnboundedReceiver<String>) 
     }
 }
 
+struct ReaderState {
+    open: Option<u64>,
+    blocks: HashMap<u64, Vec<String>>,
+    claimed: HashMap<u64, PendingReply>,
+    handshake_done: bool,
+}
+
+impl ReaderState {
+    fn new() -> Self {
+        Self {
+            open: None,
+            blocks: HashMap::new(),
+            claimed: HashMap::new(),
+            handshake_done: false,
+        }
+    }
+}
+
+fn handle_parsed(state: &mut ReaderState, shared: &Shared, parsed: Parsed) -> bool {
+    match parsed {
+        Parsed::Begin { num, .. } => {
+            tracing::trace!(num, "tmux control: begin");
+            state.blocks.insert(num, Vec::new());
+            state.open = Some(num);
+            if state.handshake_done {
+                if let Some(waiter) = shared.take_waiter() {
+                    state.claimed.insert(num, waiter);
+                }
+            }
+        }
+        Parsed::End { num } => {
+            tracing::trace!(num, "tmux control: end");
+            let output = state.blocks.remove(&num).unwrap_or_default();
+            if state.open == Some(num) {
+                state.open = None;
+            }
+            if let Some(waiter) = state.claimed.remove(&num) {
+                let _ = waiter.send(Ok(output));
+            }
+            state.handshake_done = true;
+        }
+        Parsed::Error { num, message } => {
+            tracing::warn!(num, message, "tmux control: error");
+            state.blocks.remove(&num);
+            if state.open == Some(num) {
+                state.open = None;
+            }
+            let message = if message.trim().is_empty() {
+                format!("tmux command {num} failed")
+            } else {
+                message
+            };
+            if let Some(waiter) = state.claimed.remove(&num) {
+                let _ = waiter.send(Err(Error::Transport(message)));
+            }
+            state.handshake_done = true;
+        }
+        Parsed::Output { pane, bytes } => {
+            tracing::trace!(pane, len = bytes.len(), "tmux control: output");
+            shared.deliver_output(&pane, bytes);
+        }
+        Parsed::Event(event) => {
+            let exit = matches!(&event, TmuxEvent::Exit { .. });
+            if exit {
+                if let TmuxEvent::Exit { reason } = &event {
+                    tracing::info!(reason, "tmux control: exit");
+                }
+            }
+            shared.deliver_event(event);
+            if exit {
+                shared.shutdown();
+                return false;
+            }
+        }
+        Parsed::Unknown(text) => {
+            if let Some(num) = state.open {
+                if state.claimed.contains_key(&num) {
+                    if let Some(output) = state.blocks.get_mut(&num) {
+                        output.push(text);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
     let mut parser = ProtocolParser::new();
-    let mut open: Option<u64> = None;
-    let mut blocks: HashMap<u64, Vec<String>> = HashMap::new();
-    let mut claimed: HashMap<u64, PendingReply> = HashMap::new();
-    let mut handshake_done = false;
+    let mut state = ReaderState::new();
     let mut reader = BufReader::new(stdout);
     let mut line: Vec<u8> = Vec::new();
 
@@ -275,74 +428,8 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
         }
 
         for parsed in parser.feed(&line) {
-            match parsed {
-                Parsed::Begin { num, .. } => {
-                    tracing::trace!(num, "tmux control: begin");
-                    blocks.insert(num, Vec::new());
-                    open = Some(num);
-                    if handshake_done {
-                        if let Some(waiter) = shared.take_waiter() {
-                            claimed.insert(num, waiter);
-                        }
-                    }
-                }
-                Parsed::End { num } => {
-                    tracing::trace!(num, "tmux control: end");
-                    let output = blocks.remove(&num).unwrap_or_default();
-                    if open == Some(num) {
-                        open = None;
-                    }
-                    if let Some(waiter) = claimed.remove(&num) {
-                        let _ = waiter.send(Ok(output));
-                    }
-                    handshake_done = true;
-                }
-                Parsed::Error { num, message } => {
-                    tracing::warn!(num, message, "tmux control: error");
-                    blocks.remove(&num);
-                    if open == Some(num) {
-                        open = None;
-                    }
-                    let message = if message.trim().is_empty() {
-                        format!("tmux command {num} failed")
-                    } else {
-                        message
-                    };
-                    if let Some(waiter) = claimed.remove(&num) {
-                        let _ = waiter.send(Err(Error::Transport(message)));
-                    }
-                    handshake_done = true;
-                }
-                Parsed::Output { pane, bytes } => {
-                    tracing::trace!(pane, len = bytes.len(), "tmux control: output");
-                    shared.deliver_output(&pane, bytes);
-                }
-                Parsed::Event(event) => {
-                    let exit = matches!(&event, TmuxEvent::Exit { .. });
-                    if exit {
-                        if let TmuxEvent::Exit { reason } = &event {
-                            tracing::info!(reason, "tmux control: exit");
-                        }
-                    }
-                    shared.deliver_event(event);
-                    if exit {
-                        shared.shutdown();
-                        return;
-                    }
-                }
-                Parsed::Unknown(text) => {
-                    if let Some(num) = open {
-                        if claimed.contains_key(&num) {
-                            if let Some(output) = blocks.get_mut(&num) {
-                                output.push(text);
-                                continue;
-                            }
-                        }
-                    }
-                    if text.starts_with('%') {
-                        continue;
-                    }
-                }
+            if !handle_parsed(&mut state, &shared, parsed) {
+                return;
             }
         }
     }
