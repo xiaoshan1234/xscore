@@ -1,4 +1,7 @@
-//! `tmux -CC` 控制客户端：一个 session 一个进程，独立 reader/writer 线程。
+//! `tmux -C` 控制客户端：一个 session 一个进程，独立 reader/writer 线程。
+//!
+//! 跑在独立 PTY 上以隔离宿主控制台（尤其 `wsl.exe` 这类会抢占控制台输入的程序）。
+//! `-F` 分隔符用可打印 `|`，tmux 不会转义，因此 tty 与否都不影响解析。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};

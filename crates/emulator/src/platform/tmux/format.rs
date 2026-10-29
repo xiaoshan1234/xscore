@@ -1,7 +1,7 @@
 //! tmux 的两类文本接口：`-F` 输出解析与 `send-keys` 命令行。
 //!
-//! 注意：`-F` 里的 tab 会被 tmux 在输出到 tty 时展开成 `ESC[NC` 光标右移序列，
-//! 所以字段分隔符用 `\x1f`（US，unit separator），解析端按它切分。
+//! 注意：tmux 会把 `-F` 格式里的控制字符转义——tab 展开成 `ESC[NC`，其余 C0
+//! 控制字节变成 `\ooo`。所以字段分隔符用可打印的 `|`，tmux 会原样输出。
 
 use std::fmt::Write as _;
 
@@ -9,9 +9,9 @@ use super::{TmuxHostConfig, TmuxSocket};
 use crate::{Error, Result};
 
 pub const LIST_WINDOWS_FORMAT: &str =
-    "#{window_id}\x1f#{window_name}\x1f#{window_width}\x1f#{window_height}\x1f#{window_layout}\x1f#{window_active}";
+    "#{window_id}|#{window_name}|#{window_width}|#{window_height}|#{window_layout}|#{window_active}";
 pub const LIST_PANES_FORMAT: &str =
-    "#{pane_id}\x1f#{pane_width}\x1f#{pane_height}\x1f#{pane_left}\x1f#{pane_top}";
+    "#{pane_id}|#{pane_width}|#{pane_height}|#{pane_left}|#{pane_top}";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowLine {
@@ -33,7 +33,7 @@ pub struct PaneLine {
 }
 
 pub fn parse_window_line(line: &str) -> Option<WindowLine> {
-    let fields: Vec<&str> = line.split('\x1f').collect();
+    let fields: Vec<&str> = line.split('|').collect();
     if fields.len() != 6 {
         return None;
     }
@@ -52,7 +52,7 @@ pub fn parse_window_line(line: &str) -> Option<WindowLine> {
 }
 
 pub fn parse_pane_line(line: &str) -> Option<PaneLine> {
-    let fields: Vec<&str> = line.split('\x1f').collect();
+    let fields: Vec<&str> = line.split('|').collect();
     if fields.len() != 5 {
         return None;
     }
@@ -157,16 +157,15 @@ mod tests {
 
     #[test]
     fn window_and_pane_lines_parse() {
-        let window =
-            parse_window_line("@3\x1fvim\x1f100\x1f30\x1fb67d,100x30,0,0,0\x1f1").unwrap();
+        let window = parse_window_line("@3|vim|100|30|b67d,100x30,0,0,0|1").unwrap();
         assert_eq!(window.handle, "@3");
         assert_eq!((window.cols, window.rows), (100, 30));
 
-        let pane = parse_pane_line("%0\x1f100\x1f23\x1f0\x1f1").unwrap();
+        let pane = parse_pane_line("%0|100|23|0|1").unwrap();
         assert_eq!(pane.handle, "%0");
         assert_eq!((pane.cols, pane.rows), (100, 23));
-        assert!(parse_window_line("3\x1fvim\x1f100\x1f30\x1fb67d\x1f1").is_none());
-        assert!(parse_pane_line("%0\x1f100\x1f23\x1f0").is_none());
+        assert!(parse_window_line("3|vim|100|30|b67d|1").is_none());
+        assert!(parse_pane_line("%0|100|23|0").is_none());
     }
 
     #[test]
