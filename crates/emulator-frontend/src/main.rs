@@ -4,16 +4,17 @@
 use anyhow::{anyhow, Context, Result};
 use emulator::domain::{Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind};
 use emulator::platform::Size;
-use emulator::term::{RawTerm, TerminalCore};
+use emulator::term::{TerminalCore, VtTerm};
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 
 struct PaneEntry {
     handle: Arc<dyn PaneHandle>,
-    term: Arc<Mutex<RawTerm>>,
+    term: Arc<Mutex<VtTerm>>,
 }
 
 struct App {
@@ -47,7 +48,7 @@ impl App {
             .await?;
         let id = handle.id();
 
-        let term = Arc::new(Mutex::new(RawTerm::new(cols, rows)));
+        let term = Arc::new(Mutex::new(VtTerm::new(cols, rows)));
         let mut rx = handle.subscribe();
         let pump = term.clone();
         tokio::spawn(async move {
@@ -77,6 +78,8 @@ impl App {
             return Err(anyhow!("usage: read <pane-id>"));
         }
         let entry = self.get_pane(&words[1])?;
+        // 给后台 pump 一个极短的静默窗口，让刚到达的字节先喂进网格。
+        tokio::time::sleep(Duration::from_millis(60)).await;
         let snap = entry.term.lock().await.snapshot();
         let mut out = std::io::stdout();
         out.write_all(snap.as_bytes())?;

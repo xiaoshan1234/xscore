@@ -44,7 +44,11 @@ impl Domain for LocalDomain {
             }
         });
 
-        Ok(Arc::new(LocalPane { id, pty, output: tx }))
+        Ok(Arc::new(LocalPane {
+            id,
+            pty,
+            output: tx,
+        }))
     }
 
     async fn close(&self) -> Result<()> {
