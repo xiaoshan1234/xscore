@@ -2,7 +2,7 @@
 
 use crate::domain::{Domain, PaneConfig, PaneHandle, PaneId, PaneKind};
 use crate::platform::{LocalPty, Size};
-use crate::Result;
+use crate::{Error, Result};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,13 +26,21 @@ impl Domain for LocalDomain {
     }
 
     async fn spawn_pane(&self, config: &PaneConfig) -> Result<Arc<dyn PaneHandle>> {
+        let PaneConfig::Local {
+            command,
+            args,
+            cwd,
+            cols,
+            rows,
+        } = config
+        else {
+            return Err(Error::Invalid(
+                "local domain requires Local pane config".into(),
+            ));
+        };
         let id = PaneId::new(self.next_pane.fetch_add(1, Ordering::Relaxed) + 1);
-        let pty = Arc::new(LocalPty::new(
-            config.command.clone(),
-            config.args.clone(),
-            config.cwd.clone(),
-        ));
-        let mut rx = pty.spawn(Size::new(config.cols, config.rows))?;
+        let pty = Arc::new(LocalPty::new(command.clone(), args.clone(), cwd.clone()));
+        let mut rx = pty.spawn(Size::new(*cols, *rows))?;
 
         let (tx, _) = broadcast::channel::<Vec<u8>>(256);
         let tx_pump = tx.clone();

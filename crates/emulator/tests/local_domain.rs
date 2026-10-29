@@ -13,7 +13,7 @@ async fn local_pane_roundtrip() {
 
     let domain = LocalDomain::new();
     let handle = domain
-        .spawn_pane(&PaneConfig {
+        .spawn_pane(&PaneConfig::Local {
             command: program.to_string(),
             args: args.into_iter().map(str::to_string).collect(),
             cwd: None,

@@ -1,6 +1,8 @@
 //! L1 域/连接抽象：把“连接”抽象为可插拔 Domain，产出统一 PaneHandle。
 
 pub mod local;
+pub mod ssh;
+pub mod tmux;
 
 use crate::platform::Size;
 use crate::Result;
@@ -9,6 +11,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub use local::{LocalDomain, LocalPane};
+pub use ssh::{RemoteSshDomain, SshPane};
+pub use tmux::{TmuxDomain, TmuxPane};
 
 /// 逻辑窗格句柄标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,14 +42,24 @@ pub enum PaneKind {
     Tmux,
 }
 
-/// 新建 pane 的配置。
+/// 新建 pane 的配置：按后端类型区分。
 #[derive(Debug, Clone)]
-pub struct PaneConfig {
-    pub command: String,
-    pub args: Vec<String>,
-    pub cwd: Option<String>,
-    pub cols: u16,
-    pub rows: u16,
+pub enum PaneConfig {
+    Local {
+        command: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
+    Ssh {
+        host: String,
+        port: u16,
+        user: String,
+        identity: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
 }
 
 #[async_trait]

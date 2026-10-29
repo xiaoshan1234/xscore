@@ -2,7 +2,10 @@
 //! 读取。
 
 use anyhow::{anyhow, Context, Result};
-use emulator::domain::{Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind};
+use emulator::domain::{
+    Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind, RemoteSshDomain, TmuxDomain,
+};
+use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
 use emulator::term::{TerminalCore, VtTerm};
 use std::collections::HashMap;
@@ -34,11 +37,10 @@ impl App {
         }
         let cols = 80u16;
         let rows = 24u16;
-
         // LocalDomain 是 1:1 域：一个连接对应一个 pane。
         let domain = LocalDomain::new();
         let handle = domain
-            .spawn_pane(&PaneConfig {
+            .spawn_pane(&PaneConfig::Local {
                 command: words[1].clone(),
                 args: words[2..].to_vec(),
                 cwd: None,
@@ -46,8 +48,79 @@ impl App {
                 rows,
             })
             .await?;
-        let id = handle.id();
+        let id = self.attach_pane(handle, cols, rows);
+        println!("pane: {id}  kind: local  {cols}x{rows}");
+        Ok(())
+    }
 
+    async fn ssh(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 2 {
+            return Err(anyhow!("usage: ssh <user@host[:port]> [identity]"));
+        }
+        let (user, host, port) = parse_ssh_target(&words[1])?;
+        let identity = words.get(2).cloned();
+        let cols = 80u16;
+        let rows = 24u16;
+        let domain = RemoteSshDomain::new();
+        let handle = domain
+            .spawn_pane(&PaneConfig::Ssh {
+                host,
+                port,
+                user,
+                identity,
+                cols,
+                rows,
+            })
+            .await?;
+        let id = self.attach_pane(handle, cols, rows);
+        println!("pane: {id}  kind: ssh  {cols}x{rows}");
+        Ok(())
+    }
+
+    async fn tmux(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 2 {
+            return Err(anyhow!(
+                "usage: tmux <session> [-L <socket-name> | -S <socket-path>]"
+            ));
+        }
+        let session = words[1].clone();
+        let mut socket = TmuxSocket::Default;
+        let mut i = 2;
+        while i < words.len() {
+            match words[i].as_str() {
+                "-L" => {
+                    i += 1;
+                    let name = words
+                        .get(i)
+                        .ok_or_else(|| anyhow!("-L requires a socket name"))?;
+                    socket = TmuxSocket::Named(name.clone());
+                }
+                "-S" => {
+                    i += 1;
+                    let path = words
+                        .get(i)
+                        .ok_or_else(|| anyhow!("-S requires a socket path"))?;
+                    socket = TmuxSocket::Path(path.clone());
+                }
+                other => return Err(anyhow!("unknown tmux option: {other}")),
+            }
+            i += 1;
+        }
+
+        let domain = TmuxDomain::new();
+        let panes = domain
+            .attach(&TmuxHostConfig::Local, &socket, &session)
+            .await?;
+        for pane in panes {
+            let (cols, rows) = (pane.cols(), pane.rows());
+            let id = self.attach_pane(pane, cols, rows);
+            println!("pane: {id}  kind: tmux  {cols}x{rows}");
+        }
+        Ok(())
+    }
+
+    fn attach_pane(&mut self, handle: Arc<dyn PaneHandle>, cols: u16, rows: u16) -> PaneId {
+        let id = handle.id();
         let term = Arc::new(Mutex::new(VtTerm::new(cols, rows)));
         let mut rx = handle.subscribe();
         let pump = term.clone();
@@ -56,10 +129,8 @@ impl App {
                 pump.lock().await.feed(&chunk);
             }
         });
-
         self.panes.insert(id, PaneEntry { handle, term });
-        println!("pane: {id}  kind: local  {cols}x{rows}");
-        Ok(())
+        id
     }
 
     async fn write(&self, words: &[String]) -> Result<()> {
@@ -132,6 +203,8 @@ impl App {
 fn help() {
     println!("commands:");
     println!("  shell <program> [args...]   spawn a local shell pane");
+    println!("  ssh <user@host[:port]> [identity]   spawn a remote ssh pane");
+    println!("  tmux <session> [-L <socket>]   attach to a tmux session");
     println!("  write <pane-id> <text>      send text + newline to the pane");
     println!("  read  <pane-id>             print accumulated output");
     println!("  resize <pane-id> <c> <r>    resize the pane");
@@ -139,9 +212,25 @@ fn help() {
     println!("  quit | exit                 leave");
 }
 
+fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
+    let (user, rest) = target
+        .split_once('@')
+        .ok_or_else(|| anyhow!("expected user@host[:port], got {target}"))?;
+    let (host, port) = match rest.split_once(':') {
+        Some((host, port)) => (host.to_string(), port.parse::<u16>().context("port")?),
+        None => (rest.to_string(), 22),
+    };
+    if user.is_empty() || host.is_empty() {
+        return Err(anyhow!("invalid ssh target {target}"));
+    }
+    Ok((user.to_string(), host, port))
+}
+
 async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
     match words[0].as_str() {
         "shell" => app.shell(words).await?,
+        "ssh" => app.ssh(words).await?,
+        "tmux" => app.tmux(words).await?,
         "write" => app.write(words).await?,
         "read" => app.read(words).await?,
         "resize" => app.resize(words).await?,
@@ -179,4 +268,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_target_with_default_port() {
+        let (user, host, port) = parse_ssh_target("dev@box").unwrap();
+        assert_eq!((user.as_str(), host.as_str(), port), ("dev", "box", 22));
+    }
+
+    #[test]
+    fn ssh_target_with_port() {
+        let (user, host, port) = parse_ssh_target("dev@box:2222").unwrap();
+        assert_eq!((user.as_str(), host.as_str(), port), ("dev", "box", 2222));
+    }
+
+    #[test]
+    fn ssh_target_requires_user() {
+        assert!(parse_ssh_target("box").is_err());
+    }
 }

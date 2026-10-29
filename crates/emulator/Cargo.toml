@@ -10,3 +10,5 @@ thiserror.workspace = true
 async-trait.workspace = true
 portable-pty.workspace = true
 tracing.workspace = true
+russh.workspace = true
+russh-keys.workspace = true

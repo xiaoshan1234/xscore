@@ -564,6 +564,8 @@ version = "0.6.0"
 dependencies = [
  "async-trait",
  "portable-pty",
+ "russh",
+ "russh-keys",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

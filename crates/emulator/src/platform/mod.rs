@@ -9,6 +9,9 @@ use std::io::{Read, Write};
 use std::sync::Mutex as StdMutex;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+pub mod ssh;
+pub mod tmux;
+
 /// 窗格/终端尺寸（字符行列）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Size {
