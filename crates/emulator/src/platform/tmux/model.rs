@@ -8,6 +8,9 @@ pub enum TmuxHostConfig {
         destination: String,
         args: Vec<String>,
     },
+    Wsl {
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

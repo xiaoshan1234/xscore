@@ -111,6 +111,12 @@ pub fn host_prefix(host: &TmuxHostConfig) -> Vec<String> {
             argv.push(destination.clone());
             argv
         }
+        TmuxHostConfig::Wsl { args } => {
+            let mut argv = vec!["wsl.exe".to_string()];
+            argv.extend(args.iter().cloned());
+            argv.push("--exec".to_string());
+            argv
+        }
     }
 }
 
@@ -178,6 +184,17 @@ mod tests {
         assert_eq!(
             socket_args(&TmuxSocket::Named("x".into())),
             vec!["-L".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn host_prefix_wsl_execs_tmux() {
+        let host = TmuxHostConfig::Wsl {
+            args: vec!["--distribution".into(), "Ubuntu".into()],
+        };
+        assert_eq!(
+            host_prefix(&host),
+            ["wsl.exe", "--distribution", "Ubuntu", "--exec"]
         );
     }
 }

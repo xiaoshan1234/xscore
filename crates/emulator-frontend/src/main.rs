@@ -139,6 +139,14 @@ impl App {
         Ok(())
     }
 
+    async fn wsl(&mut self, words: &[String]) -> Result<()> {
+        let args = words[1..].to_vec();
+        let id = self.spawn_local("wsl.exe".to_string(), args).await?;
+        self.layout.add(id);
+        println!("pane: {id}  kind: wsl  80x24");
+        Ok(())
+    }
+
     fn register_pane(&mut self, handle: Arc<dyn PaneHandle>, cols: u16, rows: u16) -> PaneId {
         let id = handle.id();
         let term = Arc::new(Mutex::new(VtTerm::new(cols, rows)));
@@ -256,7 +264,8 @@ fn help() {
     println!("commands:");
     println!("  shell <program> [args...]   spawn a local shell pane");
     println!("  ssh <user@host[:port]> [identity]   spawn a remote ssh pane");
-    println!("  tmux <session> [-L <socket>] [--ssh <dest>]   attach to a tmux session");
+    println!("  wsl [args...]               spawn a WSL shell pane (Windows)");
+    println!("  tmux <session> [-L <socket>] [--ssh <dest> | --wsl]   attach to a tmux session");
     println!("  split h|v <program> [args...]   split the focused pane");
     println!("  write <pane-id> <text>      send text + newline to the pane");
     println!("  read  <pane-id>             print accumulated output");
@@ -284,13 +293,14 @@ fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
 fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConfig)> {
     if words.len() < 2 {
         return Err(anyhow!(
-            "usage: tmux <session> [-L <name> | -S <path>] [--ssh <dest>] [--ssh-arg <arg>]"
+            "usage: tmux <session> [-L <name> | -S <path>] [--ssh <dest> | --wsl] [--*-arg <arg>]"
         ));
     }
     let session = words[1].clone();
     let mut socket = TmuxSocket::Default;
     let mut host = TmuxHostConfig::Local;
     let mut ssh_seen = false;
+    let mut wsl_seen = false;
     let mut i = 2;
     while i < words.len() {
         match words[i].as_str() {
@@ -312,6 +322,9 @@ fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConf
                 if ssh_seen {
                     return Err(anyhow!("--ssh may only be given once"));
                 }
+                if wsl_seen {
+                    return Err(anyhow!("--ssh and --wsl are mutually exclusive"));
+                }
                 i += 1;
                 let destination = words
                     .get(i)
@@ -329,7 +342,27 @@ fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConf
                     .ok_or_else(|| anyhow!("--ssh-arg requires an argument"))?;
                 match &mut host {
                     TmuxHostConfig::Ssh { args, .. } => args.push(arg.clone()),
-                    TmuxHostConfig::Local => return Err(anyhow!("--ssh-arg requires --ssh first")),
+                    _ => return Err(anyhow!("--ssh-arg requires --ssh first")),
+                }
+            }
+            "--wsl" => {
+                if wsl_seen {
+                    return Err(anyhow!("--wsl may only be given once"));
+                }
+                if ssh_seen {
+                    return Err(anyhow!("--ssh and --wsl are mutually exclusive"));
+                }
+                host = TmuxHostConfig::Wsl { args: Vec::new() };
+                wsl_seen = true;
+            }
+            "--wsl-arg" => {
+                i += 1;
+                let arg = words
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--wsl-arg requires an argument"))?;
+                match &mut host {
+                    TmuxHostConfig::Wsl { args } => args.push(arg.clone()),
+                    _ => return Err(anyhow!("--wsl-arg requires --wsl first")),
                 }
             }
             other => return Err(anyhow!("unknown tmux option: {other}")),
@@ -343,6 +376,7 @@ async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
     match words[0].as_str() {
         "shell" => app.shell(words).await?,
         "ssh" => app.ssh(words).await?,
+        "wsl" => app.wsl(words).await?,
         "tmux" => app.tmux(words).await?,
         "split" => app.split(words).await?,
         "write" => app.write(words).await?,
@@ -437,5 +471,24 @@ mod tests {
     #[test]
     fn tmux_args_ssh_arg_requires_ssh() {
         assert!(parse_tmux_args(&words("tmux work --ssh-arg -p")).is_err());
+    }
+
+    #[test]
+    fn tmux_args_wsl() {
+        let (_, _, host) = parse_tmux_args(&words(
+            "tmux work --wsl --wsl-arg --distribution --wsl-arg Ubuntu",
+        ))
+        .unwrap();
+        assert_eq!(
+            host,
+            TmuxHostConfig::Wsl {
+                args: vec!["--distribution".into(), "Ubuntu".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn tmux_args_ssh_and_wsl_conflict() {
+        assert!(parse_tmux_args(&words("tmux work --ssh dev@box --wsl")).is_err());
     }
 }
