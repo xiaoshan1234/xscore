@@ -59,6 +59,12 @@ impl SshConnection {
 
     /// 连接、认证、申请 PTY 与 shell，返回远程输出字节流。
     pub async fn connect(&self, size: Size) -> Result<UnboundedReceiver<Vec<u8>>> {
+        tracing::debug!(
+            host = %self.host,
+            port = self.port,
+            user = %self.user,
+            "ssh connect"
+        );
         let key_arc = match &self.identity {
             Some(path) => {
                 let key = russh_keys::load_secret_key(path, None)

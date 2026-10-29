@@ -13,11 +13,43 @@ use emulator::term::{TerminalCore, VtTerm};
 use std::collections::HashMap;
 use std::io::Write as _;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
+use tracing_subscriber::filter::LevelFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer;
 
 use layout::{Direction, Layout, TmuxContainer};
+
+fn init_logging() -> Result<()> {
+    let path = std::env::var("XSCORE_LOG").unwrap_or_else(|_| "emulator.log".to_string());
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open log file {path}"))?;
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(StdMutex::new(file))
+        .with_ansi(false);
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(LevelFilter::WARN);
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("emulator=debug,emulator_frontend=debug"));
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stderr_layer)
+        .try_init()
+        .context("init tracing subscriber")?;
+    Ok(())
+}
 
 struct PaneEntry {
     handle: Arc<dyn PaneHandle>,
@@ -394,7 +426,9 @@ async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
+    if let Err(e) = init_logging() {
+        eprintln!("warning: logging disabled: {e:#}");
+    }
     let mut app = App::new();
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();

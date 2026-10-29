@@ -62,6 +62,13 @@ impl LocalPty {
 
     /// 打开 PTY、启动子进程，返回子进程输出字节流（每段一个 chunk）。
     pub fn spawn(&self, size: Size) -> Result<UnboundedReceiver<Vec<u8>>> {
+        tracing::debug!(
+            command = %self.command,
+            args = ?self.args,
+            cols = size.cols,
+            rows = size.rows,
+            "pty spawn"
+        );
         if self.master.lock().unwrap().is_some() {
             return Err(Error::Invalid("pty already spawned".into()));
         }

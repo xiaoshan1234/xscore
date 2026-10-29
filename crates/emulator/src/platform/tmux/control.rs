@@ -26,7 +26,7 @@ pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String
     argv.push("tmux".to_string());
     argv.extend(socket_args(socket));
     argv.extend([
-        "-CC".to_string(),
+        "-C".to_string(),
         "attach".to_string(),
         "-t".to_string(),
         session.to_string(),
@@ -97,6 +97,7 @@ impl TmuxControl {
             return Err(Error::Invalid("tmux session name must not be empty".into()));
         }
         let argv = argv(prefix, socket, session);
+        tracing::debug!(argv = %argv.join(" "), session, "tmux control: spawn");
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| Error::Transport("empty tmux command line".into()))?;
@@ -152,6 +153,7 @@ impl TmuxControl {
     }
 
     pub async fn send(&self, command: &str) -> Result<Vec<String>> {
+        tracing::debug!(command, "tmux control: send");
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(gone(&self.session));
         }
@@ -168,8 +170,18 @@ impl TmuxControl {
         }
 
         match rx.await {
-            Ok(reply) => reply,
-            Err(_) => Err(gone(&self.session)),
+            Ok(Ok(reply)) => {
+                tracing::debug!(command, lines = reply.len(), "tmux control: reply");
+                Ok(reply)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(command, error = %e, "tmux control: command failed");
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(command, "tmux control: reply channel closed");
+                Err(gone(&self.session))
+            }
         }
     }
 
@@ -247,15 +259,22 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
+            Ok(0) => {
+                tracing::debug!("tmux control: stdout EOF");
+                break;
+            }
             Ok(_) => {}
             Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "tmux control: read error");
+                break;
+            }
         }
 
         for parsed in parser.feed(&line) {
             match parsed {
                 Parsed::Begin { num, .. } => {
+                    tracing::trace!(num, "tmux control: begin");
                     blocks.insert(num, Vec::new());
                     open = Some(num);
                     if handshake_done {
@@ -265,6 +284,7 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
                     }
                 }
                 Parsed::End { num } => {
+                    tracing::trace!(num, "tmux control: end");
                     let output = blocks.remove(&num).unwrap_or_default();
                     if open == Some(num) {
                         open = None;
@@ -275,6 +295,7 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
                     handshake_done = true;
                 }
                 Parsed::Error { num, message } => {
+                    tracing::warn!(num, message, "tmux control: error");
                     blocks.remove(&num);
                     if open == Some(num) {
                         open = None;
@@ -289,9 +310,17 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
                     }
                     handshake_done = true;
                 }
-                Parsed::Output { pane, bytes } => shared.deliver_output(&pane, bytes),
+                Parsed::Output { pane, bytes } => {
+                    tracing::trace!(pane, len = bytes.len(), "tmux control: output");
+                    shared.deliver_output(&pane, bytes);
+                }
                 Parsed::Event(event) => {
-                    let exit = matches!(event, TmuxEvent::Exit { .. });
+                    let exit = matches!(&event, TmuxEvent::Exit { .. });
+                    if exit {
+                        if let TmuxEvent::Exit { reason } = &event {
+                            tracing::info!(reason, "tmux control: exit");
+                        }
+                    }
                     shared.deliver_event(event);
                     if exit {
                         shared.shutdown();
@@ -332,7 +361,7 @@ mod tests {
     fn argv_is_the_measured_shape() {
         assert_eq!(
             argv(&[], &TmuxSocket::Default, "work"),
-            ["tmux", "-CC", "attach", "-t", "work"]
+            ["tmux", "-C", "attach", "-t", "work"]
         );
         let prefix: Vec<String> = ["ssh", "-o", "BatchMode=yes", "devbox"]
             .iter()
@@ -348,7 +377,7 @@ mod tests {
                 "tmux",
                 "-L",
                 "x",
-                "-CC",
+                "-C",
                 "attach",
                 "-t",
                 "work"

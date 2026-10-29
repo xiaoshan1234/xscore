@@ -27,14 +27,17 @@ impl TmuxDomain {
         session: &str,
     ) -> Result<Vec<Arc<TmuxPane>>> {
         let prefix = host_prefix(host);
+        tracing::debug!(session, ?socket, ?host, "tmux attach");
         let control = Arc::new(TmuxControl::spawn(&prefix, socket, session)?);
         let mut panes = Vec::new();
 
         for line in control.send(&list_windows_command(session)).await? {
+            tracing::debug!(line = ?line, "tmux attach: window line");
             let Some(window) = parse_window_line(&line) else {
                 continue;
             };
             for line in control.send(&list_panes_command(&window.handle)).await? {
+                tracing::debug!(line = ?line, "tmux attach: pane line");
                 let Some(pane) = parse_pane_line(&line) else {
                     continue;
                 };
@@ -48,6 +51,7 @@ impl TmuxDomain {
             }
         }
 
+        tracing::debug!(panes = panes.len(), "tmux attach: enumerated");
         Ok(panes)
     }
 
