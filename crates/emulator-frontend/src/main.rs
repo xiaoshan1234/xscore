@@ -85,39 +85,9 @@ impl App {
     }
 
     async fn tmux(&mut self, words: &[String]) -> Result<()> {
-        if words.len() < 2 {
-            return Err(anyhow!(
-                "usage: tmux <session> [-L <socket-name> | -S <socket-path>]"
-            ));
-        }
-        let session = words[1].clone();
-        let mut socket = TmuxSocket::Default;
-        let mut i = 2;
-        while i < words.len() {
-            match words[i].as_str() {
-                "-L" => {
-                    i += 1;
-                    let name = words
-                        .get(i)
-                        .ok_or_else(|| anyhow!("-L requires a socket name"))?;
-                    socket = TmuxSocket::Named(name.clone());
-                }
-                "-S" => {
-                    i += 1;
-                    let path = words
-                        .get(i)
-                        .ok_or_else(|| anyhow!("-S requires a socket path"))?;
-                    socket = TmuxSocket::Path(path.clone());
-                }
-                other => return Err(anyhow!("unknown tmux option: {other}")),
-            }
-            i += 1;
-        }
-
+        let (session, socket, host) = parse_tmux_args(words)?;
         let domain = TmuxDomain::new();
-        let panes = domain
-            .attach(&TmuxHostConfig::Local, &socket, &session)
-            .await?;
+        let panes = domain.attach(&host, &socket, &session).await?;
 
         let mut groups: Vec<(String, Vec<PaneId>)> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
@@ -286,7 +256,7 @@ fn help() {
     println!("commands:");
     println!("  shell <program> [args...]   spawn a local shell pane");
     println!("  ssh <user@host[:port]> [identity]   spawn a remote ssh pane");
-    println!("  tmux <session> [-L <socket>]   attach to a tmux session");
+    println!("  tmux <session> [-L <socket>] [--ssh <dest>]   attach to a tmux session");
     println!("  split h|v <program> [args...]   split the focused pane");
     println!("  write <pane-id> <text>      send text + newline to the pane");
     println!("  read  <pane-id>             print accumulated output");
@@ -309,6 +279,64 @@ fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
         return Err(anyhow!("invalid ssh target {target}"));
     }
     Ok((user.to_string(), host, port))
+}
+
+fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConfig)> {
+    if words.len() < 2 {
+        return Err(anyhow!(
+            "usage: tmux <session> [-L <name> | -S <path>] [--ssh <dest>] [--ssh-arg <arg>]"
+        ));
+    }
+    let session = words[1].clone();
+    let mut socket = TmuxSocket::Default;
+    let mut host = TmuxHostConfig::Local;
+    let mut ssh_seen = false;
+    let mut i = 2;
+    while i < words.len() {
+        match words[i].as_str() {
+            "-L" => {
+                i += 1;
+                let name = words
+                    .get(i)
+                    .ok_or_else(|| anyhow!("-L requires a socket name"))?;
+                socket = TmuxSocket::Named(name.clone());
+            }
+            "-S" => {
+                i += 1;
+                let path = words
+                    .get(i)
+                    .ok_or_else(|| anyhow!("-S requires a socket path"))?;
+                socket = TmuxSocket::Path(path.clone());
+            }
+            "--ssh" => {
+                if ssh_seen {
+                    return Err(anyhow!("--ssh may only be given once"));
+                }
+                i += 1;
+                let destination = words
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--ssh requires a destination"))?;
+                host = TmuxHostConfig::Ssh {
+                    destination: destination.clone(),
+                    args: Vec::new(),
+                };
+                ssh_seen = true;
+            }
+            "--ssh-arg" => {
+                i += 1;
+                let arg = words
+                    .get(i)
+                    .ok_or_else(|| anyhow!("--ssh-arg requires an argument"))?;
+                match &mut host {
+                    TmuxHostConfig::Ssh { args, .. } => args.push(arg.clone()),
+                    TmuxHostConfig::Local => return Err(anyhow!("--ssh-arg requires --ssh first")),
+                }
+            }
+            other => return Err(anyhow!("unknown tmux option: {other}")),
+        }
+        i += 1;
+    }
+    Ok((session, socket, host))
 }
 
 async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
@@ -377,5 +405,37 @@ mod tests {
     #[test]
     fn ssh_target_requires_user() {
         assert!(parse_ssh_target("box").is_err());
+    }
+
+    fn words(input: &str) -> Vec<String> {
+        input.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn tmux_args_default_local() {
+        let (session, socket, host) = parse_tmux_args(&words("tmux work -L x")).unwrap();
+        assert_eq!(session, "work");
+        assert_eq!(socket, TmuxSocket::Named("x".into()));
+        assert_eq!(host, TmuxHostConfig::Local);
+    }
+
+    #[test]
+    fn tmux_args_ssh_with_extra_args() {
+        let (_, _, host) = parse_tmux_args(&words(
+            "tmux work --ssh dev@box --ssh-arg -p --ssh-arg 2222",
+        ))
+        .unwrap();
+        assert_eq!(
+            host,
+            TmuxHostConfig::Ssh {
+                destination: "dev@box".into(),
+                args: vec!["-p".into(), "2222".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn tmux_args_ssh_arg_requires_ssh() {
+        assert!(parse_tmux_args(&words("tmux work --ssh-arg -p")).is_err());
     }
 }
