@@ -97,6 +97,13 @@ impl Layout {
         found
     }
 
+    pub fn add_pane_to_window(&mut self, window: &str, pane: PaneId) -> bool {
+        match self.root.as_mut() {
+            Some(root) => add_pane_to_window_in(root, window, pane),
+            None => false,
+        }
+    }
+
     pub fn remove_pane(&mut self, pane: PaneId) {
         self.root = self.root.take().and_then(|root| remove_pane_in(root, pane));
         self.focused = self.root.as_ref().and_then(node_focus);
@@ -165,6 +172,21 @@ fn set_mirror_active_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
         }
         Node::Branch { left, right, .. } => {
             set_mirror_active_in(left, window, pane) || set_mirror_active_in(right, window, pane)
+        }
+        _ => false,
+    }
+}
+
+fn add_pane_to_window_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
+    match node {
+        Node::TmuxMirror(container) if container.window == window => {
+            if !container.panes.contains(&pane) {
+                container.panes.push(pane);
+            }
+            true
+        }
+        Node::Branch { left, right, .. } => {
+            add_pane_to_window_in(left, window, pane) || add_pane_to_window_in(right, window, pane)
         }
         _ => false,
     }
@@ -321,5 +343,13 @@ mod tests {
         layout.add(PaneId::new(20));
         layout.remove_window("@1");
         assert_eq!(layout.render(), "P20");
+    }
+
+    #[test]
+    fn add_pane_to_window() {
+        let mut layout = Layout::new();
+        layout.add_mirror(mirror("@1", &[10]));
+        assert!(layout.add_pane_to_window("@1", PaneId::new(11)));
+        assert_eq!(layout.render(), "@1[P10*,P11]");
     }
 }

@@ -5,8 +5,8 @@ mod layout;
 
 use anyhow::{anyhow, Context, Result};
 use emulator::domain::{
-    Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind, RemoteSshDomain, TmuxDomain,
-    TmuxPane,
+    make_pane, Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind, RemoteSshDomain,
+    TmuxDomain, TmuxPane,
 };
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
@@ -375,6 +375,7 @@ impl App {
             set.into_iter().collect()
         };
         let mut removed = 0usize;
+        let mut added = 0usize;
         for session in sessions {
             let Some(rep_id) = self
                 .tmux
@@ -384,35 +385,73 @@ impl App {
             else {
                 continue;
             };
-            let windows = {
+            let (windows, control) = {
                 let entry = self.panes.get(&rep_id).unwrap();
                 let tmux_pane = entry
                     .handle
                     .as_any()
                     .downcast_ref::<TmuxPane>()
                     .expect("tmux meta must point at a TmuxPane");
-                tmux_pane.enumerate_windows().await?
+                let windows = tmux_pane.enumerate_windows().await?;
+                (windows, tmux_pane.control().clone())
             };
-            let mut handles: HashSet<String> = HashSet::new();
+            let mut desired: HashMap<String, (String, u16, u16)> = HashMap::new();
             for window in &windows {
                 for pane in &window.panes {
-                    handles.insert(pane.handle.clone());
+                    desired.insert(
+                        pane.handle.clone(),
+                        (window.handle.clone(), pane.cols, pane.rows),
+                    );
                 }
             }
-            let local: Vec<(PaneId, String)> = self
+            let local: HashMap<String, PaneId> = self
                 .tmux
                 .iter()
                 .filter(|(_, m)| m.session == session)
-                .map(|(id, m)| (*id, m.handle.clone()))
+                .map(|(id, m)| (m.handle.clone(), *id))
                 .collect();
-            for (id, handle) in local {
-                if !handles.contains(&handle) {
-                    self.remove_pane_local(id);
-                    removed += 1;
+
+            let gone: Vec<PaneId> = local
+                .iter()
+                .filter(|(handle, _)| !desired.contains_key(*handle))
+                .map(|(_, id)| *id)
+                .collect();
+            for id in gone {
+                self.remove_pane_local(id);
+                removed += 1;
+            }
+
+            for (handle, (window, cols, rows)) in &desired {
+                if !local.contains_key(handle) {
+                    let new_pane = make_pane(
+                        control.clone(),
+                        window.clone(),
+                        handle.clone(),
+                        *cols,
+                        *rows,
+                    );
+                    let id = self.register_pane(new_pane, *cols, *rows);
+                    self.tmux.insert(
+                        id,
+                        TmuxMeta {
+                            session: session.clone(),
+                            window: window.clone(),
+                            handle: handle.clone(),
+                        },
+                    );
+                    if !self.layout.add_pane_to_window(window, id) {
+                        let container = TmuxContainer {
+                            window: window.clone(),
+                            panes: vec![id],
+                            active: Some(id),
+                        };
+                        self.layout.add_mirror(container);
+                    }
+                    added += 1;
                 }
             }
         }
-        println!("sync: removed {removed} pane(s)");
+        println!("sync: removed {removed} pane(s), added {added} pane(s)");
         Ok(())
     }
 

@@ -91,7 +91,7 @@ impl TmuxDomain {
         let mut panes = Vec::new();
         for window in &windows {
             for pane in &window.panes {
-                panes.push(self.make_pane(
+                panes.push(make_pane(
                     control.clone(),
                     window.handle.clone(),
                     pane.handle.clone(),
@@ -104,36 +104,36 @@ impl TmuxDomain {
         tracing::debug!(panes = panes.len(), "tmux attach: enumerated");
         Ok(panes)
     }
+}
 
-    fn make_pane(
-        &self,
-        control: Arc<TmuxControl>,
-        window: String,
-        handle: String,
-        cols: u16,
-        rows: u16,
-    ) -> Arc<TmuxPane> {
-        let id = PaneId::next();
-        let mut rx = control.output(&handle);
-        let (tx, _) = broadcast::channel::<Vec<u8>>(256);
-        let tx_pump = tx.clone();
-        tokio::spawn(async move {
-            while let Some(chunk) = rx.recv().await {
-                if tx_pump.send(chunk).is_err() {
-                    break;
-                }
+/// 为一个已存在的 control 客户端创建一个 pane 句柄并订阅其 `%output`。
+pub fn make_pane(
+    control: Arc<TmuxControl>,
+    window: String,
+    handle: String,
+    cols: u16,
+    rows: u16,
+) -> Arc<TmuxPane> {
+    let id = PaneId::next();
+    let mut rx = control.output(&handle);
+    let (tx, _) = broadcast::channel::<Vec<u8>>(256);
+    let tx_pump = tx.clone();
+    tokio::spawn(async move {
+        while let Some(chunk) = rx.recv().await {
+            if tx_pump.send(chunk).is_err() {
+                break;
             }
-        });
-        Arc::new(TmuxPane {
-            id,
-            window,
-            handle,
-            cols,
-            rows,
-            control,
-            output: tx,
-        })
-    }
+        }
+    });
+    Arc::new(TmuxPane {
+        id,
+        window,
+        handle,
+        cols,
+        rows,
+        control,
+        output: tx,
+    })
 }
 
 pub struct TmuxPane {
@@ -161,6 +161,10 @@ impl TmuxPane {
 
     pub fn tmux_handle(&self) -> &str {
         &self.handle
+    }
+
+    pub fn control(&self) -> &Arc<TmuxControl> {
+        &self.control
     }
 
     pub async fn send_command(&self, command: &str) -> Result<Vec<String>> {

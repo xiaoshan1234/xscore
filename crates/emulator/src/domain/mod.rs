@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 pub use local::{LocalDomain, LocalPane};
 pub use ssh::{RemoteSshDomain, SshPane};
-pub use tmux::{enumerate, TmuxDomain, TmuxPane, TmuxPaneInfo, TmuxWindowInfo};
+pub use tmux::{enumerate, make_pane, TmuxDomain, TmuxPane, TmuxPaneInfo, TmuxWindowInfo};
 
 /// 逻辑窗格句柄标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
