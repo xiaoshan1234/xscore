@@ -11,6 +11,49 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+#[derive(Debug, Clone)]
+pub struct TmuxPaneInfo {
+    pub handle: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct TmuxWindowInfo {
+    pub handle: String,
+    pub name: String,
+    pub panes: Vec<TmuxPaneInfo>,
+}
+
+/// 通过 control 客户端枚举一个 session 当前的 window/pane 结构。
+pub async fn enumerate(control: &TmuxControl, session: &str) -> Result<Vec<TmuxWindowInfo>> {
+    let mut windows = Vec::new();
+    for line in control.send(&list_windows_command(session)).await? {
+        tracing::debug!(line = ?line, "tmux attach: window line");
+        let Some(window) = parse_window_line(&line) else {
+            continue;
+        };
+        let mut panes = Vec::new();
+        for line in control.send(&list_panes_command(&window.handle)).await? {
+            tracing::debug!(line = ?line, "tmux attach: pane line");
+            let Some(pane) = parse_pane_line(&line) else {
+                continue;
+            };
+            panes.push(TmuxPaneInfo {
+                handle: pane.handle,
+                cols: pane.cols,
+                rows: pane.rows,
+            });
+        }
+        windows.push(TmuxWindowInfo {
+            handle: window.handle,
+            name: window.name,
+            panes,
+        });
+    }
+    Ok(windows)
+}
+
 #[derive(Debug, Default)]
 pub struct TmuxDomain;
 
@@ -43,22 +86,15 @@ impl TmuxDomain {
         let control = Arc::new(TmuxControl::spawn(
             &prefix, socket, session, password, askpass, use_pty,
         )?);
-        let mut panes = Vec::new();
 
-        for line in control.send(&list_windows_command(session)).await? {
-            tracing::debug!(line = ?line, "tmux attach: window line");
-            let Some(window) = parse_window_line(&line) else {
-                continue;
-            };
-            for line in control.send(&list_panes_command(&window.handle)).await? {
-                tracing::debug!(line = ?line, "tmux attach: pane line");
-                let Some(pane) = parse_pane_line(&line) else {
-                    continue;
-                };
+        let windows = enumerate(&control, session).await?;
+        let mut panes = Vec::new();
+        for window in &windows {
+            for pane in &window.panes {
                 panes.push(self.make_pane(
                     control.clone(),
                     window.handle.clone(),
-                    pane.handle,
+                    pane.handle.clone(),
                     pane.cols,
                     pane.rows,
                 ));
@@ -122,6 +158,18 @@ impl TmuxPane {
     pub fn window(&self) -> &str {
         &self.window
     }
+
+    pub fn tmux_handle(&self) -> &str {
+        &self.handle
+    }
+
+    pub async fn send_command(&self, command: &str) -> Result<Vec<String>> {
+        self.control.send(command).await
+    }
+
+    pub async fn enumerate_windows(&self) -> Result<Vec<TmuxWindowInfo>> {
+        enumerate(&self.control, self.control.session()).await
+    }
 }
 
 #[async_trait]
@@ -132,6 +180,10 @@ impl PaneHandle for TmuxPane {
 
     fn kind(&self) -> PaneKind {
         PaneKind::Tmux
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     async fn send_input(&self, data: &[u8]) -> Result<usize> {
@@ -152,7 +204,9 @@ impl PaneHandle for TmuxPane {
     }
 
     async fn close(&self) -> Result<()> {
-        // pane 关闭只摘除订阅；session 由控制连接整体持有。
+        self.control
+            .send(&format!("kill-pane -t {}", self.handle))
+            .await?;
         Ok(())
     }
 }

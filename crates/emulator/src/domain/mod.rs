@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 pub use local::{LocalDomain, LocalPane};
 pub use ssh::{RemoteSshDomain, SshPane};
-pub use tmux::{TmuxDomain, TmuxPane};
+pub use tmux::{enumerate, TmuxDomain, TmuxPane, TmuxPaneInfo, TmuxWindowInfo};
 
 /// 逻辑窗格句柄标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -74,6 +74,7 @@ pub enum PaneConfig {
 pub trait PaneHandle: Send + Sync {
     fn id(&self) -> PaneId;
     fn kind(&self) -> PaneKind;
+    fn as_any(&self) -> &dyn std::any::Any;
     async fn send_input(&self, data: &[u8]) -> Result<usize>;
     async fn resize(&self, size: Size) -> Result<()>;
     fn subscribe(&self) -> broadcast::Receiver<Vec<u8>>;

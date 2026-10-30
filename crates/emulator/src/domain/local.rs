@@ -78,6 +78,10 @@ impl PaneHandle for LocalPane {
         PaneKind::Local
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn send_input(&self, data: &[u8]) -> Result<usize> {
         self.pty.write(data)
     }

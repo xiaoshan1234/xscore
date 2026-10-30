@@ -6,11 +6,12 @@ mod layout;
 use anyhow::{anyhow, Context, Result};
 use emulator::domain::{
     Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind, RemoteSshDomain, TmuxDomain,
+    TmuxPane,
 };
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
 use emulator::term::{TerminalCore, VtTerm};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -55,10 +56,16 @@ struct PaneEntry {
     term: Arc<Mutex<VtTerm>>,
 }
 
+struct TmuxMeta {
+    session: String,
+    window: String,
+    handle: String,
+}
+
 struct App {
     panes: HashMap<PaneId, PaneEntry>,
     layout: Layout,
-    tmux_window: HashMap<PaneId, String>,
+    tmux: HashMap<PaneId, TmuxMeta>,
 }
 
 impl App {
@@ -66,7 +73,7 @@ impl App {
         Self {
             panes: HashMap::new(),
             layout: Layout::new(),
-            tmux_window: HashMap::new(),
+            tmux: HashMap::new(),
         }
     }
 
@@ -142,8 +149,16 @@ impl App {
         for pane in panes {
             let (cols, rows) = (pane.cols(), pane.rows());
             let window = pane.window().to_string();
+            let handle = pane.tmux_handle().to_string();
             let id = self.register_pane(pane, cols, rows);
-            self.tmux_window.insert(id, window.clone());
+            self.tmux.insert(
+                id,
+                TmuxMeta {
+                    session: session.clone(),
+                    window: window.clone(),
+                    handle,
+                },
+            );
             let group = *index.entry(window.clone()).or_insert_with(|| {
                 groups.push((window, Vec::new()));
                 groups.len() - 1
@@ -295,7 +310,7 @@ impl App {
         if !self.panes.contains_key(&id) {
             return Err(anyhow!("pane not found: {id}"));
         }
-        if let Some(window) = self.tmux_window.get(&id).cloned() {
+        if let Some(window) = self.tmux.get(&id).map(|m| m.window.clone()) {
             if !self.layout.set_mirror_active(&window, id) {
                 return Err(anyhow!("tmux window not found in layout: {window}"));
             }
@@ -304,6 +319,107 @@ impl App {
         }
         println!("focused: {id}");
         Ok(())
+    }
+
+    async fn pane_del(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 3 {
+            return Err(anyhow!("usage: pane del <pane-id>"));
+        }
+        let id = PaneId::new(words[2].parse().context("pane id")?);
+        if !self.panes.contains_key(&id) {
+            return Err(anyhow!("pane not found: {id}"));
+        }
+        {
+            let entry = self.panes.get(&id).unwrap();
+            entry.handle.close().await?;
+        }
+        self.remove_pane_local(id);
+        println!("deleted pane: {id}");
+        Ok(())
+    }
+
+    async fn window_del(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 3 {
+            return Err(anyhow!("usage: window del <window-handle>"));
+        }
+        let window = words[2].clone();
+        let pane_ids: Vec<PaneId> = self
+            .tmux
+            .iter()
+            .filter(|(_, m)| m.window == window)
+            .map(|(id, _)| *id)
+            .collect();
+        if pane_ids.is_empty() {
+            return Err(anyhow!("tmux window not found: {window}"));
+        }
+        {
+            let entry = self.panes.get(&pane_ids[0]).unwrap();
+            if let Some(tmux_pane) = entry.handle.as_any().downcast_ref::<TmuxPane>() {
+                tmux_pane
+                    .send_command(&format!("kill-window -t {window}"))
+                    .await?;
+            }
+        }
+        for id in pane_ids {
+            self.panes.remove(&id);
+            self.tmux.remove(&id);
+        }
+        self.layout.remove_window(&window);
+        println!("deleted window: {window}");
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<()> {
+        let sessions: Vec<String> = {
+            let set: HashSet<String> = self.tmux.values().map(|m| m.session.clone()).collect();
+            set.into_iter().collect()
+        };
+        let mut removed = 0usize;
+        for session in sessions {
+            let Some(rep_id) = self
+                .tmux
+                .iter()
+                .find(|(_, m)| m.session == session)
+                .map(|(id, _)| *id)
+            else {
+                continue;
+            };
+            let windows = {
+                let entry = self.panes.get(&rep_id).unwrap();
+                let tmux_pane = entry
+                    .handle
+                    .as_any()
+                    .downcast_ref::<TmuxPane>()
+                    .expect("tmux meta must point at a TmuxPane");
+                tmux_pane.enumerate_windows().await?
+            };
+            let mut handles: HashSet<String> = HashSet::new();
+            for window in &windows {
+                for pane in &window.panes {
+                    handles.insert(pane.handle.clone());
+                }
+            }
+            let local: Vec<(PaneId, String)> = self
+                .tmux
+                .iter()
+                .filter(|(_, m)| m.session == session)
+                .map(|(id, m)| (*id, m.handle.clone()))
+                .collect();
+            for (id, handle) in local {
+                if !handles.contains(&handle) {
+                    self.remove_pane_local(id);
+                    removed += 1;
+                }
+            }
+        }
+        println!("sync: removed {removed} pane(s)");
+        Ok(())
+    }
+
+    fn remove_pane_local(&mut self, id: PaneId) {
+        self.panes.remove(&id);
+        self.tmux.remove(&id);
+        self.layout.remove_pane(id);
     }
 
     fn layout_cmd(&self) {
@@ -333,6 +449,9 @@ fn help() {
     println!("  resize <pane-id> <c> <r>    resize the pane");
     println!("  focus <pane-id>             move focus");
     println!("  layout                      print the pane tree");
+    println!("  pane del <pane-id>          delete a pane");
+    println!("  window del <handle>         delete a tmux window");
+    println!("  sync                        drop panes gone on the tmux server");
     println!("  list                        list panes");
     println!("  quit | exit                 leave");
 }
@@ -452,6 +571,15 @@ async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
         "resize" => app.resize(words).await?,
         "focus" => app.focus(words)?,
         "layout" => app.layout_cmd(),
+        "pane" => match words.get(1).map(|s| s.as_str()) {
+            Some("del") => app.pane_del(words).await?,
+            _ => println!("usage: pane del <pane-id>"),
+        },
+        "window" => match words.get(1).map(|s| s.as_str()) {
+            Some("del") => app.window_del(words).await?,
+            _ => println!("usage: window del <window-handle>"),
+        },
+        "sync" => app.sync().await?,
         "list" => app.list().await,
         "help" => help(),
         "quit" | "exit" => return Ok(true),

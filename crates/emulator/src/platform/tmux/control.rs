@@ -123,6 +123,10 @@ pub struct TmuxControl {
 }
 
 impl TmuxControl {
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
     pub fn spawn(
         prefix: &[String],
         socket: &TmuxSocket,

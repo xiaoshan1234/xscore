@@ -97,6 +97,19 @@ impl Layout {
         found
     }
 
+    pub fn remove_pane(&mut self, pane: PaneId) {
+        self.root = self.root.take().and_then(|root| remove_pane_in(root, pane));
+        self.focused = self.root.as_ref().and_then(node_focus);
+    }
+
+    pub fn remove_window(&mut self, window: &str) {
+        self.root = self
+            .root
+            .take()
+            .and_then(|root| remove_window_in(root, window));
+        self.focused = self.root.as_ref().and_then(node_focus);
+    }
+
     pub fn render(&self) -> String {
         match &self.root {
             None => "(empty)".to_string(),
@@ -154,6 +167,68 @@ fn set_mirror_active_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
             set_mirror_active_in(left, window, pane) || set_mirror_active_in(right, window, pane)
         }
         _ => false,
+    }
+}
+
+fn remove_pane_in(node: Node, pane: PaneId) -> Option<Node> {
+    match node {
+        Node::Leaf(id) if id == pane => None,
+        Node::TmuxMirror(mut container) => {
+            container.panes.retain(|p| *p != pane);
+            if container.panes.is_empty() {
+                None
+            } else {
+                Some(Node::TmuxMirror(container))
+            }
+        }
+        Node::Branch {
+            direction,
+            ratio,
+            left,
+            right,
+        } => {
+            let new_left = remove_pane_in(*left, pane);
+            let new_right = remove_pane_in(*right, pane);
+            match (new_left, new_right) {
+                (Some(l), Some(r)) => Some(Node::Branch {
+                    direction,
+                    ratio,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                }),
+                (Some(l), None) => Some(l),
+                (None, Some(r)) => Some(r),
+                (None, None) => None,
+            }
+        }
+        other => Some(other),
+    }
+}
+
+fn remove_window_in(node: Node, window: &str) -> Option<Node> {
+    match node {
+        Node::TmuxMirror(container) if container.window == window => None,
+        Node::Branch {
+            direction,
+            ratio,
+            left,
+            right,
+        } => {
+            let new_left = remove_window_in(*left, window);
+            let new_right = remove_window_in(*right, window);
+            match (new_left, new_right) {
+                (Some(l), Some(r)) => Some(Node::Branch {
+                    direction,
+                    ratio,
+                    left: Box::new(l),
+                    right: Box::new(r),
+                }),
+                (Some(l), None) => Some(l),
+                (None, Some(r)) => Some(r),
+                (None, None) => None,
+            }
+        }
+        other => Some(other),
     }
 }
 
@@ -228,5 +303,23 @@ mod tests {
         assert!(layout.set_mirror_active("@1", PaneId::new(11)));
         assert_eq!(layout.render(), "@1[P10,P11*]");
         assert_eq!(layout.focused(), Some(PaneId::new(11)));
+    }
+
+    #[test]
+    fn remove_pane_shrinks_branch() {
+        let mut layout = Layout::new();
+        layout.add(PaneId::new(1));
+        layout.split_focused(Direction::Horizontal, PaneId::new(2));
+        layout.remove_pane(PaneId::new(2));
+        assert_eq!(layout.render(), "P1");
+    }
+
+    #[test]
+    fn remove_window_removes_mirror() {
+        let mut layout = Layout::new();
+        layout.add_mirror(mirror("@1", &[10, 11]));
+        layout.add(PaneId::new(20));
+        layout.remove_window("@1");
+        assert_eq!(layout.render(), "P20");
     }
 }

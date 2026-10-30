@@ -85,6 +85,10 @@ impl PaneHandle for SshPane {
         PaneKind::Ssh
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn send_input(&self, data: &[u8]) -> Result<usize> {
         self.conn.write(data).await
     }
