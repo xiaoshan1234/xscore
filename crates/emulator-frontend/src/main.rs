@@ -490,7 +490,7 @@ fn help() {
     println!("  layout                      print the pane tree");
     println!("  pane del <pane-id>          delete a pane");
     println!("  window del <handle>         delete a tmux window");
-    println!("  sync                        drop panes gone on the tmux server");
+    println!("  sync                        sync local panes with the tmux structure");
     println!("  list                        list panes");
     println!("  quit | exit                 leave");
 }
