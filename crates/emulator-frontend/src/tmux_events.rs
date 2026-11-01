@@ -12,8 +12,19 @@ pub enum StructureAction {
     Shutdown,
 }
 
-/// 新增 pane 的描述：`(handle, window, cols, rows)`。
-pub type PaneAddSpec = (String, String, u16, u16);
+/// 新增 pane 的完整描述：tmux 句柄、所属 window、几何信息。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneAddSpec {
+    pub handle: String,
+    pub window: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub x: u16,
+    pub y: u16,
+    pub window_cols: u16,
+    pub window_rows: u16,
+    pub window_active: bool,
+}
 
 /// 把 tmux 结构事件映射为本地动作。
 pub fn classify_tmux_event(event: &TmuxEvent) -> StructureAction {
@@ -26,17 +37,27 @@ pub fn classify_tmux_event(event: &TmuxEvent) -> StructureAction {
 
 /// 计算远端结构与本地句柄的差集。
 ///
-/// 返回 `(需要删除的 PaneId, 需要新增的 (handle, window, cols, rows))`。
+/// 返回 `(需要删除的 PaneId, 需要新增的 PaneAddSpec)`。
 pub fn diff_tmux_structure(
     local: &HashMap<String, PaneId>,
     remote: &[TmuxWindowInfo],
 ) -> (Vec<PaneId>, Vec<PaneAddSpec>) {
-    let mut desired: HashMap<String, (String, u16, u16)> = HashMap::new();
+    let mut desired: HashMap<String, PaneAddSpec> = HashMap::new();
     for window in remote {
         for pane in &window.panes {
             desired.insert(
                 pane.handle.clone(),
-                (window.handle.clone(), pane.cols, pane.rows),
+                PaneAddSpec {
+                    handle: pane.handle.clone(),
+                    window: window.handle.clone(),
+                    cols: pane.cols,
+                    rows: pane.rows,
+                    x: pane.x,
+                    y: pane.y,
+                    window_cols: window.cols,
+                    window_rows: window.rows,
+                    window_active: window.active,
+                },
             );
         }
     }
@@ -49,9 +70,9 @@ pub fn diff_tmux_structure(
     }
 
     let mut add_panes = Vec::new();
-    for (handle, (window, cols, rows)) in &desired {
+    for (handle, spec) in &desired {
         if !local.contains_key(handle) {
-            add_panes.push((handle.clone(), window.clone(), *cols, *rows));
+            add_panes.push(spec.clone());
         }
     }
 
@@ -62,6 +83,16 @@ pub fn diff_tmux_structure(
 mod tests {
     use super::*;
     use emulator::domain::TmuxPaneInfo;
+
+    fn pane_info(handle: &str, cols: u16, rows: u16, x: u16, y: u16) -> TmuxPaneInfo {
+        TmuxPaneInfo {
+            handle: handle.to_string(),
+            cols,
+            rows,
+            x,
+            y,
+        }
+    }
 
     #[test]
     fn classify_events() {
@@ -95,28 +126,26 @@ mod tests {
             TmuxWindowInfo {
                 handle: "@1".into(),
                 name: "one".into(),
-                panes: vec![TmuxPaneInfo {
-                    handle: "%1".into(),
-                    cols: 80,
-                    rows: 24,
-                }],
+                cols: 80,
+                rows: 24,
+                active: false,
+                panes: vec![pane_info("%1", 40, 24, 0, 0)],
             },
             TmuxWindowInfo {
                 handle: "@2".into(),
                 name: "two".into(),
-                panes: vec![TmuxPaneInfo {
-                    handle: "%2".into(),
-                    cols: 100,
-                    rows: 30,
-                }],
+                cols: 100,
+                rows: 30,
+                active: true,
+                panes: vec![pane_info("%2", 50, 30, 0, 0)],
             },
         ];
 
         let (remove_panes, add_panes) = diff_tmux_structure(&local, &remote);
         assert_eq!(remove_panes, vec![PaneId::new(10)]);
-        assert_eq!(
-            add_panes,
-            vec![("%2".to_string(), "@2".to_string(), 100, 30)]
-        );
+        assert_eq!(add_panes.len(), 1);
+        assert_eq!(add_panes[0].handle, "%2");
+        assert_eq!(add_panes[0].window, "@2");
+        assert_eq!((add_panes[0].cols, add_panes[0].rows), (50, 30));
     }
 }

@@ -8,11 +8,23 @@ pub enum Direction {
     Vertical,
 }
 
+/// 一个 tmux pane 在 window 内的几何：列偏移、行偏移、宽、高。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneRect {
+    pub id: PaneId,
+    pub x: u16,
+    pub y: u16,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 /// tmux window 的不可拆分布局原子。内部 pane 只在这里，不进本地树。
 #[derive(Debug, Clone)]
 pub struct TmuxContainer {
     pub window: String,
-    pub panes: Vec<PaneId>,
+    pub cols: u16,
+    pub rows: u16,
+    pub panes: Vec<PaneRect>,
     pub active: Option<PaneId>,
 }
 
@@ -97,13 +109,6 @@ impl Layout {
         found
     }
 
-    pub fn add_pane_to_window(&mut self, window: &str, pane: PaneId) -> bool {
-        match self.root.as_mut() {
-            Some(root) => add_pane_to_window_in(root, window, pane),
-            None => false,
-        }
-    }
-
     pub fn remove_pane(&mut self, pane: PaneId) {
         self.root = self.root.take().and_then(|root| remove_pane_in(root, pane));
         self.focused = self.root.as_ref().and_then(node_focus);
@@ -120,7 +125,14 @@ impl Layout {
     pub fn render(&self) -> String {
         match &self.root {
             None => "(empty)".to_string(),
-            Some(root) => render_node(root),
+            Some(root) => {
+                let mut out = String::new();
+                render_node(root, 0, &mut out);
+                while out.ends_with('\n') {
+                    out.pop();
+                }
+                out
+            }
         }
     }
 }
@@ -130,7 +142,7 @@ fn node_focus(node: &Node) -> Option<PaneId> {
         Node::Leaf(id) => Some(*id),
         Node::TmuxMirror(container) => container
             .active
-            .or_else(|| container.panes.first().copied()),
+            .or_else(|| container.panes.first().map(|rect| rect.id)),
         Node::Branch { left, .. } => node_focus(left),
     }
 }
@@ -143,12 +155,14 @@ fn split_at(node: Node, target: PaneId, direction: Direction, new_node: Node) ->
             left: Box::new(Node::Leaf(id)),
             right: Box::new(new_node),
         },
-        Node::TmuxMirror(container) if container.panes.contains(&target) => Node::Branch {
-            direction,
-            ratio: 0.5,
-            left: Box::new(Node::TmuxMirror(container)),
-            right: Box::new(new_node),
-        },
+        Node::TmuxMirror(container) if container.panes.iter().any(|rect| rect.id == target) => {
+            Node::Branch {
+                direction,
+                ratio: 0.5,
+                left: Box::new(Node::TmuxMirror(container)),
+                right: Box::new(new_node),
+            }
+        }
         Node::Branch {
             direction: dir,
             ratio,
@@ -177,26 +191,11 @@ fn set_mirror_active_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
     }
 }
 
-fn add_pane_to_window_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
-    match node {
-        Node::TmuxMirror(container) if container.window == window => {
-            if !container.panes.contains(&pane) {
-                container.panes.push(pane);
-            }
-            true
-        }
-        Node::Branch { left, right, .. } => {
-            add_pane_to_window_in(left, window, pane) || add_pane_to_window_in(right, window, pane)
-        }
-        _ => false,
-    }
-}
-
 fn remove_pane_in(node: Node, pane: PaneId) -> Option<Node> {
     match node {
         Node::Leaf(id) if id == pane => None,
         Node::TmuxMirror(mut container) => {
-            container.panes.retain(|p| *p != pane);
+            container.panes.retain(|rect| rect.id != pane);
             if container.panes.is_empty() {
                 None
             } else {
@@ -254,32 +253,41 @@ fn remove_window_in(node: Node, window: &str) -> Option<Node> {
     }
 }
 
-fn render_node(node: &Node) -> String {
+fn render_node(node: &Node, depth: usize, out: &mut String) {
+    let indent = "  ".repeat(depth);
     match node {
-        Node::Leaf(id) => format!("P{id}"),
-        Node::TmuxMirror(container) => {
-            let panes: Vec<String> = container
-                .panes
-                .iter()
-                .map(|id| {
-                    if Some(*id) == container.active {
-                        format!("P{id}*")
-                    } else {
-                        format!("P{id}")
-                    }
-                })
-                .collect();
-            format!("{}[{}]", container.window, panes.join(","))
-        }
+        Node::Leaf(id) => out.push_str(&format!("{indent}P{id}\n")),
         Node::Branch {
             direction,
+            ratio,
             left,
             right,
-            ..
-        } => match direction {
-            Direction::Horizontal => format!("[{} | {}]", render_node(left), render_node(right)),
-            Direction::Vertical => format!("[{} / {}]", render_node(left), render_node(right)),
-        },
+        } => {
+            let marker = match direction {
+                Direction::Horizontal => 'h',
+                Direction::Vertical => 'v',
+            };
+            out.push_str(&format!("{indent}{marker}: {ratio:.2}\n"));
+            render_node(left, depth + 1, out);
+            render_node(right, depth + 1, out);
+        }
+        Node::TmuxMirror(container) => {
+            out.push_str(&format!(
+                "{indent}window {}({}*{}):\n",
+                container.window, container.cols, container.rows
+            ));
+            for rect in &container.panes {
+                let star = if container.active == Some(rect.id) {
+                    "*"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "{indent}  P{}({},{},{},{}){}\n",
+                    rect.id, rect.y, rect.x, rect.cols, rect.rows, star
+                ));
+            }
+        }
     }
 }
 
@@ -287,11 +295,33 @@ fn render_node(node: &Node) -> String {
 mod tests {
     use super::*;
 
-    fn mirror(window: &str, panes: &[u64]) -> TmuxContainer {
+    fn rect(id: u64, x: u16, y: u16, cols: u16, rows: u16) -> PaneRect {
+        PaneRect {
+            id: PaneId::new(id),
+            x,
+            y,
+            cols,
+            rows,
+        }
+    }
+
+    fn mirror(window: &str, pane_ids: &[u64]) -> TmuxContainer {
         TmuxContainer {
             window: window.to_string(),
-            panes: panes.iter().map(|n| PaneId::new(*n)).collect(),
-            active: panes.first().map(|n| PaneId::new(*n)),
+            cols: 50,
+            rows: 50,
+            panes: pane_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| {
+                    if index == 0 {
+                        rect(*id, 0, 0, 25, 50)
+                    } else {
+                        rect(*id, 25, 0, 25, 50)
+                    }
+                })
+                .collect(),
+            active: pane_ids.first().map(|id| PaneId::new(*id)),
         }
     }
 
@@ -307,7 +337,17 @@ mod tests {
         let mut layout = Layout::new();
         layout.add(PaneId::new(1));
         layout.add(PaneId::new(2));
-        assert_eq!(layout.render(), "[P1 / P2]");
+        assert_eq!(layout.render(), "v: 0.50\n  P1\n  P2");
+    }
+
+    #[test]
+    fn mirror_shows_window_and_pane_geometry() {
+        let mut layout = Layout::new();
+        layout.add_mirror(mirror("@1", &[10, 11]));
+        assert_eq!(
+            layout.render(),
+            "window @1(50*50):\n  P10(0,0,25,50)*\n  P11(0,25,25,50)"
+        );
     }
 
     #[test]
@@ -315,7 +355,10 @@ mod tests {
         let mut layout = Layout::new();
         layout.add_mirror(mirror("@1", &[10, 11]));
         layout.add(PaneId::new(20));
-        assert_eq!(layout.render(), "[@1[P10*,P11] / P20]");
+        assert_eq!(
+            layout.render(),
+            "v: 0.50\n  window @1(50*50):\n    P10(0,0,25,50)*\n    P11(0,25,25,50)\n  P20"
+        );
     }
 
     #[test]
@@ -323,8 +366,11 @@ mod tests {
         let mut layout = Layout::new();
         layout.add_mirror(mirror("@1", &[10, 11]));
         assert!(layout.set_mirror_active("@1", PaneId::new(11)));
-        assert_eq!(layout.render(), "@1[P10,P11*]");
         assert_eq!(layout.focused(), Some(PaneId::new(11)));
+        assert_eq!(
+            layout.render(),
+            "window @1(50*50):\n  P10(0,0,25,50)\n  P11(0,25,25,50)*"
+        );
     }
 
     #[test]
@@ -343,13 +389,5 @@ mod tests {
         layout.add(PaneId::new(20));
         layout.remove_window("@1");
         assert_eq!(layout.render(), "P20");
-    }
-
-    #[test]
-    fn add_pane_to_window() {
-        let mut layout = Layout::new();
-        layout.add_mirror(mirror("@1", &[10]));
-        assert!(layout.add_pane_to_window("@1", PaneId::new(11)));
-        assert_eq!(layout.render(), "@1[P10*,P11]");
     }
 }

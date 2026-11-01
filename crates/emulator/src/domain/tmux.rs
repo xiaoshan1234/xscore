@@ -16,12 +16,17 @@ pub struct TmuxPaneInfo {
     pub handle: String,
     pub cols: u16,
     pub rows: u16,
+    pub x: u16,
+    pub y: u16,
 }
 
 #[derive(Debug, Clone)]
 pub struct TmuxWindowInfo {
     pub handle: String,
     pub name: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub active: bool,
     pub panes: Vec<TmuxPaneInfo>,
 }
 
@@ -43,11 +48,16 @@ pub async fn enumerate(control: &TmuxControl, session: &str) -> Result<Vec<TmuxW
                 handle: pane.handle,
                 cols: pane.cols,
                 rows: pane.rows,
+                x: pane.x,
+                y: pane.y,
             });
         }
         windows.push(TmuxWindowInfo {
             handle: window.handle,
             name: window.name,
+            cols: window.cols,
+            rows: window.rows,
+            active: window.active,
             panes,
         });
     }
@@ -94,9 +104,10 @@ impl TmuxDomain {
                 panes.push(make_pane(
                     control.clone(),
                     window.handle.clone(),
-                    pane.handle.clone(),
-                    pane.cols,
-                    pane.rows,
+                    pane,
+                    window.cols,
+                    window.rows,
+                    window.active,
                 ));
             }
         }
@@ -110,12 +121,13 @@ impl TmuxDomain {
 pub fn make_pane(
     control: Arc<TmuxControl>,
     window: String,
-    handle: String,
-    cols: u16,
-    rows: u16,
+    pane: &TmuxPaneInfo,
+    window_cols: u16,
+    window_rows: u16,
+    window_active: bool,
 ) -> Arc<TmuxPane> {
     let id = PaneId::next();
-    let mut rx = control.output(&handle);
+    let mut rx = control.output(&pane.handle);
     let (tx, _) = broadcast::channel::<Vec<u8>>(256);
     let tx_pump = tx.clone();
     tokio::spawn(async move {
@@ -128,9 +140,14 @@ pub fn make_pane(
     Arc::new(TmuxPane {
         id,
         window,
-        handle,
-        cols,
-        rows,
+        handle: pane.handle.clone(),
+        cols: pane.cols,
+        rows: pane.rows,
+        x: pane.x,
+        y: pane.y,
+        window_cols,
+        window_rows,
+        window_active,
         control,
         output: tx,
     })
@@ -142,6 +159,11 @@ pub struct TmuxPane {
     handle: String,
     cols: u16,
     rows: u16,
+    x: u16,
+    y: u16,
+    window_cols: u16,
+    window_rows: u16,
+    window_active: bool,
     control: Arc<TmuxControl>,
     output: broadcast::Sender<Vec<u8>>,
 }
@@ -153,6 +175,26 @@ impl TmuxPane {
 
     pub fn rows(&self) -> u16 {
         self.rows
+    }
+
+    pub fn x(&self) -> u16 {
+        self.x
+    }
+
+    pub fn y(&self) -> u16 {
+        self.y
+    }
+
+    pub fn window_cols(&self) -> u16 {
+        self.window_cols
+    }
+
+    pub fn window_rows(&self) -> u16 {
+        self.window_rows
+    }
+
+    pub fn window_active(&self) -> bool {
+        self.window_active
     }
 
     pub fn window(&self) -> &str {

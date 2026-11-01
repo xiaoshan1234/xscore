@@ -7,7 +7,7 @@ mod tmux_events;
 use anyhow::{anyhow, Context, Result};
 use emulator::domain::{
     enumerate, make_pane, Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind,
-    RemoteSshDomain, TmuxDomain, TmuxPane,
+    RemoteSshDomain, TmuxDomain, TmuxPane, TmuxPaneInfo,
 };
 use emulator::platform::tmux::{TmuxControl, TmuxEvent, TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
@@ -24,7 +24,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
-use layout::{Direction, Layout, TmuxContainer};
+use layout::{Direction, Layout, PaneRect, TmuxContainer};
 use tmux_events::{classify_tmux_event, diff_tmux_structure, StructureAction};
 
 fn init_logging() -> Result<()> {
@@ -62,6 +62,10 @@ struct TmuxMeta {
     session: String,
     window: String,
     handle: String,
+    window_active: bool,
+    rect: PaneRect,
+    window_cols: u16,
+    window_rows: u16,
 }
 
 struct App {
@@ -147,36 +151,59 @@ impl App {
         let panes = domain.attach(&host, &socket, &session).await?;
         let control = panes.first().map(|pane| pane.control().clone());
 
-        let mut groups: Vec<(String, Vec<PaneId>)> = Vec::new();
+        let mut groups: Vec<(String, u16, u16, bool, Vec<PaneRect>)> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
         for pane in panes {
             let (cols, rows) = (pane.cols(), pane.rows());
+            let (x, y) = (pane.x(), pane.y());
             let window = pane.window().to_string();
+            let (window_cols, window_rows) = (pane.window_cols(), pane.window_rows());
+            let window_active = pane.window_active();
             let handle = pane.tmux_handle().to_string();
             let id = self.register_pane(pane, cols, rows);
+            let rect = PaneRect {
+                id,
+                x,
+                y,
+                cols,
+                rows,
+            };
             self.tmux.insert(
                 id,
                 TmuxMeta {
                     session: session.clone(),
                     window: window.clone(),
                     handle,
+                    window_active,
+                    rect,
+                    window_cols,
+                    window_rows,
                 },
             );
             let group = *index.entry(window.clone()).or_insert_with(|| {
-                groups.push((window, Vec::new()));
+                groups.push((window, window_cols, window_rows, window_active, Vec::new()));
                 groups.len() - 1
             });
-            groups[group].1.push(id);
+            groups[group].4.push(rect);
         }
-        for (window, pane_ids) in groups {
-            let active = pane_ids.first().copied();
-            let container = TmuxContainer {
-                window: window.clone(),
-                panes: pane_ids.clone(),
-                active,
-            };
-            self.layout.add_mirror(container);
-            println!("tmux window {window}: {} pane(s)", pane_ids.len());
+        for (window, window_cols, window_rows, window_active, pane_rects) in groups {
+            if window_active {
+                let active = pane_rects.first().map(|rect| rect.id);
+                let container = TmuxContainer {
+                    window: window.clone(),
+                    cols: window_cols,
+                    rows: window_rows,
+                    panes: pane_rects.clone(),
+                    active,
+                };
+                self.layout.add_mirror(container);
+                println!(
+                    "tmux window {window} (active): {} pane(s)",
+                    pane_rects.len()
+                );
+            } else {
+                println!("tmux window {window}: {} pane(s)", pane_rects.len());
+            }
         }
 
         if let Some(control) = control {
@@ -387,6 +414,49 @@ impl App {
         Ok(())
     }
 
+    async fn window_select(&mut self, words: &[String]) -> Result<()> {
+        if words.len() < 3 {
+            return Err(anyhow!("usage: window select <window-handle>"));
+        }
+        let handle = words[2].clone();
+        let Some(session) = self
+            .tmux
+            .values()
+            .find(|meta| meta.window == handle)
+            .map(|meta| meta.session.clone())
+        else {
+            return Err(anyhow!("tmux window not found: {handle}"));
+        };
+        let control = self
+            .tmux_control_for(&session)
+            .ok_or_else(|| anyhow!("tmux session control unavailable"))?;
+        control.send(&format!("select-window -t {handle}")).await?;
+        let _ = self.reconcile_session(&session, &control).await?;
+        println!("selected window: {handle}");
+        Ok(())
+    }
+
+    fn window_list(&self) {
+        let mut windows: HashMap<String, (bool, usize)> = HashMap::new();
+        for meta in self.tmux.values() {
+            let entry = windows
+                .entry(meta.window.clone())
+                .or_insert((meta.window_active, 0));
+            entry.1 += 1;
+        }
+        let mut rows: Vec<_> = windows.into_iter().collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        println!("{:<10} {:<8} {:<8}", "WINDOW", "ACTIVE", "PANES");
+        for (handle, (active, pane_count)) in rows {
+            println!(
+                "{:<10} {:<8} {:<8}",
+                handle,
+                if active { "yes" } else { "no" },
+                pane_count
+            );
+        }
+    }
+
     async fn sync(&mut self) -> Result<()> {
         let sessions: Vec<String> = {
             let set: HashSet<String> = self.tmux.values().map(|m| m.session.clone()).collect();
@@ -437,34 +507,105 @@ impl App {
         for id in &gone {
             self.remove_pane_local(*id);
         }
-        for (handle, window, cols, rows) in &new_panes {
+        for spec in &new_panes {
+            let pane_info = TmuxPaneInfo {
+                handle: spec.handle.clone(),
+                cols: spec.cols,
+                rows: spec.rows,
+                x: spec.x,
+                y: spec.y,
+            };
             let new_pane = make_pane(
                 control.clone(),
-                window.clone(),
-                handle.clone(),
-                *cols,
-                *rows,
+                spec.window.clone(),
+                &pane_info,
+                spec.window_cols,
+                spec.window_rows,
+                spec.window_active,
             );
-            let id = self.register_pane(new_pane, *cols, *rows);
+            let id = self.register_pane(new_pane, spec.cols, spec.rows);
             self.tmux.insert(
                 id,
                 TmuxMeta {
                     session: session.to_string(),
-                    window: window.clone(),
-                    handle: handle.clone(),
+                    window: spec.window.clone(),
+                    handle: spec.handle.clone(),
+                    window_active: spec.window_active,
+                    rect: PaneRect {
+                        id,
+                        x: spec.x,
+                        y: spec.y,
+                        cols: spec.cols,
+                        rows: spec.rows,
+                    },
+                    window_cols: spec.window_cols,
+                    window_rows: spec.window_rows,
                 },
             );
-            if !self.layout.add_pane_to_window(window, id) {
-                let container = TmuxContainer {
-                    window: window.clone(),
-                    panes: vec![id],
-                    active: Some(id),
-                };
-                self.layout.add_mirror(container);
+        }
+
+        // 刷新已存在 pane 的几何与 active 标志（当前 window 可能切换）。
+        for window in &windows {
+            for pane in &window.panes {
+                if let Some(id) = local.get(&pane.handle) {
+                    if let Some(meta) = self.tmux.get_mut(id) {
+                        meta.window = window.handle.clone();
+                        meta.window_active = window.active;
+                        meta.rect = PaneRect {
+                            id: *id,
+                            x: pane.x,
+                            y: pane.y,
+                            cols: pane.cols,
+                            rows: pane.rows,
+                        };
+                        meta.window_cols = window.cols;
+                        meta.window_rows = window.rows;
+                    }
+                }
             }
         }
 
+        self.rebuild_active_mirror(session);
+
         Ok((gone.len(), new_panes.len()))
+    }
+
+    fn rebuild_active_mirror(&mut self, session: &str) {
+        let windows: HashSet<String> = self
+            .tmux
+            .values()
+            .filter(|meta| meta.session == session)
+            .map(|meta| meta.window.clone())
+            .collect();
+        for window in &windows {
+            self.layout.remove_window(window);
+        }
+
+        let Some(active_meta) = self
+            .tmux
+            .values()
+            .find(|meta| meta.session == session && meta.window_active)
+        else {
+            return;
+        };
+
+        let mut rects: Vec<PaneRect> = self
+            .tmux
+            .values()
+            .filter(|meta| meta.session == session && meta.window == active_meta.window)
+            .map(|meta| meta.rect)
+            .collect();
+        rects.sort_by_key(|rect| (rect.y, rect.x));
+
+        let active = rects.first().map(|rect| rect.id);
+        let container = TmuxContainer {
+            window: active_meta.window.clone(),
+            cols: active_meta.window_cols,
+            rows: active_meta.window_rows,
+            panes: rects,
+            active,
+        };
+        self.layout.add_mirror(container);
     }
 
     fn remove_pane_local(&mut self, id: PaneId) {
@@ -545,6 +686,8 @@ fn help() {
     println!("  layout                      print the pane tree");
     println!("  pane del <pane-id>          delete a pane");
     println!("  window del <handle>         delete a tmux window");
+    println!("  window list                 list tmux windows");
+    println!("  window select <handle>      switch to another tmux window");
     println!("  sync                        sync local panes with the tmux structure");
     println!("  list                        list panes");
     println!("  quit | exit                 leave");
@@ -672,7 +815,9 @@ async fn dispatch(app: &Arc<Mutex<App>>, words: &[String]) -> Result<bool> {
         },
         "window" => match words.get(1).map(|s| s.as_str()) {
             Some("del") => guard.window_del(words).await?,
-            _ => println!("usage: window del <window-handle>"),
+            Some("select") => guard.window_select(words).await?,
+            Some("list") => guard.window_list(),
+            _ => println!("usage: window del <handle> | window select <handle> | window list"),
         },
         "sync" => guard.sync().await?,
         "list" => guard.list().await,
