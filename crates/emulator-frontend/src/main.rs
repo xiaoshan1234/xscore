@@ -2,13 +2,14 @@
 //! 读取。
 
 mod layout;
+mod tmux_events;
 
 use anyhow::{anyhow, Context, Result};
 use emulator::domain::{
-    make_pane, Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind, RemoteSshDomain,
-    TmuxDomain, TmuxPane,
+    enumerate, make_pane, Domain, LocalDomain, PaneConfig, PaneHandle, PaneId, PaneKind,
+    RemoteSshDomain, TmuxDomain, TmuxPane,
 };
-use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
+use emulator::platform::tmux::{TmuxControl, TmuxEvent, TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
 use emulator::term::{TerminalCore, VtTerm};
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
 use layout::{Direction, Layout, TmuxContainer};
+use tmux_events::{classify_tmux_event, diff_tmux_structure, StructureAction};
 
 fn init_logging() -> Result<()> {
     let path = std::env::var("XSCORE_LOG").unwrap_or_else(|_| "emulator.log".to_string());
@@ -122,7 +124,7 @@ impl App {
         Ok(self.register_pane(handle, cols, rows))
     }
 
-    async fn tmux(&mut self, words: &[String]) -> Result<()> {
+    async fn tmux(&mut self, words: &[String], app: Arc<Mutex<App>>) -> Result<()> {
         let (session, socket, mut host, want_password) = parse_tmux_args(words)?;
         if want_password {
             let password =
@@ -143,6 +145,7 @@ impl App {
         }
         let domain = TmuxDomain::new();
         let panes = domain.attach(&host, &socket, &session).await?;
+        let control = panes.first().map(|pane| pane.control().clone());
 
         let mut groups: Vec<(String, Vec<PaneId>)> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
@@ -174,6 +177,21 @@ impl App {
             };
             self.layout.add_mirror(container);
             println!("tmux window {window}: {} pane(s)", pane_ids.len());
+        }
+
+        if let Some(control) = control {
+            let mut events = control.subscribe();
+            let event_app = app.clone();
+            let event_session = session.clone();
+            tokio::spawn(async move {
+                while let Some(event) = events.recv().await {
+                    let should_stop =
+                        handle_tmux_event(&event_app, &event_session, &control, event).await;
+                    if should_stop {
+                        break;
+                    }
+                }
+            });
         }
         Ok(())
     }
@@ -374,85 +392,79 @@ impl App {
             let set: HashSet<String> = self.tmux.values().map(|m| m.session.clone()).collect();
             set.into_iter().collect()
         };
-        let mut removed = 0usize;
-        let mut added = 0usize;
+        let mut removed_total = 0usize;
+        let mut added_total = 0usize;
         for session in sessions {
-            let Some(rep_id) = self
-                .tmux
-                .iter()
-                .find(|(_, m)| m.session == session)
-                .map(|(id, _)| *id)
-            else {
+            let Some(control) = self.tmux_control_for(&session) else {
                 continue;
             };
-            let (windows, control) = {
-                let entry = self.panes.get(&rep_id).unwrap();
-                let tmux_pane = entry
-                    .handle
-                    .as_any()
-                    .downcast_ref::<TmuxPane>()
-                    .expect("tmux meta must point at a TmuxPane");
-                let windows = tmux_pane.enumerate_windows().await?;
-                (windows, tmux_pane.control().clone())
-            };
-            let mut desired: HashMap<String, (String, u16, u16)> = HashMap::new();
-            for window in &windows {
-                for pane in &window.panes {
-                    desired.insert(
-                        pane.handle.clone(),
-                        (window.handle.clone(), pane.cols, pane.rows),
-                    );
-                }
-            }
-            let local: HashMap<String, PaneId> = self
-                .tmux
-                .iter()
-                .filter(|(_, m)| m.session == session)
-                .map(|(id, m)| (m.handle.clone(), *id))
-                .collect();
+            let (removed, added) = self.reconcile_session(&session, &control).await?;
+            removed_total += removed;
+            added_total += added;
+        }
+        println!("sync: removed {removed_total} pane(s), added {added_total} pane(s)");
+        Ok(())
+    }
 
-            let gone: Vec<PaneId> = local
-                .iter()
-                .filter(|(handle, _)| !desired.contains_key(*handle))
-                .map(|(_, id)| *id)
-                .collect();
-            for id in gone {
-                self.remove_pane_local(id);
-                removed += 1;
-            }
+    fn tmux_control_for(&self, session: &str) -> Option<Arc<TmuxControl>> {
+        let rep_id = self
+            .tmux
+            .iter()
+            .find(|(_, m)| m.session == session)
+            .map(|(id, _)| *id)?;
+        let entry = self.panes.get(&rep_id)?;
+        entry
+            .handle
+            .as_any()
+            .downcast_ref::<TmuxPane>()
+            .map(|pane| pane.control().clone())
+    }
 
-            for (handle, (window, cols, rows)) in &desired {
-                if !local.contains_key(handle) {
-                    let new_pane = make_pane(
-                        control.clone(),
-                        window.clone(),
-                        handle.clone(),
-                        *cols,
-                        *rows,
-                    );
-                    let id = self.register_pane(new_pane, *cols, *rows);
-                    self.tmux.insert(
-                        id,
-                        TmuxMeta {
-                            session: session.clone(),
-                            window: window.clone(),
-                            handle: handle.clone(),
-                        },
-                    );
-                    if !self.layout.add_pane_to_window(window, id) {
-                        let container = TmuxContainer {
-                            window: window.clone(),
-                            panes: vec![id],
-                            active: Some(id),
-                        };
-                        self.layout.add_mirror(container);
-                    }
-                    added += 1;
-                }
+    async fn reconcile_session(
+        &mut self,
+        session: &str,
+        control: &Arc<TmuxControl>,
+    ) -> Result<(usize, usize)> {
+        let windows = enumerate(control, session).await?;
+        let local: HashMap<String, PaneId> = self
+            .tmux
+            .iter()
+            .filter(|(_, m)| m.session == session)
+            .map(|(id, m)| (m.handle.clone(), *id))
+            .collect();
+        let (gone, new_panes) = diff_tmux_structure(&local, &windows);
+
+        for id in &gone {
+            self.remove_pane_local(*id);
+        }
+        for (handle, window, cols, rows) in &new_panes {
+            let new_pane = make_pane(
+                control.clone(),
+                window.clone(),
+                handle.clone(),
+                *cols,
+                *rows,
+            );
+            let id = self.register_pane(new_pane, *cols, *rows);
+            self.tmux.insert(
+                id,
+                TmuxMeta {
+                    session: session.to_string(),
+                    window: window.clone(),
+                    handle: handle.clone(),
+                },
+            );
+            if !self.layout.add_pane_to_window(window, id) {
+                let container = TmuxContainer {
+                    window: window.clone(),
+                    panes: vec![id],
+                    active: Some(id),
+                };
+                self.layout.add_mirror(container);
             }
         }
-        println!("sync: removed {removed} pane(s), added {added} pane(s)");
-        Ok(())
+
+        Ok((gone.len(), new_panes.len()))
     }
 
     fn remove_pane_local(&mut self, id: PaneId) {
@@ -473,6 +485,49 @@ impl App {
         self.panes
             .get(&id)
             .ok_or_else(|| anyhow!("pane not found: {id}"))
+    }
+}
+
+async fn handle_tmux_event(
+    app: &Arc<Mutex<App>>,
+    session: &str,
+    control: &Arc<TmuxControl>,
+    event: TmuxEvent,
+) -> bool {
+    match classify_tmux_event(&event) {
+        StructureAction::RemoveWindow(window) => {
+            let mut guard = app.lock().await;
+            let pane_ids: Vec<PaneId> = guard
+                .tmux
+                .iter()
+                .filter(|(_, meta)| meta.session == session && meta.window == window)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in pane_ids {
+                guard.remove_pane_local(id);
+            }
+            false
+        }
+        StructureAction::Shutdown => {
+            let mut guard = app.lock().await;
+            let pane_ids: Vec<PaneId> = guard
+                .tmux
+                .iter()
+                .filter(|(_, meta)| meta.session == session)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in pane_ids {
+                guard.remove_pane_local(id);
+            }
+            true
+        }
+        StructureAction::ReconcileSession => {
+            let mut guard = app.lock().await;
+            if let Err(error) = guard.reconcile_session(session, control).await {
+                tracing::warn!(session, error = %error, "tmux event reconcile failed");
+            }
+            false
+        }
     }
 }
 
@@ -598,28 +653,29 @@ fn parse_tmux_args(words: &[String]) -> Result<(String, TmuxSocket, TmuxHostConf
     Ok((session, socket, host, want_password))
 }
 
-async fn dispatch(app: &mut App, words: &[String]) -> Result<bool> {
+async fn dispatch(app: &Arc<Mutex<App>>, words: &[String]) -> Result<bool> {
+    let mut guard = app.lock().await;
     match words[0].as_str() {
-        "shell" => app.shell(words).await?,
-        "ssh" => app.ssh(words).await?,
-        "wsl" => app.wsl(words).await?,
-        "tmux" => app.tmux(words).await?,
-        "split" => app.split(words).await?,
-        "write" => app.write(words).await?,
-        "read" => app.read(words).await?,
-        "resize" => app.resize(words).await?,
-        "focus" => app.focus(words)?,
-        "layout" => app.layout_cmd(),
+        "shell" => guard.shell(words).await?,
+        "ssh" => guard.ssh(words).await?,
+        "wsl" => guard.wsl(words).await?,
+        "tmux" => guard.tmux(words, app.clone()).await?,
+        "split" => guard.split(words).await?,
+        "write" => guard.write(words).await?,
+        "read" => guard.read(words).await?,
+        "resize" => guard.resize(words).await?,
+        "focus" => guard.focus(words)?,
+        "layout" => guard.layout_cmd(),
         "pane" => match words.get(1).map(|s| s.as_str()) {
-            Some("del") => app.pane_del(words).await?,
+            Some("del") => guard.pane_del(words).await?,
             _ => println!("usage: pane del <pane-id>"),
         },
         "window" => match words.get(1).map(|s| s.as_str()) {
-            Some("del") => app.window_del(words).await?,
+            Some("del") => guard.window_del(words).await?,
             _ => println!("usage: window del <window-handle>"),
         },
-        "sync" => app.sync().await?,
-        "list" => app.list().await,
+        "sync" => guard.sync().await?,
+        "list" => guard.list().await,
         "help" => help(),
         "quit" | "exit" => return Ok(true),
         other => println!("unknown command: {other} (try `help`)"),
@@ -639,7 +695,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = init_logging() {
         eprintln!("warning: logging disabled: {e:#}");
     }
-    let mut app = App::new();
+    let app = Arc::new(Mutex::new(App::new()));
     let stdin = std::io::stdin();
 
     loop {
@@ -654,7 +710,7 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
-        match dispatch(&mut app, &words).await {
+        match dispatch(&app, &words).await {
             Ok(true) => break,
             Ok(false) => {}
             Err(e) => eprintln!("error: {e:#}"),
