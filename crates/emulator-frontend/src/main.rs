@@ -383,6 +383,43 @@ impl App {
         Ok(())
     }
 
+    async fn pane_fetch(&self, words: &[String]) -> Result<()> {
+        if words.len() < 3 {
+            return Err(anyhow!("usage: pane fetch <pane-id> [--line <N>]"));
+        }
+        let id = PaneId::new(words[2].parse().context("pane id")?);
+        let start = if words.len() > 3 {
+            if words[3] != "--line" {
+                return Err(anyhow!("usage: pane fetch <pane-id> [--line <N>]"));
+            }
+            let line_count: usize = words
+                .get(4)
+                .ok_or_else(|| anyhow!("--line requires a number"))?
+                .parse()
+                .context("line count")?;
+            format!("-{line_count}")
+        } else {
+            "-".to_string()
+        };
+        let entry = self
+            .panes
+            .get(&id)
+            .ok_or_else(|| anyhow!("pane not found: {id}"))?;
+        let tmux_pane = entry
+            .handle
+            .as_any()
+            .downcast_ref::<TmuxPane>()
+            .ok_or_else(|| anyhow!("pane {id} is not a tmux pane"))?;
+        let handle = tmux_pane.tmux_handle();
+        let lines = tmux_pane
+            .send_command(&format!("capture-pane -p -S {start} -t {handle}"))
+            .await?;
+        for line in &lines {
+            println!("{}", line.trim_end());
+        }
+        Ok(())
+    }
+
     async fn window_del(&mut self, words: &[String]) -> Result<()> {
         if words.len() < 3 {
             return Err(anyhow!("usage: window del <window-handle>"));
@@ -685,6 +722,7 @@ fn help() {
     println!("  focus <pane-id>             move focus");
     println!("  layout                      print the pane tree");
     println!("  pane del <pane-id>          delete a pane");
+    println!("  pane fetch <pane-id> [--line <N>]   fetch tmux pane scrollback (all, or last N)");
     println!("  window del <handle>         delete a tmux window");
     println!("  window list                 list tmux windows");
     println!("  window select <handle>      switch to another tmux window");
@@ -811,7 +849,8 @@ async fn dispatch(app: &Arc<Mutex<App>>, words: &[String]) -> Result<bool> {
         "layout" => guard.layout_cmd(),
         "pane" => match words.get(1).map(|s| s.as_str()) {
             Some("del") => guard.pane_del(words).await?,
-            _ => println!("usage: pane del <pane-id>"),
+            Some("fetch") => guard.pane_fetch(words).await?,
+            _ => println!("usage: pane del <pane-id> | pane fetch <pane-id> [--line <N>]"),
         },
         "window" => match words.get(1).map(|s| s.as_str()) {
             Some("del") => guard.window_del(words).await?,
