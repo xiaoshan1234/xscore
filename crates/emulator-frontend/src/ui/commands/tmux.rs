@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
 use emulator::domain::TmuxDomain;
-use emulator::platform::tmux::TmuxHostConfig;
+use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 
 use crate::cli::{build_tmux_config, TmuxArgs};
 use crate::ui::app::App;
@@ -38,8 +38,18 @@ pub async fn attach(
             *ap = Some(askpass);
         }
     }
+    attach_session(app, &host, &socket, &session, app_arc).await
+}
+
+pub(crate) async fn attach_session(
+    app: &mut App,
+    host: &TmuxHostConfig,
+    socket: &TmuxSocket,
+    session: &str,
+    app_arc: Arc<Mutex<App>>,
+) -> Result<Output> {
     let domain = TmuxDomain::new();
-    let panes = domain.attach(&host, &socket, &session).await?;
+    let panes = domain.attach(host, socket, session).await?;
     let control = panes.first().map(|pane| pane.control().clone());
 
     let mut out = Output::new();
@@ -63,7 +73,7 @@ pub async fn attach(
         app.tmux.insert(
             id,
             TmuxMeta {
-                session: session.clone(),
+                session: session.to_string(),
                 window: window.clone(),
                 handle,
                 window_active,
@@ -102,10 +112,11 @@ pub async fn attach(
     }
 
     if let Some(control) = control {
-        app.tmux_controls.insert(session.clone(), control.clone());
+        app.tmux_controls
+            .insert(session.to_string(), control.clone());
         let mut events = control.subscribe();
         let event_app = app_arc.clone();
-        let event_session = session.clone();
+        let event_session = session.to_string();
         tokio::spawn(async move {
             while let Some(event) = events.recv().await {
                 let should_stop = handle_event(&event_app, &event_session, &control, event).await;

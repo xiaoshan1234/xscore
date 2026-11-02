@@ -49,6 +49,9 @@ pub enum Cmd {
     /// terminal conversation creation (shorthand: tml)
     #[command(subcommand)]
     Tml(TmlCmd),
+    /// tmux session management (shorthand: tmx)
+    #[command(subcommand)]
+    Tmx(TmxCmd),
     /// attach to a tmux session
     Tmux(TmuxArgs),
     /// split the focused pane
@@ -151,6 +154,25 @@ pub struct TmlCreateArgs {
     /// resolved client-side; never parsed from argv
     #[arg(skip)]
     pub password: Option<String>,
+}
+
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
+pub enum TmxCmd {
+    /// attach to a tmux session by URL
+    Attach(TmxAttachArgs),
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub struct TmxAttachArgs {
+    /// tmux target URL: tmux://<socket>/<session>
+    #[arg(long, value_name = "URL")]
+    pub url: String,
+    /// run the tmux server on this SSH host: ssh://user@host[:port]?identity=<path>&password=<pwd>
+    #[arg(long, value_name = "URL", conflicts_with = "wsl")]
+    pub ssh: Option<String>,
+    /// run the tmux server inside WSL: wsl://?args=--distribution,Ubuntu
+    #[arg(long, value_name = "URL", conflicts_with = "ssh")]
+    pub wsl: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]

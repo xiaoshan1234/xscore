@@ -24,6 +24,7 @@ xs <command> [args...]     # 执行一条一次性命令
 | `wsl [args...]` | 新建 WSL shell pane（Windows） |
 | `tml create --url <URL> [...]` | 用 URL 统一创建 shell/ssh/wsl 对话 |
 | `tmux <session> [...]` | attach 一个 tmux 会话 |
+| `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 用 URL 接入 tmux 会话 |
 | `split h\|v <program> [args...]` | 在聚焦 pane 上拆分出新 pane |
 | `write <pane-id> <text>...` | 向 pane 发送一行输入 |
 | `read <pane-id>` | 打印 pane 当前渲染出的屏幕 |
@@ -158,6 +159,31 @@ xs tmux work --wsl
 xs tmux work --ssh dev@example.com
 xs tmux work --ssh dev@example.com --ssh-arg -p --ssh-arg 2222
 xs tmux work --ssh dev@example.com --password
+```
+
+### tmx
+
+`tmx` 是 `tmux` 的简写，用 URL 统一描述 tmux 目标与远端主机：
+
+```text
+xs tmx attach --url <tmux-url> [--ssh <ssh-url> | --wsl <wsl-url>]
+```
+
+- `--url tmux://<socket>/<session>`：
+  - `tmux://<session>`：默认 socket。
+  - `tmux://<name>/<session>`：命名 socket（`-L <name>`）。
+  - `tmux:///<path>/<session>`：socket 路径（`-S <path>`，path 含 `/`）。
+- `--ssh <ssh-url>`：`ssh://user@host[:port]?identity=<path>&password=<pwd>`，透传为
+  `ssh -i <identity> -p <port> user@host`。
+- `--wsl <wsl-url>`：`wsl://?args=--distribution,Ubuntu`，透传为 `wsl.exe` 参数。
+
+示例：
+
+```text
+xs tmx attach --url tmux://SOCKET/work --ssh ssh://dev@box?identity=~/.ssh/id_ed25519
+xs tmx attach --url tmux://work
+xs tmx attach --url tmux://x/work --wsl 'wsl://?args=--distribution,Ubuntu'
+xs tmx attach --url tmux:///tmp/tmux-0/default/work
 ```
 
 ## 布局与焦点

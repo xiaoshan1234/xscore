@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 
-use super::cmd::{Cmd, Command, TmuxArgs};
+use super::cmd::{Cmd, Command, TmuxArgs, TmxAttachArgs};
 
 /// 解析一段命令行参数（argv，不含程序名）。
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::Error> {
@@ -84,6 +84,73 @@ pub fn build_tmux_config(args: &TmuxArgs) -> Result<(TmuxSocket, TmuxHostConfig,
     };
 
     Ok((socket, host, args.password))
+}
+
+/// 解析 `tmux://<socket>/<session>`：socket 可为空（默认）、名字（`-L`）或路径（`-S`）。
+pub fn parse_tmux_url(url: &str) -> Result<(TmuxSocket, String)> {
+    let rest = url
+        .strip_prefix("tmux://")
+        .ok_or_else(|| anyhow!("expected tmux://... URL, got {url}"))?;
+    let (socket, session) = match rest.rsplit_once('/') {
+        Some((socket, session)) => (socket, session),
+        None => ("", rest),
+    };
+    if session.is_empty() {
+        return Err(anyhow!(
+            "tmux URL requires a session: tmux://<socket>/<session>"
+        ));
+    }
+    let socket = if socket.is_empty() {
+        TmuxSocket::Default
+    } else if socket.contains('/') {
+        TmuxSocket::Path(socket.to_string())
+    } else {
+        TmuxSocket::Named(socket.to_string())
+    };
+    Ok((socket, session.to_string()))
+}
+
+/// 把 `tmx attach` 的参数转换成 socket / host / session。
+pub fn build_tmx_config(args: &TmxAttachArgs) -> Result<(TmuxSocket, TmuxHostConfig, String)> {
+    let (socket, session) = parse_tmux_url(&args.url)?;
+    let host = match (&args.ssh, &args.wsl) {
+        (Some(ssh_url), None) => {
+            let ConversationSpec::Ssh {
+                target,
+                identity,
+                password,
+                ..
+            } = parse_conversation_url(ssh_url)?
+            else {
+                return Err(anyhow!("--ssh requires an ssh:// URL"));
+            };
+            let (user, hostname, port) = parse_ssh_target(&target)?;
+            let mut ssh_args = Vec::new();
+            if let Some(identity) = identity {
+                ssh_args.push("-i".to_string());
+                ssh_args.push(identity);
+            }
+            if port != 22 {
+                ssh_args.push("-p".to_string());
+                ssh_args.push(port.to_string());
+            }
+            TmuxHostConfig::Ssh {
+                destination: format!("{user}@{hostname}"),
+                args: ssh_args,
+                password,
+                askpass: None,
+            }
+        }
+        (None, Some(wsl_url)) => {
+            let ConversationSpec::Wsl { args, .. } = parse_conversation_url(wsl_url)? else {
+                return Err(anyhow!("--wsl requires a wsl:// URL"));
+            };
+            TmuxHostConfig::Wsl { args }
+        }
+        (Some(_), Some(_)) => return Err(anyhow!("--ssh and --wsl are mutually exclusive")),
+        (None, None) => TmuxHostConfig::Local,
+    };
+    Ok((socket, host, session))
 }
 
 /// 对话创建规格：`tml create --url` 的解析结果。
@@ -222,7 +289,7 @@ fn parse_args_param(params: &HashMap<String, String>) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::cmd::TmlCmd;
+    use super::super::cmd::{TmlCmd, TmxCmd};
     use super::*;
 
     #[test]
@@ -435,5 +502,106 @@ mod tests {
             "3",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn tmux_url_default_socket() {
+        assert_eq!(
+            parse_tmux_url("tmux://work").unwrap(),
+            (TmuxSocket::Default, "work".into())
+        );
+    }
+
+    #[test]
+    fn tmux_url_named_socket() {
+        assert_eq!(
+            parse_tmux_url("tmux://x/work").unwrap(),
+            (TmuxSocket::Named("x".into()), "work".into())
+        );
+    }
+
+    #[test]
+    fn tmux_url_path_socket() {
+        assert_eq!(
+            parse_tmux_url("tmux:///tmp/tmux-0/default/work").unwrap(),
+            (
+                TmuxSocket::Path("/tmp/tmux-0/default".into()),
+                "work".into()
+            )
+        );
+    }
+
+    #[test]
+    fn tmx_ssh_host_builds_identity_and_port() {
+        let Cmd::Tmx(TmxCmd::Attach(attach)) = parse(&[
+            "tmx",
+            "attach",
+            "--url",
+            "tmux://x/work",
+            "--ssh",
+            "ssh://dev@box:2222?identity=~/.ssh/id_ed25519",
+        ])
+        .unwrap() else {
+            panic!("expected tmx command");
+        };
+        let (socket, host, session) = build_tmx_config(&attach).unwrap();
+        assert_eq!(socket, TmuxSocket::Named("x".into()));
+        assert_eq!(session, "work");
+        assert_eq!(
+            host,
+            TmuxHostConfig::Ssh {
+                destination: "dev@box".into(),
+                args: vec![
+                    "-i".into(),
+                    "~/.ssh/id_ed25519".into(),
+                    "-p".into(),
+                    "2222".into()
+                ],
+                password: None,
+                askpass: None,
+            }
+        );
+    }
+
+    #[test]
+    fn tmx_ssh_host_with_password() {
+        let Cmd::Tmx(TmxCmd::Attach(attach)) = parse(&[
+            "tmx",
+            "attach",
+            "--url",
+            "tmux://work",
+            "--ssh",
+            "ssh://dev@box?password=secret",
+        ])
+        .unwrap() else {
+            panic!("expected tmx command");
+        };
+        let (_, host, _) = build_tmx_config(&attach).unwrap();
+        assert!(matches!(
+            host,
+            TmuxHostConfig::Ssh { password: Some(p), .. } if p == "secret"
+        ));
+    }
+
+    #[test]
+    fn tmx_wsl_host_builds_args() {
+        let Cmd::Tmx(TmxCmd::Attach(attach)) = parse(&[
+            "tmx",
+            "attach",
+            "--url",
+            "tmux://work",
+            "--wsl",
+            "wsl://?args=--distribution,Ubuntu",
+        ])
+        .unwrap() else {
+            panic!("expected tmx command");
+        };
+        let (_, host, _) = build_tmx_config(&attach).unwrap();
+        assert_eq!(
+            host,
+            TmuxHostConfig::Wsl {
+                args: vec!["--distribution".into(), "Ubuntu".into()]
+            }
+        );
     }
 }

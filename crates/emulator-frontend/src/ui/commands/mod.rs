@@ -5,6 +5,7 @@ mod pane;
 mod ssh;
 mod tml;
 mod tmux;
+mod tmx;
 mod window;
 
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
-use crate::cli::{Cmd, PaneCmd, TmlCmd, WindowCmd};
+use crate::cli::{Cmd, PaneCmd, TmlCmd, TmxCmd, WindowCmd};
 use crate::ui::app::App;
 use crate::ui::render::{self, Output};
 
@@ -29,6 +30,9 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         Cmd::Wsl { args } => local::wsl(&mut guard, args).await?,
         Cmd::Tml(tml_cmd) => match tml_cmd {
             TmlCmd::Create(create) => tml::create(&mut guard, create).await?,
+        },
+        Cmd::Tmx(tmx_cmd) => match tmx_cmd {
+            TmxCmd::Attach(attach) => tmx::attach(&mut guard, &attach, app.clone()).await?,
         },
         Cmd::Tmux(tmux_args) => tmux::attach(&mut guard, &tmux_args, app.clone()).await?,
         Cmd::Split {
@@ -64,6 +68,9 @@ pub fn help() -> Output {
     out.line("  wsl [args...]               spawn a WSL shell pane (Windows)");
     out.line("  tml create --url <url> [--new-window | --sph <id> | --spv <id>]   create a shell/ssh/wsl conversation");
     out.line("  tmux <session> [-L <socket>] [--ssh <dest> | --wsl] [--password]   attach to a tmux session");
+    out.line(
+        "  tmx attach --url <url> [--ssh <ssh-url> | --wsl <wsl-url>]   attach to a tmux session by URL",
+    );
     out.line("  split h|v <program> [args...]   split the focused pane");
     out.line("  write <pane-id> <text>      send text + newline to the pane");
     out.line("  read  <pane-id>             print accumulated output");
