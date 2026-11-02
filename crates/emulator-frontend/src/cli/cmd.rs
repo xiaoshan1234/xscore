@@ -145,6 +145,9 @@ pub struct TmlCreateArgs {
     /// conversation URL, e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
     #[arg(long, value_name = "URL")]
     pub url: String,
+    /// target window group (name or id); defaults to the default group
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
     /// create in a new window (default)
     #[arg(long, default_value_t = true, conflicts_with_all = ["sph", "spv"])]
     pub new_window: bool,

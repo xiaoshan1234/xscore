@@ -505,6 +505,19 @@ mod tests {
     }
 
     #[test]
+    fn tml_create_with_group() {
+        let Cmd::Tml(TmlCmd::Create(create)) =
+            parse(&["tml", "create", "--url", "shell://bash", "--group", "work"]).unwrap()
+        else {
+            panic!("expected tml command");
+        };
+        assert_eq!(create.group.as_deref(), Some("work"));
+        assert!(create.new_window);
+        assert!(create.sph.is_none());
+        assert!(create.spv.is_none());
+    }
+
+    #[test]
     fn tmux_url_default_socket() {
         assert_eq!(
             parse_tmux_url("tmux://work").unwrap(),

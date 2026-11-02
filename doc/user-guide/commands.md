@@ -100,8 +100,10 @@ xs wsl --distribution Ubuntu --exec /bin/bash
 `tml` 是 `terminal` 的简写，`create` 用 URL 统一描述 shell/ssh/wsl 对话：
 
 ```text
-xs tml create --url <URL> [--new-window | --sph <ID> | --spv <ID>]
+xs tml create --url <URL> [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
 ```
+
+- `--group <GROUP>`：目标 window group（group 名或数字 GroupId），缺省为默认 group。
 
 放置方式（三者互斥，省略时默认 `--new-window`）：
 

@@ -46,8 +46,19 @@ impl App {
         cols: u16,
         rows: u16,
     ) -> PaneId {
+        self.register_pane_in_group(handle, cols, rows, self.default_group)
+    }
+
+    /// 注册一个 pane 并归入任意指定 group。
+    pub fn register_pane_in_group(
+        &mut self,
+        handle: Arc<dyn PaneHandle>,
+        cols: u16,
+        rows: u16,
+        group: GroupId,
+    ) -> PaneId {
         let id = self.panes.register(handle, cols, rows);
-        self.add_pane_to_group(self.default_group, id);
+        self.add_pane_to_group(group, id);
         id
     }
 

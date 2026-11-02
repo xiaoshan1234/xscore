@@ -73,7 +73,7 @@ pub fn help() -> Output {
     out.line("  shell <program> [args...]   spawn a local shell pane");
     out.line("  ssh <user@host[:port]> [identity]   spawn a remote ssh pane");
     out.line("  wsl [args...]               spawn a WSL shell pane (Windows)");
-    out.line("  tml create --url <url> [--new-window | --sph <id> | --spv <id>]   create a shell/ssh/wsl conversation");
+    out.line("  tml create --url <url> [--group <group>] [--new-window | --sph <id> | --spv <id>]   create a shell/ssh/wsl conversation");
     out.line("  tmux <session> [-L <socket>] [--ssh <dest> | --wsl] [--password]   attach to a tmux session");
     out.line(
         "  tmx attach --url <url> [--ssh <ssh-url> | --wsl <wsl-url>]   attach to a tmux session by URL",

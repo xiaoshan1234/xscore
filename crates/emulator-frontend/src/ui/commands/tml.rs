@@ -8,6 +8,7 @@ use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, Tml
 use crate::ui::app::App;
 use crate::ui::layout::Direction;
 use crate::ui::render::Output;
+use crate::ui::window_group::GroupId;
 
 pub async fn create(app: &mut App, args: TmlCreateArgs) -> Result<Output> {
     let spec = parse_conversation_url(&args.url)?;
@@ -17,7 +18,13 @@ pub async fn create(app: &mut App, args: TmlCreateArgs) -> Result<Output> {
             return Err(anyhow!("pane not found in layout: {target}"));
         }
     }
-    let id = spawn(app, &spec, args.password).await?;
+    let group = match &args.group {
+        Some(spec) => app
+            .resolve_group(spec)
+            .ok_or_else(|| anyhow!("group not found: {spec}"))?,
+        None => app.default_group,
+    };
+    let id = spawn(app, &spec, args.password, group).await?;
     match split {
         Some((direction, target)) => app.layout.split_pane(direction, target, id),
         // 未指定 --sph/--spv 时，默认创建新窗口。
@@ -50,7 +57,12 @@ fn split_target(args: &TmlCreateArgs) -> Result<Option<(Direction, PaneId)>> {
     Ok(None)
 }
 
-async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>) -> Result<PaneId> {
+async fn spawn(
+    app: &mut App,
+    spec: &ConversationSpec,
+    password: Option<String>,
+    group: GroupId,
+) -> Result<PaneId> {
     match spec {
         ConversationSpec::Shell {
             program,
@@ -69,7 +81,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_local_pane(handle, *cols, *rows))
+            Ok(app.register_pane_in_group(handle, *cols, *rows, group))
         }
         ConversationSpec::Ssh {
             target,
@@ -91,7 +103,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_local_pane(handle, *cols, *rows))
+            Ok(app.register_pane_in_group(handle, *cols, *rows, group))
         }
         ConversationSpec::Wsl { args, cols, rows } => {
             let domain = LocalDomain::new();
@@ -104,7 +116,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_local_pane(handle, *cols, *rows))
+            Ok(app.register_pane_in_group(handle, *cols, *rows, group))
         }
     }
 }
