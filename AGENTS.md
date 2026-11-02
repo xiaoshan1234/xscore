@@ -1,6 +1,6 @@
 # AGENTS.md
 
-本文件供在本仓库工作的 AI 编码代理阅读。先读它，再读 `doc/arch/` 下的架构文档。
+本文件供在本仓库工作的 AI 编码代理阅读。先读它，再读 `arch/` 下的架构文档。
 
 ## 项目是什么
 
@@ -8,8 +8,8 @@ xscore 是一个终端模拟器：原生支持 `tmux -CC` 控制模式、普通 
 多 pane 分屏。当前交付的是后端（L0–L2）加一个 CLI 模式前端（L3–L5 模拟），尚无
 图形界面。
 
-权威设计：[doc/arch/terminal-emulator.md](doc/arch/terminal-emulator.md) 与
-[doc/arch/README.md](doc/arch/README.md) 索引的 4 个视图。
+权威设计：[arch/terminal-emulator.md](arch/terminal-emulator.md) 与
+[arch/README.md](arch/README.md) 索引的 4 个视图。
 
 ## 构建与测试
 
@@ -47,18 +47,22 @@ crates/emulator/            L0–L2 后端库
 
 crates/emulator-frontend/   L3–L5 CLI 前端
   src/main.rs               入口：askpass 角色、日志、模式路由（一次性 / daemon）
-  src/cli.rs                clap 命令解析（Cmd / TmuxArgs / 子命令）+ 密码边缘解析
-  src/app.rs                App 状态与命令处理（Domain/pane 注册表 + 布局树 + 分发）
-  src/output.rs             命令输出缓冲（一次性 / daemon 共用）
-  src/logging.rs            日志初始化（文件 + stderr WARN）
+  src/cli/                  clap 命令定义（cmd）+ 参数/URL 解析（parse）+ 密码边缘解析（secrets）
+  src/ui/                   应用核心（GUI 可复用）
+    app.rs                  App 状态：pane 注册表、布局、window group、tmux 会话
+    pane.rs                 PaneRegistry：PaneHandle ↔ TerminalCore 绑定 + 字节泵
+    layout.rs               L3 布局树（Node / TmuxContainer / PaneRect）
+    render.rs               L4 文本渲染（快照 / 表格 / 布局树 / 状态）
+    window_group.rs         WindowGroup + GroupId（默认组 / tmux session 组）
+    commands/               L5 命令分发与各命令处理器
+    tmux/                   tmux 会话协调（events 差集 / session reconcile）
   src/daemon/               常驻 daemon：ipc / protocol / client / server
-  src/layout.rs             布局树（Node / TmuxContainer / PaneRect）
-  src/tmux_events.rs        结构事件分类与差集（纯逻辑，单测覆盖）
+  src/logging.rs            日志初始化（文件 + stderr WARN）
 
 crates/xscore/              前身 CLI/daemon，已废弃，待清理
 ```
 
-命名规范见 [doc/rules/rust-name-rules.md](doc/rules/rust-name-rules.md)：函数/变量
+命名规范见 [rules/rust-name-rules.md](rules/rust-name-rules.md)：函数/变量
 `snake_case`、类型/枚举/枚举变体 `UpperCamelCase`、布尔 `is_/has_/should_/can_` 前缀。
 
 ## 必须知道的技术坑
