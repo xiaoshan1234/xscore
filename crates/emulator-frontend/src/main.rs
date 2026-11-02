@@ -1,12 +1,9 @@
 //! 前端入口：askpass 角色、日志初始化、模式路由（一次性命令 / daemon）。
 
-mod app;
 mod cli;
 mod daemon;
-mod layout;
 mod logging;
-mod output;
-mod tmux_events;
+mod ui;
 
 use std::io::Write as _;
 

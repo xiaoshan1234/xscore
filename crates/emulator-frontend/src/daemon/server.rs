@@ -9,7 +9,9 @@ use tokio::sync::{Mutex, Notify};
 
 use super::ipc;
 use super::protocol::{self, Request, Response};
-use crate::app::{dispatch, App};
+use crate::ui::app::App;
+use crate::ui::commands::dispatch;
+use crate::ui::render::status_text;
 
 pub async fn run() -> Result<()> {
     let port = ipc::port();
@@ -78,7 +80,10 @@ where
 async fn handle(app: &Arc<Mutex<App>>, request: Request) -> Response {
     match request {
         Request::Ping => Response::ok("pong\n".to_string()),
-        Request::Status => Response::ok(app.lock().await.status().into_string()),
+        Request::Status => {
+            let guard = app.lock().await;
+            Response::ok(status_text(&guard).into_string())
+        }
         Request::Stop => Response::ok(String::new()),
         Request::Command { cmd } => match dispatch(app, cmd).await {
             Ok(output) => Response::ok(output.into_string()),

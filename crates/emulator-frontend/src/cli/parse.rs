@@ -1,160 +1,10 @@
-//! CLI 命令解析（clap derive）。每段 argv 解析为一个 `Cmd`。
+//! 参数解析与边缘映射：argv -> `Cmd`，以及 CLI 参数到后端类型的转换。
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::Parser;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "xs",
-    about = "terminal emulator CLI",
-    disable_help_subcommand = true
-)]
-pub struct Command {
-    #[command(subcommand)]
-    pub command: Cmd,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
-pub enum SplitDirection {
-    #[value(name = "h")]
-    Horizontal,
-    #[value(name = "v")]
-    Vertical,
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum Cmd {
-    /// spawn a local shell pane
-    Shell {
-        program: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// spawn a remote SSH shell pane
-    Ssh {
-        target: String,
-        identity: Option<String>,
-        /// resolved client-side; never parsed from argv
-        #[arg(skip)]
-        password: Option<String>,
-    },
-    /// spawn a WSL shell pane (Windows)
-    Wsl {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// attach to a tmux session
-    Tmux(TmuxArgs),
-    /// split the focused pane
-    Split {
-        direction: SplitDirection,
-        program: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// send text to a pane
-    Write {
-        pane: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        text: Vec<String>,
-    },
-    /// print a pane's rendered screen
-    Read { pane: String },
-    /// resize a pane
-    Resize { pane: String, cols: u16, rows: u16 },
-    /// move focus
-    Focus { pane: String },
-    /// print the pane tree
-    Layout,
-    /// pane operations
-    #[command(subcommand)]
-    Pane(PaneCmd),
-    /// window operations
-    #[command(subcommand)]
-    Window(WindowCmd),
-    /// sync local panes with the tmux structure
-    Sync,
-    /// list panes
-    List,
-    /// print help
-    Help,
-    /// daemon lifecycle
-    #[command(subcommand)]
-    Daemon(DaemonCmd),
-}
-
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub struct TmuxArgs {
-    pub session: String,
-    /// tmux socket name (`tmux -L <NAME>`)
-    #[arg(short = 'L', value_name = "NAME", conflicts_with = "socket_path")]
-    pub socket_name: Option<String>,
-    /// tmux socket path (`tmux -S <PATH>`)
-    #[arg(short = 'S', value_name = "PATH", conflicts_with = "socket_name")]
-    pub socket_path: Option<String>,
-    /// run the tmux server on this SSH host
-    #[arg(long, value_name = "DEST", conflicts_with = "wsl")]
-    pub ssh: Option<String>,
-    /// run the tmux server inside WSL
-    #[arg(long, conflicts_with = "ssh")]
-    pub wsl: bool,
-    /// authenticate with a password
-    #[arg(long, requires = "ssh")]
-    pub password: bool,
-    /// resolved client-side; never parsed from argv
-    #[arg(skip)]
-    pub password_value: Option<String>,
-    /// extra ssh argument (repeatable)
-    #[arg(
-        long = "ssh-arg",
-        value_name = "ARG",
-        allow_hyphen_values = true,
-        requires = "ssh"
-    )]
-    pub ssh_args: Vec<String>,
-    /// extra wsl.exe argument (repeatable)
-    #[arg(
-        long = "wsl-arg",
-        value_name = "ARG",
-        allow_hyphen_values = true,
-        requires = "wsl"
-    )]
-    pub wsl_args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum PaneCmd {
-    /// delete a pane
-    Del { pane: String },
-    /// fetch tmux pane scrollback
-    Fetch {
-        pane: String,
-        #[arg(long, value_name = "N")]
-        line: Option<usize>,
-    },
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum WindowCmd {
-    /// delete a tmux window
-    Del { window: String },
-    /// list tmux windows
-    List,
-    /// switch to another tmux window
-    Select { window: String },
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum DaemonCmd {
-    /// run the daemon in the foreground
-    Serve,
-    /// print what the daemon currently holds
-    Status,
-    /// ask the daemon to exit
-    Stop,
-}
+use super::cmd::{Cmd, Command, TmuxArgs};
 
 /// 解析一段命令行参数（argv，不含程序名）。
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::Error> {
@@ -190,7 +40,7 @@ pub fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
     Ok((user.to_string(), host, port))
 }
 
-/// 把 clap 的 tmux 参数转换成 socket / host / 是否要密码。
+/// 把 clap 的 tmux 参数转换成 socket / host / 是否需要密码。
 pub fn build_tmux_config(args: &TmuxArgs) -> Result<(TmuxSocket, TmuxHostConfig, bool)> {
     let socket = match (&args.socket_name, &args.socket_path) {
         (Some(_), Some(_)) => return Err(anyhow!("-L and -S are mutually exclusive")),
@@ -232,49 +82,6 @@ pub fn build_tmux_config(args: &TmuxArgs) -> Result<(TmuxSocket, TmuxHostConfig,
     };
 
     Ok((socket, host, args.password))
-}
-
-/// 在边缘层解析交互式密码，避免 daemon 在无终端的进程里提示。
-pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
-    match cmd {
-        Cmd::Ssh {
-            target,
-            identity,
-            password: _,
-        } => {
-            let password = if identity.is_none() {
-                Some(prompt_ssh_password(&target)?)
-            } else {
-                None
-            };
-            Ok(Cmd::Ssh {
-                target,
-                identity,
-                password,
-            })
-        }
-        Cmd::Tmux(mut tmux) => {
-            if tmux.password {
-                tmux.password_value = Some(prompt_tmux_password()?);
-            }
-            Ok(Cmd::Tmux(tmux))
-        }
-        other => Ok(other),
-    }
-}
-
-fn prompt_ssh_password(target: &str) -> Result<String> {
-    let (user, host, _) = parse_ssh_target(target)?;
-    Ok(rpassword::prompt_password(format!(
-        "Password for {user}@{host}: "
-    ))?)
-}
-
-fn prompt_tmux_password() -> Result<String> {
-    match std::env::var("XSCORE_SSH_PASSWORD").or_else(|_| std::env::var("PASSWD")) {
-        Ok(password) => Ok(password),
-        Err(_) => Ok(rpassword::prompt_password("Password: ")?),
-    }
 }
 
 #[cfg(test)]
