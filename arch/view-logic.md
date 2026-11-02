@@ -67,7 +67,8 @@
 3. tmux 内部 pane 只存在于 `TmuxContainer.panes`，不出现在本地 `Node` 枚举。
 4. 每个 PaneHandle 绑定独立 `TerminalCore`，状态不共享。
 5. `%output` 解码后原样直送 L2，不经字符渲染。
-6. tmux 结构以“按需重枚举”为准：`sync` 双向收敛（删已消失、加新出现）。
+6. tmux 结构以“按需重枚举”为准：`tmx sync <group-id>` 对指定 group 双向收敛
+   （删已消失、加新出现）。
 
 ## 7. 关键场景
 
@@ -93,8 +94,9 @@ REPL 命令
 ### tmux 结构同步
 
 ```text
-sync 命令
-  → 每 session 枚举 window/pane
+tmx sync <group-id> 命令
+  → 解析目标 group 对应的 tmux session
+  → 枚举该 session 的 window/pane
   → 与本地 %N 差集
   → 删除已消失的 pane，新建新出现的 pane，更新 TmuxContainer
 ```

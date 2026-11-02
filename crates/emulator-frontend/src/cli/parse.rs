@@ -246,7 +246,7 @@ fn parse_args_param(params: &HashMap<String, String>) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::cmd::{LsCmd, TmlCmd, TmxCmd};
+    use super::super::cmd::{LsCmd, PaneCmd, TmlCmd, TmxCmd};
     use super::*;
 
     #[test]
@@ -439,10 +439,52 @@ mod tests {
     }
 
     #[test]
+    fn tmx_sync_parses_group_id() {
+        assert!(matches!(
+            parse(&["tmx", "sync", "2"]).unwrap(),
+            Cmd::Tmx(TmxCmd::Sync { group_id }) if group_id == "2"
+        ));
+        assert!(parse(&["tmx", "sync"]).is_err());
+    }
+
+    #[test]
+    fn pane_commands_parse() {
+        let Cmd::Pane(PaneCmd::Write { pane, text }) =
+            parse(&["pane", "write", "3", "echo", "hello"]).unwrap()
+        else {
+            panic!("expected pane write command");
+        };
+        assert_eq!(pane, "3");
+        assert_eq!(text, ["echo", "hello"]);
+
+        assert!(matches!(
+            parse(&["pane", "read", "3"]).unwrap(),
+            Cmd::Pane(PaneCmd::Read { pane }) if pane == "3"
+        ));
+        assert!(matches!(
+            parse(&["pane", "resize", "3", "120", "40"]).unwrap(),
+            Cmd::Pane(PaneCmd::Resize {
+                pane,
+                cols: 120,
+                rows: 40,
+            }) if pane == "3"
+        ));
+        assert!(matches!(
+            parse(&["pane", "focus", "3"]).unwrap(),
+            Cmd::Pane(PaneCmd::Focus { pane }) if pane == "3"
+        ));
+    }
+
+    #[test]
     fn removed_commands_are_rejected() {
         for args in [
             &["split", "h", "bash"][..],
             &["split", "v", "bash"][..],
+            &["write", "3", "echo", "hello"][..],
+            &["read", "3"][..],
+            &["resize", "3", "120", "40"][..],
+            &["focus", "3"][..],
+            &["sync"][..],
             &["list"][..],
             &["group", "list"][..],
             &["window", "create", "work", "shell"][..],

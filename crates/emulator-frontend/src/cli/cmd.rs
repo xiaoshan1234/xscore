@@ -25,18 +25,6 @@ pub enum Cmd {
     /// tmux session management (shorthand: tmx)
     #[command(subcommand)]
     Tmx(TmxCmd),
-    /// send text to a pane
-    Write {
-        pane: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        text: Vec<String>,
-    },
-    /// print a pane's rendered screen
-    Read { pane: String },
-    /// resize a pane
-    Resize { pane: String, cols: u16, rows: u16 },
-    /// move focus
-    Focus { pane: String },
     /// print the pane tree, or a window's layout
     Layout {
         /// window id (Gxx-Tyy / Gxx-Myy); omit for the global tree
@@ -45,8 +33,6 @@ pub enum Cmd {
     /// pane operations
     #[command(subcommand)]
     Pane(PaneCmd),
-    /// sync local panes with the tmux structure
-    Sync,
     /// list resources (shorthand: ls)
     #[command(subcommand)]
     Ls(LsCmd),
@@ -94,6 +80,11 @@ pub struct TmlAddArgs {
 pub enum TmxCmd {
     /// attach to a tmux session by URL
     Attach(TmxAttachArgs),
+    /// sync one tmux window group with its server-side structure
+    Sync {
+        /// window group id or group name
+        group_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
@@ -111,6 +102,18 @@ pub struct TmxAttachArgs {
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum PaneCmd {
+    /// send text to a pane
+    Write {
+        pane: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
+    },
+    /// print a pane's rendered screen
+    Read { pane: String },
+    /// resize a pane
+    Resize { pane: String, cols: u16, rows: u16 },
+    /// move focus
+    Focus { pane: String },
     /// delete a pane
     Del { pane: String },
     /// fetch tmux pane scrollback

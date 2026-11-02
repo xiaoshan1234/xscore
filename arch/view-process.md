@@ -66,5 +66,5 @@ reader 线程 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N �
 | 本地 Shell 退出 | PaneHandle 输出流关闭，网格历史保留 |
 | SSH 断开 | `SshConnection` 报错，pane 标记断开 |
 | tmux `%exit` | reader 标记 closed，控制连接结束 |
-| tmux server 删除 pane/window | 用 `sync` 按需重枚举收敛 |
+| tmux server 删除 pane/window | 用 `tmx sync <group-id>` 按需重枚举指定 group 并收敛 |
 | 密码错误 | ssh 认证失败报错（stderr 继承到控制台） |

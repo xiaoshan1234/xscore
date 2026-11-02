@@ -62,14 +62,14 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 | `tml add --url <URL> [...]` | 添加本地 shell/ssh/wsl 对话，或 tmux window/pane |
 | `tml del <pane-id>` | 删除 pane |
 | `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 接入 tmux 会话 |
-| `write <pane-id> <text>` | 给 pane 发一行输入（自动补换行） |
-| `read <pane-id>` | 打印该 pane 当前渲染出的屏幕 |
-| `resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
-| `focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
+| `pane write <pane-id> <text>` | 给 pane 发一行输入（自动补换行） |
+| `pane read <pane-id>` | 打印该 pane 当前渲染出的屏幕 |
+| `pane resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
+| `pane focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
 | `pane del <pane-id>` | 删除 pane（tmux 发 kill-pane，本地/SSH 关闭连接） |
 | `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
 | `daemon serve \| status \| stop` | 运行 / 查看 / 停止常驻 daemon |
-| `sync` | 按 tmux 服务端现状同步：删除已消失的 pane/window，纳入新增的 pane/window |
+| `tmx sync <group-id>` | 按 tmux 服务端现状同步指定 group：删除已消失的 pane/window，纳入新增的 pane/window |
 | `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
 
 ## 使用示例
@@ -81,8 +81,8 @@ xs tml add --url 'shell://bash'
 xs tml add --url 'shell://powershell.exe?cwd=/home/me/src&cols=120&rows=40'
 xs tml add --url 'ssh://dev@example.com'
 xs tml add --url 'wsl://?args=--distribution,Ubuntu'
-xs write 1 echo hello
-xs read 1
+xs pane write 1 echo hello
+xs pane read 1
 ```
 
 ### tmux
@@ -98,8 +98,9 @@ xs tmx attach --url tmux://work
 xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
 xs tmx attach --url tmux://work --ssh 'ssh://dev@example.com?identity=~/.ssh/id_ed25519'
 xs ls pane
-xs read <pane-id>
-xs write <pane-id> echo hi
+xs tmx sync work
+xs pane read <pane-id>
+xs pane write <pane-id> echo hi
 ```
 
 ### tmux 里的 window / pane
@@ -148,8 +149,8 @@ cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
 
 ## 已知限制
 
-- tmux 结构同步目前是 `sync` 命令的按需重枚举，双向覆盖“服务端删除→本地删”和
-  “服务端新增→本地加”；事件驱动的实时增删尚未接入。
+- tmux 结构同步目前是 `tmx sync <group-id>` 命令的按需重枚举，双向覆盖“服务端删除→
+  本地删”和“服务端新增→本地加”；事件驱动的实时增删尚未接入。
 - `read` 在脚本化输入下有一个 60ms 的静默窗口，极端时序可能读到旧屏；交互使用
   无影响。
 - SSH tmux 端到端已在 `loner@shanclaw` 验证；WSL tmux 仍需真实 WSL 环境验证。

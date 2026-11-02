@@ -1,9 +1,9 @@
 //! tmux 命令：attach / sync / status。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
 use emulator::domain::TmuxDomain;
@@ -102,24 +102,21 @@ pub(crate) async fn attach_session(
     Ok(out)
 }
 
-pub async fn sync(app: &mut App) -> Result<Output> {
-    let sessions: Vec<String> = {
-        let set: HashSet<String> = app.tmux.values().map(|m| m.session.clone()).collect();
-        set.into_iter().collect()
-    };
-    let mut removed_total = 0usize;
-    let mut added_total = 0usize;
-    for session in sessions {
-        let Some(control) = app.tmux_control(&session) else {
-            continue;
-        };
-        let (removed, added) = reconcile_session(app, &session, &control).await?;
-        removed_total += removed;
-        added_total += added;
-    }
+pub async fn sync(app: &mut App, group_id: String) -> Result<Output> {
+    let group = app
+        .resolve_group(&group_id)
+        .ok_or_else(|| anyhow!("group not found: {group_id}"))?;
+    let session = app
+        .group_session(group)
+        .ok_or_else(|| anyhow!("group {group_id} is not a tmux session group"))?
+        .to_string();
+    let control = app
+        .tmux_control(&session)
+        .ok_or_else(|| anyhow!("tmux session control unavailable: {session}"))?;
+    let (removed, added) = reconcile_session(app, &session, &control).await?;
     let mut out = Output::new();
     out.line(format!(
-        "sync: removed {removed_total} pane(s), added {added_total} pane(s)"
+        "sync group {group_id} ({session}): removed {removed} pane(s), added {added} pane(s)"
     ));
     Ok(out)
 }

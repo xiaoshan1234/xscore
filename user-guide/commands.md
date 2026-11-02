@@ -22,15 +22,15 @@ xs <command> [args...]     # 执行一条一次性命令
 | `tml add [...]` | 添加本地 shell/ssh/wsl 对话或 tmux window/pane |
 | `tml del <pane-id>` | 删除 pane |
 | `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 用 URL 接入 tmux 会话 |
-| `write <pane-id> <text>...` | 向 pane 发送一行输入 |
-| `read <pane-id>` | 打印 pane 当前渲染出的屏幕 |
-| `resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
-| `focus <pane-id>` | 切换焦点 |
+| `pane write <pane-id> <text>...` | 向 pane 发送一行输入 |
+| `pane read <pane-id>` | 打印 pane 当前渲染出的屏幕 |
+| `pane resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
+| `pane focus <pane-id>` | 切换焦点 |
 | `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
 | `pane del <pane-id>` | 删除 pane |
 | `pane fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
 | `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
-| `sync` | 按 tmux 服务端现状同步本地结构 |
+| `tmx sync <group-id>` | 按 tmux 服务端现状同步指定 group 的本地结构 |
 | `help` | 打印简洁命令清单 |
 | `daemon serve\|status\|stop` | 管理常驻 daemon |
 
@@ -121,15 +121,7 @@ xs tmx attach --url tmux://x/work --wsl 'wsl://?args=--distribution,Ubuntu'
 xs tmx attach --url tmux:///tmp/tmux-0/default/work
 ```
 
-## 布局与焦点
-
-### focus
-
-```text
-xs focus <pane-id>
-```
-
-本地 pane 切换焦点；tmux pane 走容器内焦点。
+## 布局
 
 ### layout
 
@@ -142,28 +134,36 @@ window 内的 pane 布局。
 
 ## pane 操作
 
-### write
+### pane write
 
 ```text
-xs write <pane-id> <text>...
+xs pane write <pane-id> <text>...
 ```
 
 把 `text` 用空格拼接后，补一个换行发给 pane。Windows 本地 shell 使用 `\r\n`，SSH/tmux 使用
 `\n`。
 
-### read
+### pane read
 
 ```text
-xs read <pane-id>
+xs pane read <pane-id>
 ```
 
 打印该 pane 当前渲染出的屏幕内容。脚本化输入下有一个 60ms 静默窗口，极端时序可能读到旧屏。
 
-### resize
+### pane resize
 
 ```text
-xs resize <pane-id> <cols> <rows>
+xs pane resize <pane-id> <cols> <rows>
 ```
+
+### pane focus
+
+```text
+xs pane focus <pane-id>
+```
+
+本地 pane 切换焦点；tmux pane 走容器内焦点。
 
 ### pane del
 
@@ -184,14 +184,15 @@ xs pane fetch <pane-id> [--line <N>]
 
 ## 同步
 
-### sync
+### tmx sync
 
 ```text
-xs sync
+xs tmx sync <group-id>
 ```
 
-按 tmux 服务端现状 reconcile 本地结构：删除服务端已消失的 pane/window，纳入服务端新增的
-pane/window。
+按 tmux 服务端现状 reconcile 指定 group 的本地结构：删除服务端已消失的 pane/window，
+纳入服务端新增的 pane/window。`<group-id>` 可以是数字 GroupId，也可以是 tmux session
+对应的 group 名；目标必须是已 attach 的 tmux group。
 
 ## daemon 生命周期
 

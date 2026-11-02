@@ -26,16 +26,18 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         },
         Cmd::Tmx(tmx_cmd) => match tmx_cmd {
             TmxCmd::Attach(attach) => tmx::attach(&mut guard, &attach, app.clone()).await?,
+            TmxCmd::Sync { group_id } => tmux::sync(&mut guard, group_id).await?,
         },
-        Cmd::Write { pane, text } => pane::write(&guard, pane, text).await?,
-        Cmd::Read { pane } => pane::read(&guard, pane).await?,
-        Cmd::Resize { pane, cols, rows } => pane::resize(&guard, pane, cols, rows).await?,
-        Cmd::Focus { pane } => pane::focus(&mut guard, pane)?,
         Cmd::Layout { window: None } => render::layout_text(&guard),
         Cmd::Layout { window: Some(spec) } => render::window_layout_text(&guard, &spec)?,
+        Cmd::Pane(PaneCmd::Write { pane, text }) => pane::write(&guard, pane, text).await?,
+        Cmd::Pane(PaneCmd::Read { pane }) => pane::read(&guard, pane).await?,
+        Cmd::Pane(PaneCmd::Resize { pane, cols, rows }) => {
+            pane::resize(&guard, pane, cols, rows).await?
+        }
+        Cmd::Pane(PaneCmd::Focus { pane }) => pane::focus(&mut guard, pane)?,
         Cmd::Pane(PaneCmd::Del { pane }) => pane::pane_del(&mut guard, pane).await?,
         Cmd::Pane(PaneCmd::Fetch { pane, line }) => pane::pane_fetch(&guard, pane, line).await?,
-        Cmd::Sync => tmux::sync(&mut guard).await?,
         Cmd::Ls(LsCmd::Pane) => render::pane_table(&guard).await,
         Cmd::Ls(LsCmd::Window { group }) => window::window_list(&guard, group)?,
         Cmd::Ls(LsCmd::Group) => group::list(&guard),
@@ -53,15 +55,15 @@ pub fn help() -> Output {
     out.line(
         "  tmx attach --url <url> [--ssh <ssh-url> | --wsl <wsl-url>]   attach to a tmux session by URL",
     );
-    out.line("  write <pane-id> <text>      send text + newline to the pane");
-    out.line("  read  <pane-id>             print accumulated output");
-    out.line("  resize <pane-id> <c> <r>    resize the pane");
-    out.line("  focus <pane-id>             move focus");
+    out.line("  tmx sync <group-id>           sync one tmux group with its server");
     out.line("  layout [<window-id>]         print the pane tree or a window's layout");
+    out.line("  pane write <pane-id> <text>  send text + newline to the pane");
+    out.line("  pane read <pane-id>         print accumulated output");
+    out.line("  pane resize <pane-id> <c> <r>   resize the pane");
+    out.line("  pane focus <pane-id>        move focus");
     out.line("  pane del <pane-id>          delete a pane");
     out.line("  pane fetch <pane-id> [--line <N>]   fetch tmux pane scrollback (all, or last N)");
     out.line("  ls pane|window [<group>]|group   list panes / windows / groups");
-    out.line("  sync                        sync local panes with the tmux structure");
     out.line("  daemon serve|status|stop    run / inspect / stop the resident daemon");
     out
 }
