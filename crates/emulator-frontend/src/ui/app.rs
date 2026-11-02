@@ -20,6 +20,7 @@ pub struct App {
     pub tmux_controls: HashMap<String, Arc<TmuxControl>>,
     pub groups: HashMap<GroupId, WindowGroup>,
     pub session_groups: HashMap<String, GroupId>,
+    pub pane_groups: HashMap<PaneId, GroupId>,
     pub default_group: GroupId,
 }
 
@@ -35,6 +36,7 @@ impl App {
             tmux_controls: HashMap::new(),
             groups,
             session_groups: HashMap::new(),
+            pane_groups: HashMap::new(),
             default_group: default_group.id,
         }
     }
@@ -100,6 +102,15 @@ impl App {
         if let Some(group) = self.groups.get_mut(&group) {
             group.add_pane(pane);
         }
+        self.pane_groups.insert(pane, group);
+    }
+
+    pub fn pane_group(&self, id: PaneId) -> Option<GroupId> {
+        self.pane_groups.get(&id).copied()
+    }
+
+    pub fn group_name(&self, id: GroupId) -> Option<&str> {
+        self.groups.get(&id).map(|group| group.name.as_str())
     }
 
     /// 按 GroupId（数字）或 group 名（`default` / session 名）解析。
@@ -130,6 +141,7 @@ impl App {
         for group in self.groups.values_mut() {
             group.remove_pane(id);
         }
+        self.pane_groups.remove(&id);
     }
 }
 

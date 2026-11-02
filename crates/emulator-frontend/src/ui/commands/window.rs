@@ -114,7 +114,7 @@ pub fn window_list(app: &App, group: Option<String>) -> Result<Output> {
             }
         }
         let entry = windows
-            .entry((session, meta.window.clone()))
+            .entry((meta.window.clone(), session))
             .or_insert((meta.window_active, 0));
         entry.1 += 1;
     }
@@ -124,14 +124,14 @@ pub fn window_list(app: &App, group: Option<String>) -> Result<Output> {
 
     let mut out = Output::new();
     out.line(format!(
-        "{:<16} {:<10} {:<8} {:<6}",
-        "SESSION", "WINDOW", "ACTIVE", "PANES"
+        "{:<10} {:<16} {:<8} {:<6}",
+        "WINDOW", "GROUP", "ACTIVE", "PANES"
     ));
-    for ((session, window), (active, pane_count)) in rows {
+    for ((window, group), (active, pane_count)) in rows {
         out.line(format!(
-            "{:<16} {:<10} {:<8} {:<6}",
-            session,
+            "{:<10} {:<16} {:<8} {:<6}",
             window,
+            group,
             if active { "yes" } else { "no" },
             pane_count
         ));

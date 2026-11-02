@@ -67,6 +67,9 @@ pub enum Cmd {
     Sync,
     /// list panes
     List,
+    /// list resources (shorthand: ls)
+    #[command(subcommand)]
+    Ls(LsCmd),
     /// print help
     Help,
     /// daemon lifecycle
@@ -142,6 +145,16 @@ pub enum PaneCmd {
 pub enum GroupCmd {
     /// list window groups
     List,
+}
+
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
+pub enum LsCmd {
+    /// list panes
+    Pane,
+    /// list tmux windows (optionally scoped to a group)
+    Window { group: Option<String> },
+    /// list window groups
+    Group,
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]

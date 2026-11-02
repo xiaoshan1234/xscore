@@ -22,7 +22,7 @@ impl GroupId {
 
 impl fmt::Display for GroupId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -85,6 +85,13 @@ mod tests {
     #[test]
     fn group_ids_are_unique() {
         assert_ne!(GroupId::next(), GroupId::next());
+    }
+
+    #[test]
+    fn group_id_display_respects_width() {
+        let id: GroupId = "1".parse().unwrap();
+        assert_eq!(format!("{:<6}", id), "1     ");
+        assert_eq!(format!("{:>6}", id), "     1");
     }
 
     #[test]

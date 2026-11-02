@@ -246,7 +246,7 @@ fn parse_args_param(params: &HashMap<String, String>) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::cmd::{TmlCmd, TmxCmd};
+    use super::super::cmd::{LsCmd, TmlCmd, TmxCmd};
     use super::*;
 
     #[test]
@@ -414,6 +414,28 @@ mod tests {
             panic!("expected tml command");
         };
         assert_eq!(pane, "3");
+    }
+
+    #[test]
+    fn ls_commands_parse() {
+        assert!(matches!(
+            parse(&["ls", "pane"]).unwrap(),
+            Cmd::Ls(LsCmd::Pane)
+        ));
+        assert!(matches!(
+            parse(&["ls", "window"]).unwrap(),
+            Cmd::Ls(LsCmd::Window { group: None })
+        ));
+        assert!(matches!(
+            parse(&["ls", "window", "work"]).unwrap(),
+            Cmd::Ls(LsCmd::Window {
+                group: Some(group)
+            }) if group == "work"
+        ));
+        assert!(matches!(
+            parse(&["ls", "group"]).unwrap(),
+            Cmd::Ls(LsCmd::Group)
+        ));
     }
 
     #[test]

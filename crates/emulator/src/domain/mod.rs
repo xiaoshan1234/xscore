@@ -37,7 +37,7 @@ impl PaneId {
 
 impl std::fmt::Display for PaneId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -86,4 +86,15 @@ pub trait Domain: Send + Sync {
     fn kind(&self) -> PaneKind;
     async fn spawn_pane(&self, config: &PaneConfig) -> Result<Arc<dyn PaneHandle>>;
     async fn close(&self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PaneId;
+
+    #[test]
+    fn pane_id_display_respects_width() {
+        assert_eq!(format!("{:<10}", PaneId::new(1)), "1         ");
+        assert_eq!(format!("{:>10}", PaneId::new(1)), "         1");
+    }
 }

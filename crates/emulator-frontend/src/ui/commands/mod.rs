@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
-use crate::cli::{Cmd, GroupCmd, PaneCmd, TmlCmd, TmxCmd, WindowCmd};
+use crate::cli::{Cmd, GroupCmd, LsCmd, PaneCmd, TmlCmd, TmxCmd, WindowCmd};
 use crate::ui::app::App;
 use crate::ui::render::{self, Output};
 
@@ -52,6 +52,9 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         Cmd::Window(WindowCmd::List { group }) => window::window_list(&guard, group)?,
         Cmd::Group(GroupCmd::List) => group::list(&guard),
         Cmd::Sync => tmux::sync(&mut guard).await?,
+        Cmd::Ls(LsCmd::Pane) => render::pane_table(&guard).await,
+        Cmd::Ls(LsCmd::Window { group }) => window::window_list(&guard, group)?,
+        Cmd::Ls(LsCmd::Group) => group::list(&guard),
         Cmd::List => render::pane_table(&guard).await,
         Cmd::Help => help(),
         Cmd::Daemon(_) => return Err(anyhow!("daemon subcommand is handled by the entry point")),
@@ -80,6 +83,7 @@ pub fn help() -> Output {
     out.line("  window list [<group>]          list tmux windows (optionally scoped)");
     out.line("  window select <group> <window> switch to a tmux window in a group");
     out.line("  group list                     list window groups");
+    out.line("  ls pane|window [<group>]|group   list panes / windows / groups");
     out.line("  sync                        sync local panes with the tmux structure");
     out.line("  list                        list panes");
     out.line("  daemon serve|status|stop    run / inspect / stop the resident daemon");

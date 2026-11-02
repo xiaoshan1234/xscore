@@ -35,6 +35,7 @@ xs <command> [args...]     # 执行一条一次性命令
 | `window list [<group>]` | 列出 tmux window（可限定 group） |
 | `window select <group> <window>` | 切换指定 group 里的 tmux window |
 | `group list` | 列出 window group |
+| `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
 | `sync` | 按 tmux 服务端现状同步本地结构 |
 | `list` | 列出所有 pane |
 | `help` | 打印简洁命令清单 |
@@ -230,7 +231,7 @@ xs window del <group> <window>
 xs window list [<group>]
 ```
 
-列出 tmux window（SESSION / WINDOW / ACTIVE / PANES）；带 `<group>` 时只列该 group。
+列出 tmux window（WINDOW / GROUP / ACTIVE / PANES）；带 `<group>` 时只列该 group。
 
 ### window select
 
