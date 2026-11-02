@@ -1,4 +1,4 @@
-//! CLI 命令解析（clap derive）。REPL 每行输入解析为一个 `Cmd`。
+//! CLI 命令解析（clap derive）。每段 argv 解析为一个 `Cmd`。
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -80,10 +80,6 @@ pub enum Cmd {
     List,
     /// print help
     Help,
-    /// leave the REPL
-    Quit,
-    /// leave the REPL
-    Exit,
     /// daemon lifecycle
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -160,15 +156,20 @@ pub enum DaemonCmd {
     Stop,
 }
 
-/// 解析一行 REPL 输入。
-pub fn parse_line(line: &str) -> Result<Cmd, clap::Error> {
-    parse_args(line.split_whitespace().map(str::to_string))
-}
-
 /// 解析一段命令行参数（argv，不含程序名）。
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::Error> {
     Command::try_parse_from(std::iter::once("xs".to_string()).chain(args))
         .map(|command| command.command)
+}
+
+/// 无参数时打印 clap 生成的帮助（替代已移除的交互式 REPL）。
+pub fn print_help() -> std::io::Result<()> {
+    use clap::CommandFactory;
+
+    let mut command = Command::command();
+    command.print_help()?;
+    println!();
+    Ok(())
 }
 
 /// 解析 `user@host[:port]`。
@@ -298,7 +299,7 @@ mod tests {
     }
 
     fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
-        parse_line(&args.join(" "))
+        parse_args(args.iter().map(|arg| (*arg).to_string()))
     }
 
     #[test]

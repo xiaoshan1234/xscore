@@ -1,4 +1,4 @@
-//! 命令输出缓冲：REPL、一次性 CLI、daemon 共用同一份文本表示。
+//! 命令输出缓冲：一次性 CLI 与 daemon 共用同一份文本表示。
 
 /// 追加式输出文本。`line` 等价于 `println!`（补一个换行），`push` 原样追加。
 #[derive(Debug, Default, Clone)]

@@ -23,7 +23,8 @@ cargo fmt --all -- --check
 运行 CLI 前端：
 
 ```bash
-cargo run -p emulator-frontend
+cargo install --path crates/emulator-frontend   # 安装 xs 到 ~/.cargo/bin
+xs list                                          # 不带参数时打印帮助（无交互式 REPL）
 ```
 
 真实环境 tmux 集成测试（默认 `#[ignore]`，需要真实 SSH 主机）：
@@ -45,11 +46,10 @@ crates/emulator/            L0–L2 后端库
   term/                     L2：VT 状态机 + 网格（Grid/VtTerm）
 
 crates/emulator-frontend/   L3–L5 CLI 前端
-  src/main.rs               入口：askpass 角色、日志、模式路由（repl / 一次性 / daemon）
+  src/main.rs               入口：askpass 角色、日志、模式路由（一次性 / daemon）
   src/cli.rs                clap 命令解析（Cmd / TmuxArgs / 子命令）+ 密码边缘解析
   src/app.rs                App 状态与命令处理（Domain/pane 注册表 + 布局树 + 分发）
-  src/repl.rs               交互式 REPL（命令经 daemon 执行）
-  src/output.rs             命令输出缓冲（REPL / 一次性 / daemon 共用）
+  src/output.rs             命令输出缓冲（一次性 / daemon 共用）
   src/logging.rs            日志初始化（文件 + stderr WARN）
   src/daemon/               常驻 daemon：ipc / protocol / client / server
   src/layout.rs             布局树（Node / TmuxContainer / PaneRect）
@@ -63,9 +63,9 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 
 ## 必须知道的技术坑
 
-- **一次性 CLI 走常驻 daemon**：`xs <command>` 与 REPL 都通过本地 IPC（Unix socket /
-  Windows 命名管道）把命令发给 `xs daemon serve`，live 连接与 pane 状态才不随 CLI
-  进程退出而丢失。daemon 按需自动拉起；密码在客户端解析后随命令传入。
+- **一次性 CLI 走常驻 daemon**：`xs <command>` 通过本地回环 TCP 把命令发给
+  `xs daemon serve`，live 连接与 pane 状态才不随 CLI 进程退出而丢失。daemon 按需
+  自动拉起；密码在客户端解析后随命令传入。
 - **tmux 用 `-C`，不是 `-CC`**：`-CC` 会 `tcgetattr`，在管道/部分 tty 场景下卡死。
 - **tmux `-F` 分隔符用 `|`**：tab 会被展开成 `ESC[NC`，控制字符会被转义成 `\ooo`，
   可打印的 `|` 才能原样输出。

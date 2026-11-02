@@ -50,7 +50,7 @@ fn spawn_daemon() -> Result<()> {
 async fn request(request: &Request) -> Result<Response> {
     let mut stream = ipc::connect()
         .await
-        .map_err(|error| anyhow!("daemon not running ({}): {error}", ipc::address()))?;
+        .map_err(|error| anyhow!("daemon not running (port {}): {error}", ipc::port()))?;
     protocol::write_frame(&mut *stream, request).await?;
     protocol::read_frame(&mut *stream)
         .await?

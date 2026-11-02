@@ -5,35 +5,45 @@ xscore 是一个终端模拟器。当前交付的是后端（L0–L2：平台抽
 驱动和验证后端。
 
 目标能力：原生支持 `tmux -CC` 控制模式、普通 SSH、本地/远端 Shell，以及多 pane
-分屏布局。现在还没有图形渲染，前端是一个交互式 REPL，也支持在终端里直接带命令
-一次性调用。
+分屏布局。现在还没有图形渲染，前端是一个纯命令行工具：一次性命令 + 常驻 daemon，
+没有交互式 REPL。
 
 架构说明见 [terminal-emulator.md](../arch/terminal-emulator.md)，实现计划见
 [roadmap](../roadmap/README.md)。
+
+## 安装
+
+```bash
+cargo install --path crates/emulator-frontend
+```
+
+安装后二进制名称为 `xs`，放在 `~/.cargo/bin`（确保它在 `PATH` 里）。也可以不安装，
+直接用 `cargo run -p emulator-frontend -- <命令>` 或
+`./target/debug/xs[.exe] <命令>`。
 
 ## 构建与运行
 
 ```bash
 cargo build --workspace
-cargo run -p emulator-frontend
+xs list
 ```
 
-不带参数进入交互式命令行，提示符为 `xscore>`；输入 `help` 可随时查看命令。二进制
-名称为 `xs`，也可以直接跟命令在终端里跑一次（不进入 REPL）：
+不带参数时打印帮助（已无交互式 REPL）：
 
 ```bash
 ./target/debug/xs shell powershell       # Linux / WSL
 .\target\debug\xs.exe shell powershell   # Windows
 xs list
 xs tmux work --wsl
+xs
 ```
 
-`xs --help` 列出全部子命令；带命令时执行一次后即退出，适合脚本化驱动。
+`xs --help` 列出全部子命令；每条命令执行一次后即退出，适合脚本化驱动。
 
 ### 常驻 daemon
 
-一次性命令与 REPL 都不直接持有连接：命令通过本地 IPC（Windows 命名管道 / Unix
-socket）发给一个常驻 daemon，由它持有所有 live 连接与 pane 状态。这样
+一次性命令不直接持有连接：命令通过本地回环 TCP 发给一个常驻 daemon，由它持有所有
+live 连接与 pane 状态。这样
 `xs shell powershell` 退出后，pane 仍在 daemon 里，下一条 `xs list` 还能看到。
 daemon 在第一条命令时自动拉起，也可以手动管理：
 
@@ -65,7 +75,6 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 | `sync` | 按 tmux 服务端现状同步：删除已消失的 pane/window，纳入新增的 pane/window |
 | `layout` | 打印窗格树 |
 | `list` | 列出所有 pane |
-| `quit` / `exit` | 退出 |
 
 tmux 的 `--ssh-arg <arg>` 和 `--wsl-arg <arg>` 可重复，透传给 `ssh` 或 `wsl.exe`。
 `--password` 触发密码认证：优先读 `XSCORE_SSH_PASSWORD` / `PASSWD` 环境变量，否则

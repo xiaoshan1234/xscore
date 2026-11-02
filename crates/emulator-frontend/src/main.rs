@@ -1,4 +1,4 @@
-//! 前端入口：askpass 角色、日志初始化、模式路由（REPL / 一次性命令 / daemon）。
+//! 前端入口：askpass 角色、日志初始化、模式路由（一次性命令 / daemon）。
 
 mod app;
 mod cli;
@@ -6,7 +6,6 @@ mod daemon;
 mod layout;
 mod logging;
 mod output;
-mod repl;
 mod tmux_events;
 
 use std::io::Write as _;
@@ -30,7 +29,8 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        return repl::run().await;
+        cli::print_help()?;
+        return Ok(());
     }
 
     let cmd = match cli::parse_args(args) {

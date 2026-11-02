@@ -690,12 +690,11 @@ pub fn help() -> Output {
     out.line("  sync                        sync local panes with the tmux structure");
     out.line("  list                        list panes");
     out.line("  daemon serve|status|stop    run / inspect / stop the resident daemon");
-    out.line("  quit | exit                 leave");
     out
 }
 
-/// 分发一条命令，返回 `(是否退出, 输出文本)`。
-pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<(bool, Output)> {
+/// 分发一条命令，返回输出文本。
+pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
     let mut guard = app.lock().await;
     let out = match cmd {
         Cmd::Shell { program, args } => guard.shell(program, args).await?,
@@ -724,8 +723,7 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<(bool, Output)>
         Cmd::Sync => guard.sync().await?,
         Cmd::List => guard.list().await,
         Cmd::Help => help(),
-        Cmd::Quit | Cmd::Exit => return Ok((true, Output::new())),
         Cmd::Daemon(_) => return Err(anyhow!("daemon subcommand is handled by the entry point")),
     };
-    Ok((false, out))
+    Ok(out)
 }

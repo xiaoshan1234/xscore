@@ -1,4 +1,6 @@
-//! 本地 IPC 端点：Unix socket / Windows 命名管道。
+//! 本地 IPC 端点：127.0.0.1 上的 TCP 回环端口。
+//!
+//! 用 TCP 而不是命名管道：回环 TCP 在所有平台一致、跨进程可靠，且便于测试。
 
 use std::io;
 
@@ -10,24 +12,14 @@ impl<T> DaemonStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 pub type BoxDaemonStream = Box<dyn DaemonStream>;
 
-/// 端点的稳定名字：同一用户始终指向同一 daemon。
-pub fn address() -> String {
+/// 由用户目录稳定派生出的回环端口，同一用户始终指向同一 daemon。
+pub fn port() -> u16 {
     #[cfg(windows)]
     let identity = std::env::var("USERPROFILE").unwrap_or_default();
     #[cfg(not(windows))]
     let identity = std::env::var("HOME").unwrap_or_default();
     let hash = fnv1a(identity.as_bytes());
-    #[cfg(windows)]
-    {
-        format!(r"\\.\pipe\xscore-{hash:016x}")
-    }
-    #[cfg(not(windows))]
-    {
-        std::env::temp_dir()
-            .join(format!("xscore-{hash:016x}.sock"))
-            .to_string_lossy()
-            .into_owned()
-    }
+    40_000 + (hash % 20_000) as u16
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -39,65 +31,33 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-#[cfg(unix)]
 pub async fn connect() -> io::Result<BoxDaemonStream> {
-    connect_to(&address()).await
-}
-
-#[cfg(unix)]
-pub async fn connect_to(path: &str) -> io::Result<BoxDaemonStream> {
-    let stream = tokio::net::UnixStream::connect(path).await?;
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port())).await?;
+    stream.set_nodelay(true)?;
     Ok(Box::new(stream))
-}
-
-#[cfg(windows)]
-pub async fn connect() -> io::Result<BoxDaemonStream> {
-    connect_to(&address()).await
-}
-
-#[cfg(windows)]
-pub async fn connect_to(name: &str) -> io::Result<BoxDaemonStream> {
-    use tokio::net::windows::named_pipe::ClientOptions;
-
-    const ERROR_PIPE_BUSY: i32 = 231;
-    for attempt in 0..10 {
-        match ClientOptions::new().open(name) {
-            Ok(stream) => return Ok(Box::new(stream)),
-            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < 9 => {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    unreachable!("the retry loop either returns a stream or an error")
 }
 
 pub async fn probe() -> bool {
     connect().await.is_ok()
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
-    use super::*;
-    use tokio::net::windows::named_pipe::{PipeMode, ServerOptions};
+    use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn named_pipe_roundtrips_the_frame_protocol() {
+    async fn tcp_roundtrips_the_frame_protocol() {
         use super::super::protocol::{self, Request, Response};
 
-        let name = format!(r"\\.\pipe\xscore-test-{}", std::process::id());
-        let mut server = ServerOptions::new()
-            .pipe_mode(PipeMode::Byte)
-            .first_pipe_instance(true)
-            .create(&name)
-            .expect("create test pipe");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let addr = listener.local_addr().expect("local addr");
 
-        let connect = connect_to(&name);
-        let (client, connected) = tokio::join!(connect, server.connect());
+        let connect = tokio::net::TcpStream::connect(addr);
+        let (client, accepted) = tokio::join!(connect, listener.accept());
         let mut client = client.expect("connect client");
-        connected.expect("connect server");
+        let (mut server, _) = accepted.expect("accept server");
 
-        protocol::write_frame(&mut *client, &Request::Ping)
+        protocol::write_frame(&mut client, &Request::Ping)
             .await
             .expect("write request");
         let request: Request = protocol::read_frame(&mut server)
@@ -109,7 +69,7 @@ mod tests {
         protocol::write_frame(&mut server, &Response::ok("pong\n".into()))
             .await
             .expect("write response");
-        let response: Response = protocol::read_frame(&mut *client)
+        let response: Response = protocol::read_frame(&mut client)
             .await
             .expect("read response")
             .expect("response frame");
