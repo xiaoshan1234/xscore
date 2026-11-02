@@ -576,8 +576,11 @@ name = "emulator-frontend"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "clap",
  "emulator",
  "rpassword",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

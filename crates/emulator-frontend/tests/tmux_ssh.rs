@@ -49,8 +49,8 @@ async fn ssh_tmux_attach_split_kill_sync() {
         eprintln!("skip: password env not set");
         return;
     };
-    let Some(askpass) = env_or_skip("CARGO_BIN_EXE_emulator-frontend") else {
-        eprintln!("skip: CARGO_BIN_EXE_emulator-frontend unavailable");
+    let Some(askpass) = env_or_skip("CARGO_BIN_EXE_xs") else {
+        eprintln!("skip: CARGO_BIN_EXE_xs unavailable");
         return;
     };
 
