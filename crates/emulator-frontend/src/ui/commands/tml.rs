@@ -10,7 +10,7 @@ use crate::ui::app::App;
 use crate::ui::layout::Direction;
 use crate::ui::render::Output;
 use crate::ui::tmux::session::reconcile_session;
-use crate::ui::window_group::{GroupId, GroupKind};
+use crate::ui::window_group::{GroupId, GroupKind, WindowId, WindowKind};
 
 pub async fn add(app: &mut App, args: TmlAddArgs) -> Result<Output> {
     let group = match &args.group {
@@ -43,7 +43,13 @@ async fn add_local(app: &mut App, args: TmlAddArgs, group: GroupId) -> Result<Ou
             return Err(anyhow!("pane not found in layout: {target}"));
         }
     }
-    let id = spawn(app, &spec, args.password, group).await?;
+    let target_window = match &split {
+        Some((_, target)) => app
+            .pane_window(*target)
+            .filter(|window| window.kind == WindowKind::Manual),
+        None => None,
+    };
+    let id = spawn(app, &spec, args.password, group, target_window).await?;
     match split {
         Some((direction, target)) => app.layout.split_pane(direction, target, id),
         None => app.layout.add(id),
@@ -119,6 +125,7 @@ async fn spawn(
     spec: &ConversationSpec,
     password: Option<String>,
     group: GroupId,
+    window: Option<WindowId>,
 ) -> Result<PaneId> {
     match spec {
         ConversationSpec::Shell {
@@ -138,7 +145,10 @@ async fn spawn(
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_pane_in_group(handle, *cols, *rows, group))
+            Ok(match window {
+                Some(window) => app.register_pane_in_window(handle, *cols, *rows, window),
+                None => app.register_pane_in_group(handle, *cols, *rows, group),
+            })
         }
         ConversationSpec::Ssh {
             target,
@@ -160,7 +170,10 @@ async fn spawn(
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_pane_in_group(handle, *cols, *rows, group))
+            Ok(match window {
+                Some(window) => app.register_pane_in_window(handle, *cols, *rows, window),
+                None => app.register_pane_in_group(handle, *cols, *rows, group),
+            })
         }
         ConversationSpec::Wsl { args, cols, rows } => {
             let domain = LocalDomain::new();
@@ -173,7 +186,10 @@ async fn spawn(
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_pane_in_group(handle, *cols, *rows, group))
+            Ok(match window {
+                Some(window) => app.register_pane_in_window(handle, *cols, *rows, window),
+                None => app.register_pane_in_group(handle, *cols, *rows, group),
+            })
         }
     }
 }

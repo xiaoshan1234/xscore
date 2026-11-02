@@ -40,6 +40,48 @@ pub enum GroupKind {
     Tmux,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WindowKind {
+    Tmux,
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowId {
+    pub group: GroupId,
+    pub kind: WindowKind,
+    pub index: u64,
+}
+
+impl WindowId {
+    pub fn tmux(group: GroupId, index: u64) -> Self {
+        Self {
+            group,
+            kind: WindowKind::Tmux,
+            index,
+        }
+    }
+
+    pub fn manual(group: GroupId, index: u64) -> Self {
+        Self {
+            group,
+            kind: WindowKind::Manual,
+            index,
+        }
+    }
+}
+
+impl fmt::Display for WindowId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            WindowKind::Tmux => 'T',
+            WindowKind::Manual => 'M',
+        };
+        let text = format!("G{}-{}{}", self.group, kind, self.index);
+        f.pad(&text)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WindowGroup {
     pub id: GroupId,
@@ -92,6 +134,16 @@ mod tests {
         let id: GroupId = "1".parse().unwrap();
         assert_eq!(format!("{:<6}", id), "1     ");
         assert_eq!(format!("{:>6}", id), "     1");
+    }
+
+    #[test]
+    fn window_id_display() {
+        let id = WindowId::tmux("1".parse().unwrap(), 3);
+        assert_eq!(id.to_string(), "G1-T3");
+        assert_eq!(format!("{:<8}", id), "G1-T3   ");
+
+        let manual = WindowId::manual("2".parse().unwrap(), 0);
+        assert_eq!(manual.to_string(), "G2-M0");
     }
 
     #[test]

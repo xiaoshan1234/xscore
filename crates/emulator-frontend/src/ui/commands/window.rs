@@ -10,6 +10,7 @@ use emulator::platform::tmux::quote_arg;
 use crate::ui::app::App;
 use crate::ui::render::Output;
 use crate::ui::tmux::session::reconcile_session;
+use crate::ui::window_group::{WindowId, WindowKind};
 
 pub async fn window_create(app: &mut App, group: String, name: String) -> Result<Output> {
     let gid = app
@@ -105,35 +106,54 @@ pub fn window_list(app: &App, group: Option<String>) -> Result<Output> {
         None => None,
     };
 
-    let mut windows: HashMap<(String, String), (bool, usize)> = HashMap::new();
-    for meta in app.tmux.values() {
-        let session = meta.session.clone();
+    let mut windows: HashMap<WindowId, (bool, usize)> = HashMap::new();
+    for (pane, window) in &app.pane_windows {
         if let Some(gid) = gid {
-            if app.session_groups.get(&session) != Some(&gid) {
+            if window.group != gid {
                 continue;
             }
         }
-        let entry = windows
-            .entry((meta.window.clone(), session))
-            .or_insert((meta.window_active, 0));
+        let active = match window.kind {
+            WindowKind::Tmux => app
+                .tmux
+                .get(pane)
+                .map(|meta| meta.window_active)
+                .unwrap_or(false),
+            WindowKind::Manual => false,
+        };
+        let entry = windows.entry(*window).or_insert((active, 0));
         entry.1 += 1;
     }
 
     let mut rows: Vec<_> = windows.into_iter().collect();
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by_key(|(window, _)| {
+        let kind = match window.kind {
+            WindowKind::Tmux => 0u8,
+            WindowKind::Manual => 1u8,
+        };
+        (window.group.as_u64(), kind, window.index)
+    });
 
     let mut out = Output::new();
     out.line(format!(
-        "{:<10} {:<16} {:<8} {:<6}",
+        "{:<12} {:<16} {:<8} {:<6}",
         "WINDOW", "GROUP", "ACTIVE", "PANES"
     ));
-    for ((window, group), (active, pane_count)) in rows {
+    for (window, (active, pane_count)) in rows {
+        let group_name = app.group_name(window.group).unwrap_or("-");
+        let active_text = match window.kind {
+            WindowKind::Tmux => {
+                if active {
+                    "yes"
+                } else {
+                    "no"
+                }
+            }
+            WindowKind::Manual => "-",
+        };
         out.line(format!(
-            "{:<10} {:<16} {:<8} {:<6}",
-            window,
-            group,
-            if active { "yes" } else { "no" },
-            pane_count
+            "{:<12} {:<16} {:<8} {:<6}",
+            window, group_name, active_text, pane_count
         ));
     }
     Ok(out)

@@ -1,6 +1,4 @@
-//! 前端应用状态：pane 注册表、布局树与 tmux 会话元数据。
-//!
-//! 具体命令逻辑在 `commands`，这里只保留协调所需的注册表与最小访问器。
+//! 前端应用状态：pane 注册表、布局树、window group 与 window id。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,7 +9,7 @@ use emulator::platform::tmux::TmuxControl;
 use crate::ui::layout::Layout;
 use crate::ui::pane::{PaneEntry, PaneRegistry};
 use crate::ui::tmux::session::TmuxMeta;
-use crate::ui::window_group::{GroupId, GroupKind, WindowGroup};
+use crate::ui::window_group::{GroupId, GroupKind, WindowGroup, WindowId};
 
 pub struct App {
     pub panes: PaneRegistry,
@@ -21,6 +19,8 @@ pub struct App {
     pub groups: HashMap<GroupId, WindowGroup>,
     pub session_groups: HashMap<String, GroupId>,
     pub pane_groups: HashMap<PaneId, GroupId>,
+    pub pane_windows: HashMap<PaneId, WindowId>,
+    pub next_manual_window: HashMap<GroupId, u64>,
     pub default_group: GroupId,
 }
 
@@ -37,21 +37,13 @@ impl App {
             groups,
             session_groups: HashMap::new(),
             pane_groups: HashMap::new(),
+            pane_windows: HashMap::new(),
+            next_manual_window: HashMap::new(),
             default_group: default_group.id,
         }
     }
 
-    /// 注册一个本地 pane（shell/ssh/wsl），归入默认 group。
-    pub fn register_local_pane(
-        &mut self,
-        handle: Arc<dyn PaneHandle>,
-        cols: u16,
-        rows: u16,
-    ) -> PaneId {
-        self.register_pane_in_group(handle, cols, rows, self.default_group)
-    }
-
-    /// 注册一个 pane 并归入任意指定 group。
+    /// 注册一个 pane，并归入 group 里的一个新 manual window。
     pub fn register_pane_in_group(
         &mut self,
         handle: Arc<dyn PaneHandle>,
@@ -61,21 +53,55 @@ impl App {
     ) -> PaneId {
         let id = self.panes.register(handle, cols, rows);
         self.add_pane_to_group(group, id);
+        let window = self.alloc_manual_window(group);
+        self.pane_windows.insert(id, window);
         id
     }
 
-    /// 注册一个 tmux pane，归入该 session 对应的 window group。
+    /// 注册一个 pane，并归入指定的 window。
+    pub fn register_pane_in_window(
+        &mut self,
+        handle: Arc<dyn PaneHandle>,
+        cols: u16,
+        rows: u16,
+        window: WindowId,
+    ) -> PaneId {
+        let id = self.panes.register(handle, cols, rows);
+        self.add_pane_to_group(window.group, id);
+        self.pane_windows.insert(id, window);
+        id
+    }
+
+    /// 注册一个 tmux pane，归入该 session 对应 group 的 tmux window。
     pub fn register_tmux_pane(
         &mut self,
         handle: Arc<dyn PaneHandle>,
         cols: u16,
         rows: u16,
         session: &str,
+        window_handle: &str,
     ) -> PaneId {
         let id = self.panes.register(handle, cols, rows);
         let group = self.ensure_tmux_group(session);
         self.add_pane_to_group(group, id);
+        let index = tmux_window_index(window_handle);
+        self.pane_windows.insert(id, WindowId::tmux(group, index));
         id
+    }
+
+    /// 同步 pane 的 tmux window id（tmux window 序号变化时调用）。
+    pub fn update_tmux_window(&mut self, id: PaneId, session: &str, window_handle: &str) {
+        if let Some(group) = self.session_groups.get(session).copied() {
+            let index = tmux_window_index(window_handle);
+            self.pane_windows.insert(id, WindowId::tmux(group, index));
+        }
+    }
+
+    fn alloc_manual_window(&mut self, group: GroupId) -> WindowId {
+        let next = self.next_manual_window.entry(group).or_insert(0);
+        let index = *next;
+        *next += 1;
+        WindowId::manual(group, index)
     }
 
     pub fn pane_entry(&self, id: PaneId) -> Option<&PaneEntry> {
@@ -107,6 +133,10 @@ impl App {
 
     pub fn pane_group(&self, id: PaneId) -> Option<GroupId> {
         self.pane_groups.get(&id).copied()
+    }
+
+    pub fn pane_window(&self, id: PaneId) -> Option<WindowId> {
+        self.pane_windows.get(&id).copied()
     }
 
     pub fn group_name(&self, id: GroupId) -> Option<&str> {
@@ -142,12 +172,24 @@ impl App {
             group.remove_pane(id);
         }
         self.pane_groups.remove(&id);
+        self.pane_windows.remove(&id);
     }
+}
+
+fn tmux_window_index(handle: &str) -> u64 {
+    handle.trim_start_matches('@').parse().unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_window_index_parses_handle() {
+        assert_eq!(tmux_window_index("@0"), 0);
+        assert_eq!(tmux_window_index("@3"), 3);
+        assert_eq!(tmux_window_index("not-a-window"), 0);
+    }
 
     #[test]
     fn default_and_session_groups() {

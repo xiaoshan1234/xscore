@@ -185,7 +185,7 @@ xs resize <pane-id> <cols> <rows>
 xs list
 ```
 
-列出所有 pane（PANE / KIND / COLS / ROWS）。
+列出所有 pane（PANE / KIND / GROUP / WINDOW / COLS / ROWS）。
 
 ### pane del
 
@@ -208,6 +208,9 @@ xs pane fetch <pane-id> [--line <N>]
 
 window 现在按 group 作用域：一个 tmux session 对应一个 window group，默认 group 放本地
 shell/ssh/wsl 会话。`<group>` 可以用 group 名（session 名或 `default`）或数字 GroupId。
+
+window 标识统一编码为 `Gxx-Tyy` / `Gxx-Myy`：`xx` 是 group id，`yy` 是该 group 内的
+window 序号，`T` 表示 tmux window，`M` 表示 shell/ssh/wsl window。
 
 ### window create
 

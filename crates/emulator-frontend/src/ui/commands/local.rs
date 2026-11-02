@@ -8,6 +8,7 @@ use crate::cli::SplitDirection;
 use crate::ui::app::App;
 use crate::ui::layout::Direction;
 use crate::ui::render::Output;
+use crate::ui::window_group::WindowKind;
 
 pub async fn split(
     app: &mut App,
@@ -39,5 +40,13 @@ async fn spawn_local(app: &mut App, command: String, args: Vec<String>) -> Resul
             rows,
         })
         .await?;
-    Ok(app.register_local_pane(handle, cols, rows))
+    let window = app
+        .layout
+        .focused()
+        .and_then(|focused| app.pane_window(focused))
+        .filter(|window| window.kind == WindowKind::Manual);
+    Ok(match window {
+        Some(window) => app.register_pane_in_window(handle, cols, rows, window),
+        None => app.register_pane_in_group(handle, cols, rows, app.default_group),
+    })
 }

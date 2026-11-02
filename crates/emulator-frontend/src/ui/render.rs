@@ -49,7 +49,7 @@ pub async fn snapshot_text(term: &Mutex<VtTerm>) -> String {
 pub async fn pane_table(app: &App) -> Output {
     let mut out = Output::new();
     out.line(format!(
-        "{:<6} {:<8} {:<12} {:<8} {:<5} {:<5}",
+        "{:<6} {:<8} {:<12} {:<12} {:<5} {:<5}",
         "PANE", "KIND", "GROUP", "WINDOW", "COLS", "ROWS"
     ));
     let mut ids: Vec<PaneId> = app.panes.ids().collect();
@@ -70,12 +70,11 @@ pub async fn pane_table(app: &App) -> Output {
             .and_then(|gid| app.group_name(gid))
             .unwrap_or("-");
         let window = app
-            .tmux
-            .get(&id)
-            .map(|meta| meta.window.as_str())
-            .unwrap_or("-");
+            .pane_window(id)
+            .map(|window| window.to_string())
+            .unwrap_or_else(|| "-".to_string());
         out.line(format!(
-            "{:<6} {:<8} {:<12} {:<8} {:<5} {:<5}",
+            "{:<6} {:<8} {:<12} {:<12} {:<5} {:<5}",
             id, kind, group, window, cols, rows
         ));
     }

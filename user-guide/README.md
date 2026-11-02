@@ -119,6 +119,9 @@ xs window list work
 xs window select work @0
 ```
 
+window 标识统一编码为 `Gxx-Tyy` / `Gxx-Myy`：`xx` 是 group id，`yy` 是 group 内
+window 序号，`T` 表示 tmux window，`M` 表示 shell/ssh/wsl window。
+
 ### 布局
 
 ```text
