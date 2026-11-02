@@ -30,14 +30,16 @@ pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
             Ok(Cmd::Tmux(tmux))
         }
         Cmd::Tml(TmlCmd::Create(mut create)) => {
-            if let ConversationSpec::Ssh {
-                target,
-                identity: None,
-                password: None,
-                ..
-            } = parse_conversation_url(&create.url)?
-            {
-                create.password = Some(prompt_ssh_password(&target)?);
+            if let Some(url) = &create.url {
+                if let ConversationSpec::Ssh {
+                    target,
+                    identity: None,
+                    password: None,
+                    ..
+                } = parse_conversation_url(url)?
+                {
+                    create.password = Some(prompt_ssh_password(&target)?);
+                }
             }
             Ok(Cmd::Tml(TmlCmd::Create(create)))
         }

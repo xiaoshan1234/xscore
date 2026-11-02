@@ -97,19 +97,25 @@ xs wsl --distribution Ubuntu --exec /bin/bash
 
 ### tml create
 
-`tml` 是 `terminal` 的简写，`create` 用 URL 统一描述 shell/ssh/wsl 对话：
+`tml` 是 `terminal` 的简写。`create` 按目标 group 分两种行为：
 
 ```text
-xs tml create --url <URL> [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
+xs tml create [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
 ```
 
 - `--group <GROUP>`：目标 window group（group 名或数字 GroupId），缺省为默认 group。
 
-放置方式（三者互斥，省略时默认 `--new-window`）：
+默认 group（放本地 shell/ssh/wsl 会话）：
 
+- `--url <URL>` 必填，描述 shell/ssh/wsl 对话。
 - `--new-window`：在新窗口创建（默认）。
-- `--sph <ID>`：横向拆分指定 pane 后创建。
-- `--spv <ID>`：纵向拆分指定 pane 后创建。
+- `--sph <ID>` / `--spv <ID>`：拆分指定本地 pane 后创建。
+
+tmux session group：
+
+- `--url` 忽略（新 window/pane 使用 tmux 默认 shell）。
+- `--new-window`：在会话内 `new-window`（默认）。
+- `--sph <ID>` / `--spv <ID>`：`split-window` 拆分指定 tmux pane（`<ID>` 为该 pane 的本地 PaneId）。
 
 URL scheme：
 
@@ -131,6 +137,8 @@ xs tml create --url 'shell://bash?cols=100&rows=30' --spv 3
 xs tml create --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
 xs tml create --url 'ssh://dev@box?password=secret'
 xs tml create --url 'wsl://?args=--distribution,Ubuntu'
+xs tml create --group work --new-window
+xs tml create --group work --sph 3
 ```
 
 ## tmux 会话

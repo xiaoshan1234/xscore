@@ -136,15 +136,15 @@ pub struct TmuxArgs {
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum TmlCmd {
-    /// create a shell/ssh/wsl conversation from a URL
+    /// create a local shell/ssh/wsl conversation or a tmux window/pane
     Create(TmlCreateArgs),
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub struct TmlCreateArgs {
-    /// conversation URL, e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
+    /// conversation URL (optional for tmux groups), e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
     #[arg(long, value_name = "URL")]
-    pub url: String,
+    pub url: Option<String>,
     /// target window group (name or id); defaults to the default group
     #[arg(long, value_name = "GROUP")]
     pub group: Option<String>,

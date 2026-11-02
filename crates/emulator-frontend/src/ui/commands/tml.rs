@@ -1,33 +1,51 @@
-//! tml create：统一的 shell/ssh/wsl 对话创建。
+//! tml create：统一的 shell/ssh/wsl 对话创建，以及 tmux 会话内的 window/pane 创建。
 
 use anyhow::{anyhow, Context, Result};
 
 use emulator::domain::{Domain, LocalDomain, PaneConfig, PaneId, RemoteSshDomain};
+use emulator::platform::tmux::quote_arg;
 
 use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlCreateArgs};
 use crate::ui::app::App;
 use crate::ui::layout::Direction;
 use crate::ui::render::Output;
-use crate::ui::window_group::GroupId;
+use crate::ui::tmux::session::reconcile_session;
+use crate::ui::window_group::{GroupId, GroupKind};
 
 pub async fn create(app: &mut App, args: TmlCreateArgs) -> Result<Output> {
-    let spec = parse_conversation_url(&args.url)?;
-    let split = split_target(&args)?;
-    if let Some((_, target)) = &split {
-        if !app.layout.contains(*target) {
-            return Err(anyhow!("pane not found in layout: {target}"));
-        }
-    }
     let group = match &args.group {
         Some(spec) => app
             .resolve_group(spec)
             .ok_or_else(|| anyhow!("group not found: {spec}"))?,
         None => app.default_group,
     };
+    let is_tmux = app
+        .groups
+        .get(&group)
+        .map(|g| g.kind == GroupKind::Tmux)
+        .unwrap_or(false);
+    if is_tmux {
+        create_in_tmux(app, &args, group).await
+    } else {
+        create_local(app, args, group).await
+    }
+}
+
+async fn create_local(app: &mut App, args: TmlCreateArgs, group: GroupId) -> Result<Output> {
+    let url = args
+        .url
+        .clone()
+        .ok_or_else(|| anyhow!("--url is required for the default group"))?;
+    let spec = parse_conversation_url(&url)?;
+    let split = split_target(&args)?;
+    if let Some((_, target)) = &split {
+        if !app.layout.contains(*target) {
+            return Err(anyhow!("pane not found in layout: {target}"));
+        }
+    }
     let id = spawn(app, &spec, args.password, group).await?;
     match split {
         Some((direction, target)) => app.layout.split_pane(direction, target, id),
-        // 未指定 --sph/--spv 时，默认创建新窗口。
         None => app.layout.add(id),
     }
 
@@ -39,6 +57,45 @@ pub async fn create(app: &mut App, args: TmlCreateArgs) -> Result<Output> {
         spec.rows()
     ));
     Ok(out)
+}
+
+async fn create_in_tmux(app: &mut App, args: &TmlCreateArgs, group: GroupId) -> Result<Output> {
+    let session = app
+        .group_session(group)
+        .ok_or_else(|| anyhow!("group {group} is not a tmux session group"))?
+        .to_string();
+    let control = app
+        .tmux_control(&session)
+        .ok_or_else(|| anyhow!("tmux session control unavailable"))?;
+
+    if let Some(raw) = &args.sph {
+        let target = tmux_pane_handle(app, raw)?;
+        control
+            .send(&format!("split-window -t {} -h", quote_arg(&target)))
+            .await?;
+    } else if let Some(raw) = &args.spv {
+        let target = tmux_pane_handle(app, raw)?;
+        control
+            .send(&format!("split-window -t {} -v", quote_arg(&target)))
+            .await?;
+    } else {
+        control
+            .send(&format!("new-window -t {}", quote_arg(&session)))
+            .await?;
+    }
+    let _ = reconcile_session(app, &session, &control).await?;
+
+    let mut out = Output::new();
+    out.line(format!("created tmux window/pane in group: {session}"));
+    Ok(out)
+}
+
+fn tmux_pane_handle(app: &App, raw: &str) -> Result<String> {
+    let id = PaneId::new(raw.parse().context("pane id")?);
+    app.tmux
+        .get(&id)
+        .map(|meta| meta.handle.clone())
+        .ok_or_else(|| anyhow!("tmux pane not found: {id}"))
 }
 
 fn split_target(args: &TmlCreateArgs) -> Result<Option<(Direction, PaneId)>> {

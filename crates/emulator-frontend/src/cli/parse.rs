@@ -518,6 +518,18 @@ mod tests {
     }
 
     #[test]
+    fn tml_create_tmux_group_without_url() {
+        let Cmd::Tml(TmlCmd::Create(create)) =
+            parse(&["tml", "create", "--group", "1", "--new-window"]).unwrap()
+        else {
+            panic!("expected tml command");
+        };
+        assert_eq!(create.group.as_deref(), Some("1"));
+        assert!(create.url.is_none());
+        assert!(create.new_window);
+    }
+
+    #[test]
     fn tmux_url_default_socket() {
         assert_eq!(
             parse_tmux_url("tmux://work").unwrap(),
