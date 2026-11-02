@@ -27,33 +27,12 @@ pub enum SplitDirection {
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum Cmd {
-    /// spawn a local shell pane
-    Shell {
-        program: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// spawn a remote SSH shell pane
-    Ssh {
-        target: String,
-        identity: Option<String>,
-        /// resolved client-side; never parsed from argv
-        #[arg(skip)]
-        password: Option<String>,
-    },
-    /// spawn a WSL shell pane (Windows)
-    Wsl {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// terminal conversation creation (shorthand: tml)
+    /// terminal pane/window management (shorthand: tml)
     #[command(subcommand)]
     Tml(TmlCmd),
     /// tmux session management (shorthand: tmx)
     #[command(subcommand)]
     Tmx(TmxCmd),
-    /// attach to a tmux session
-    Tmux(TmuxArgs),
     /// split the focused pane
     Split {
         direction: SplitDirection,
@@ -95,53 +74,19 @@ pub enum Cmd {
     Daemon(DaemonCmd),
 }
 
-#[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub struct TmuxArgs {
-    pub session: String,
-    /// tmux socket name (`tmux -L <NAME>`)
-    #[arg(short = 'L', value_name = "NAME", conflicts_with = "socket_path")]
-    pub socket_name: Option<String>,
-    /// tmux socket path (`tmux -S <PATH>`)
-    #[arg(short = 'S', value_name = "PATH", conflicts_with = "socket_name")]
-    pub socket_path: Option<String>,
-    /// run the tmux server on this SSH host
-    #[arg(long, value_name = "DEST", conflicts_with = "wsl")]
-    pub ssh: Option<String>,
-    /// run the tmux server inside WSL
-    #[arg(long, conflicts_with = "ssh")]
-    pub wsl: bool,
-    /// authenticate with a password
-    #[arg(long, requires = "ssh")]
-    pub password: bool,
-    /// resolved client-side; never parsed from argv
-    #[arg(skip)]
-    pub password_value: Option<String>,
-    /// extra ssh argument (repeatable)
-    #[arg(
-        long = "ssh-arg",
-        value_name = "ARG",
-        allow_hyphen_values = true,
-        requires = "ssh"
-    )]
-    pub ssh_args: Vec<String>,
-    /// extra wsl.exe argument (repeatable)
-    #[arg(
-        long = "wsl-arg",
-        value_name = "ARG",
-        allow_hyphen_values = true,
-        requires = "wsl"
-    )]
-    pub wsl_args: Vec<String>,
-}
-
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum TmlCmd {
-    /// create a local shell/ssh/wsl conversation or a tmux window/pane
-    Create(TmlCreateArgs),
+    /// add a local shell/ssh/wsl conversation or a tmux window/pane
+    Add(TmlAddArgs),
+    /// delete a pane
+    Del {
+        /// pane id
+        pane: String,
+    },
 }
 
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
-pub struct TmlCreateArgs {
+pub struct TmlAddArgs {
     /// conversation URL (optional for tmux groups), e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
     #[arg(long, value_name = "URL")]
     pub url: Option<String>,

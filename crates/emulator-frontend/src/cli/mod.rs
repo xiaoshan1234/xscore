@@ -8,11 +8,11 @@ mod parse;
 mod secrets;
 
 pub use cmd::{
-    Cmd, DaemonCmd, GroupCmd, PaneCmd, SplitDirection, TmlCmd, TmlCreateArgs, TmuxArgs,
-    TmxAttachArgs, TmxCmd, WindowCmd,
+    Cmd, DaemonCmd, GroupCmd, PaneCmd, SplitDirection, TmlAddArgs, TmlCmd, TmxAttachArgs, TmxCmd,
+    WindowCmd,
 };
 pub use parse::{
-    build_tmux_config, build_tmx_config, parse_args, parse_conversation_url, parse_ssh_target,
-    print_help, ConversationSpec,
+    build_tmx_config, parse_args, parse_conversation_url, parse_ssh_target, print_help,
+    ConversationSpec,
 };
 pub use secrets::resolve_secrets;

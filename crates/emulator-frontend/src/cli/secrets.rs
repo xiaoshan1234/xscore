@@ -7,30 +7,8 @@ use super::parse::{parse_conversation_url, parse_ssh_target, ConversationSpec};
 
 pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
     match cmd {
-        Cmd::Ssh {
-            target,
-            identity,
-            password: _,
-        } => {
-            let password = if identity.is_none() {
-                Some(prompt_ssh_password(&target)?)
-            } else {
-                None
-            };
-            Ok(Cmd::Ssh {
-                target,
-                identity,
-                password,
-            })
-        }
-        Cmd::Tmux(mut tmux) => {
-            if tmux.password {
-                tmux.password_value = Some(prompt_tmux_password()?);
-            }
-            Ok(Cmd::Tmux(tmux))
-        }
-        Cmd::Tml(TmlCmd::Create(mut create)) => {
-            if let Some(url) = &create.url {
+        Cmd::Tml(TmlCmd::Add(mut add)) => {
+            if let Some(url) = &add.url {
                 if let ConversationSpec::Ssh {
                     target,
                     identity: None,
@@ -38,10 +16,10 @@ pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
                     ..
                 } = parse_conversation_url(url)?
                 {
-                    create.password = Some(prompt_ssh_password(&target)?);
+                    add.password = Some(prompt_ssh_password(&target)?);
                 }
             }
-            Ok(Cmd::Tml(TmlCmd::Create(create)))
+            Ok(Cmd::Tml(TmlCmd::Add(add)))
         }
         other => Ok(other),
     }
@@ -52,11 +30,4 @@ fn prompt_ssh_password(target: &str) -> Result<String> {
     Ok(rpassword::prompt_password(format!(
         "Password for {user}@{host}: "
     ))?)
-}
-
-fn prompt_tmux_password() -> Result<String> {
-    match std::env::var("XSCORE_SSH_PASSWORD").or_else(|_| std::env::var("PASSWD")) {
-        Ok(password) => Ok(password),
-        Err(_) => Ok(rpassword::prompt_password("Password: ")?),
-    }
 }

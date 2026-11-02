@@ -3,43 +3,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use tokio::sync::Mutex;
 
 use emulator::domain::TmuxDomain;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 
-use crate::cli::{build_tmux_config, TmuxArgs};
 use crate::ui::app::App;
 use crate::ui::layout::{PaneRect, TmuxContainer};
 use crate::ui::render::Output;
 use crate::ui::tmux::session::{handle_event, reconcile_session, TmuxMeta};
-
-pub async fn attach(
-    app: &mut App,
-    tmux_args: &TmuxArgs,
-    app_arc: Arc<Mutex<App>>,
-) -> Result<Output> {
-    let session = tmux_args.session.clone();
-    let (socket, mut host, want_password) = build_tmux_config(tmux_args)?;
-    if want_password {
-        let password = tmux_args
-            .password_value
-            .clone()
-            .ok_or_else(|| anyhow!("password required for --ssh"))?;
-        let askpass = std::env::current_exe()?.to_string_lossy().into_owned();
-        if let TmuxHostConfig::Ssh {
-            password: slot,
-            askpass: ap,
-            ..
-        } = &mut host
-        {
-            *slot = Some(password);
-            *ap = Some(askpass);
-        }
-    }
-    attach_session(app, &host, &socket, &session, app_arc).await
-}
 
 pub(crate) async fn attach_session(
     app: &mut App,

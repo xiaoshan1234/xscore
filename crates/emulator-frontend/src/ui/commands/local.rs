@@ -9,14 +9,6 @@ use crate::ui::app::App;
 use crate::ui::layout::Direction;
 use crate::ui::render::Output;
 
-pub async fn shell(app: &mut App, program: String, args: Vec<String>) -> Result<Output> {
-    let id = spawn_local(app, program, args).await?;
-    app.layout.add(id);
-    let mut out = Output::new();
-    out.line(format!("pane: {id}  kind: local  80x24"));
-    Ok(out)
-}
-
 pub async fn split(
     app: &mut App,
     direction: SplitDirection,
@@ -31,14 +23,6 @@ pub async fn split(
     app.layout.split_focused(direction, id);
     let mut out = Output::new();
     out.line(format!("pane: {id}  kind: local  80x24"));
-    Ok(out)
-}
-
-pub async fn wsl(app: &mut App, args: Vec<String>) -> Result<Output> {
-    let id = spawn_local(app, "wsl.exe".to_string(), args).await?;
-    app.layout.add(id);
-    let mut out = Output::new();
-    out.line(format!("pane: {id}  kind: wsl  80x24"));
     Ok(out)
 }
 

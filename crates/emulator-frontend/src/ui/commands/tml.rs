@@ -1,18 +1,18 @@
-//! tml create：统一的 shell/ssh/wsl 对话创建，以及 tmux 会话内的 window/pane 创建。
+//! tml add / tml del：统一的 shell/ssh/wsl 对话与 tmux window/pane 管理。
 
 use anyhow::{anyhow, Context, Result};
 
 use emulator::domain::{Domain, LocalDomain, PaneConfig, PaneId, RemoteSshDomain};
 use emulator::platform::tmux::quote_arg;
 
-use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlCreateArgs};
+use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddArgs};
 use crate::ui::app::App;
 use crate::ui::layout::Direction;
 use crate::ui::render::Output;
 use crate::ui::tmux::session::reconcile_session;
 use crate::ui::window_group::{GroupId, GroupKind};
 
-pub async fn create(app: &mut App, args: TmlCreateArgs) -> Result<Output> {
+pub async fn add(app: &mut App, args: TmlAddArgs) -> Result<Output> {
     let group = match &args.group {
         Some(spec) => app
             .resolve_group(spec)
@@ -25,13 +25,13 @@ pub async fn create(app: &mut App, args: TmlCreateArgs) -> Result<Output> {
         .map(|g| g.kind == GroupKind::Tmux)
         .unwrap_or(false);
     if is_tmux {
-        create_in_tmux(app, &args, group).await
+        add_in_tmux(app, &args, group).await
     } else {
-        create_local(app, args, group).await
+        add_local(app, args, group).await
     }
 }
 
-async fn create_local(app: &mut App, args: TmlCreateArgs, group: GroupId) -> Result<Output> {
+async fn add_local(app: &mut App, args: TmlAddArgs, group: GroupId) -> Result<Output> {
     let url = args
         .url
         .clone()
@@ -59,7 +59,7 @@ async fn create_local(app: &mut App, args: TmlCreateArgs, group: GroupId) -> Res
     Ok(out)
 }
 
-async fn create_in_tmux(app: &mut App, args: &TmlCreateArgs, group: GroupId) -> Result<Output> {
+async fn add_in_tmux(app: &mut App, args: &TmlAddArgs, group: GroupId) -> Result<Output> {
     let session = app
         .group_session(group)
         .ok_or_else(|| anyhow!("group {group} is not a tmux session group"))?
@@ -98,7 +98,7 @@ fn tmux_pane_handle(app: &App, raw: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("tmux pane not found: {id}"))
 }
 
-fn split_target(args: &TmlCreateArgs) -> Result<Option<(Direction, PaneId)>> {
+fn split_target(args: &TmlAddArgs) -> Result<Option<(Direction, PaneId)>> {
     if let Some(raw) = &args.sph {
         return Ok(Some((
             Direction::Horizontal,

@@ -31,10 +31,10 @@ xs list
 不带参数时打印帮助（已无交互式 REPL）：
 
 ```bash
-./target/debug/xs shell powershell       # Linux / WSL
-.\target\debug\xs.exe shell powershell   # Windows
+./target/debug/xs tml add --url shell://powershell
+.\target\debug\xs.exe tml add --url shell://powershell   # Windows
 xs list
-xs tmux work --wsl
+xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
 xs
 ```
 
@@ -43,14 +43,14 @@ xs
 ### 常驻 daemon
 
 一次性命令不直接持有连接：命令通过本地回环 TCP 发给一个常驻 daemon，由它持有所有
-live 连接与 pane 状态。这样
-`xs shell powershell` 退出后，pane 仍在 daemon 里，下一条 `xs list` 还能看到。
-daemon 在第一条命令时自动拉起，也可以手动管理：
+live 连接与 pane 状态。这样 `xs tml add --url shell://powershell` 退出后，pane
+仍在 daemon 里，下一条 `xs list` 还能看到。daemon 在第一条命令时自动拉起，也可以
+手动管理：
 
 ```text
-> daemon serve      # 前台运行 daemon（自动拉起用的也是这个）
-> daemon status     # 查看 daemon 当前持有的 pane / tmux session
-> daemon stop       # 让 daemon 退出
+xs daemon serve    # 前台运行 daemon（自动拉起的也是这个）
+xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
+xs daemon stop     # 让 daemon 退出
 ```
 
 daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接；跨 daemon 重启的
@@ -60,116 +60,74 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 
 | 命令 | 说明 |
 |---|---|
-| `shell <program> [args...]` | 起一个本地 shell pane |
-| `ssh <user@host[:port]> [identity]` | 起一个远端 SSH shell pane；无 identity 时无回显提示密码 |
-| `wsl [args...]` | 起一个 WSL shell pane（Windows） |
-| `tmux <session> [-L <socket> \| -S <path>] [--ssh <dest> \| --wsl] [--password]` | attach 一个 tmux session |
-| `split h\|v <program> [args...]` | 在聚焦 pane 处拆分出新 pane |
+| `tml add --url <URL> [...]` | 添加本地 shell/ssh/wsl 对话，或 tmux window/pane |
+| `tml del <pane-id>` | 删除 pane |
+| `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 接入 tmux 会话 |
+| `split h\|v <program> [args...]` | 在聚焦 pane 处拆出新 pane |
 | `write <pane-id> <text>` | 给 pane 发一行输入（自动补换行） |
 | `read <pane-id>` | 打印该 pane 当前渲染出的屏幕 |
 | `resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
 | `focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
 | `pane del <pane-id>` | 删除 pane（tmux 发 kill-pane，本地/SSH 关闭连接） |
-| `window del <handle>` | 删除 tmux window（kill-window） |
+| `window create <group> <name>` | 在 group 里创建 tmux window |
+| `window del <group> <window>` | 删除 tmux window（kill-window） |
+| `window list [<group>]` | 列出 tmux window |
+| `window select <group> <window>` | 切换 tmux window |
+| `group list` | 列出 window group |
 | `daemon serve \| status \| stop` | 运行 / 查看 / 停止常驻 daemon |
 | `sync` | 按 tmux 服务端现状同步：删除已消失的 pane/window，纳入新增的 pane/window |
-| `layout` | 打印窗格树 |
+| `layout` | 打印窗口树 |
 | `list` | 列出所有 pane |
-
-tmux 的 `--ssh-arg <arg>` 和 `--wsl-arg <arg>` 可重复，透传给 `ssh` 或 `wsl.exe`。
-`--password` 触发密码认证：优先读 `XSCORE_SSH_PASSWORD` / `PASSWD` 环境变量，否则
-无回显交互提示。
 
 ## 使用示例
 
-### 本地 shell
+### 本地 / SSH / WSL 对话
 
 ```text
-> shell bash
-> write 1 echo hello
-> read 1
-```
-
-Windows 原生：
-
-```text
-> shell cmd.exe
-> shell powershell.exe -NoLogo
-```
-
-### SSH shell
-
-```text
-> ssh dev@example.com                             # 无 identity 时无回显提示密码
-> ssh dev@example.com C:/Users/me/.ssh/id_ed25519 # 密钥
-> write 1 ls -la
-> read 1
-```
-
-### WSL shell（Windows）
-
-```text
-> wsl
-> wsl --distribution Ubuntu --exec /bin/bash
+xs tml add --url 'shell://bash'
+xs tml add --url 'shell://powershell.exe?cwd=/home/me/src&cols=120&rows=40'
+xs tml add --url 'ssh://dev@example.com'
+xs tml add --url 'wsl://?args=--distribution,Ubuntu'
+xs write 1 echo hello
+xs read 1
 ```
 
 ### tmux
 
-先在外部建好 tmux session（当前 `tmux` 命令只 attach，不负责创建）：
+先在外部建好 tmux session，再用 `tmx attach` 接入：
 
 ```bash
 tmux new-session -d -s work
 ```
 
-本地：
-
 ```text
-> tmux work
-> list
-> read <pane-id>
-> write <pane-id> echo hi
+xs tmx attach --url tmux://work
+xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
+xs tmx attach --url tmux://work --ssh 'ssh://dev@example.com?identity=~/.ssh/id_ed25519'
+xs list
+xs read <pane-id>
+xs write <pane-id> echo hi
 ```
 
-WSL 里的 tmux（Windows 原生程序）：
+### tmux 里的 window / pane
 
 ```text
-> tmux work --wsl
-> tmux work --wsl --wsl-arg --distribution --wsl-arg Ubuntu
-```
-
-远端主机上的 tmux（走系统 `ssh`，复用 `~/.ssh/config`、agent）：
-
-```text
-> tmux work --ssh dev@example.com
-> tmux work --ssh dev@example.com --ssh-arg -p --ssh-arg 2222
-```
-
-密码认证（提示读 `XSCORE_SSH_PASSWORD` / `PASSWD`，没有则无回显交互提示）：
-
-```text
-> tmux work --ssh dev@example.com --password
-```
-
-同步与删除：
-
-```text
-> sync                 # 移除服务端已删除的 pane/window
-> pane del <pane-id>
-> window del @0
+xs tml add --group work --new-window
+xs tml add --group work --sph 3
+xs window list work
+xs window select work @0
 ```
 
 ### 布局
 
 ```text
-> shell bash
-> split h bash
-> layout
-[P1 | P2]
-focused: 2
+xs tml add --url 'shell://bash'
+xs split h bash
+xs layout
 ```
 
-`split` 在本地 pane 上拆出新 pane；在 tmux 镜像容器上拆分时，容器保持完整，新
-pane 成为它的平级兄弟，tmux 内部 pane 不会出现在本地树里。
+`split` 在本地 pane 上拆出新 pane；在 tmux 镜像容器上拆分时，容器保持完整，新 pane
+成为它的平级兄弟，tmux 内部 pane 不会出现在本地树里。
 
 ## 真实环境测试
 
@@ -195,11 +153,8 @@ cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
 
 ## 已知限制
 
-- `tmux` 只 attach 已有 session，不创建；创建请用外部 `tmux new-session`。
-- SSH 密码认证支持密码和密钥，暂不支持 agent；tmux-over-ssh 的密码走系统 `ssh` 的
-  `SSH_ASKPASS`，不复用交互 shell pane 里输入的密码。
-- `read` 在脚本化输入下有一个 60ms 的静默窗口，极端时序可能读到旧屏；交互使用
-  无影响。
 - tmux 结构同步目前是 `sync` 命令的按需重枚举，双向覆盖“服务端删除→本地删”和
   “服务端新增→本地加”；事件驱动的实时增删尚未接入。
+- `read` 在脚本化输入下有一个 60ms 的静默窗口，极端时序可能读到旧屏；交互使用
+  无影响。
 - SSH tmux 端到端已在 `loner@shanclaw` 验证；WSL tmux 仍需真实 WSL 环境验证。

@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 
-use super::cmd::{Cmd, Command, TmuxArgs, TmxAttachArgs};
+use super::cmd::{Cmd, Command, TmxAttachArgs};
 
 /// 解析一段命令行参数（argv，不含程序名）。
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::Error> {
@@ -43,49 +43,6 @@ pub fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
 }
 
 /// 把 clap 的 tmux 参数转换成 socket / host / 是否需要密码。
-pub fn build_tmux_config(args: &TmuxArgs) -> Result<(TmuxSocket, TmuxHostConfig, bool)> {
-    let socket = match (&args.socket_name, &args.socket_path) {
-        (Some(_), Some(_)) => return Err(anyhow!("-L and -S are mutually exclusive")),
-        (Some(name), None) => TmuxSocket::Named(name.clone()),
-        (None, Some(path)) => TmuxSocket::Path(path.clone()),
-        (None, None) => TmuxSocket::Default,
-    };
-
-    let host = match (&args.ssh, args.wsl) {
-        (Some(destination), false) => {
-            if !args.wsl_args.is_empty() {
-                return Err(anyhow!("--wsl-arg requires --wsl"));
-            }
-            TmuxHostConfig::Ssh {
-                destination: destination.clone(),
-                args: args.ssh_args.clone(),
-                password: None,
-                askpass: None,
-            }
-        }
-        (None, true) => {
-            if !args.ssh_args.is_empty() {
-                return Err(anyhow!("--ssh-arg requires --ssh"));
-            }
-            TmuxHostConfig::Wsl {
-                args: args.wsl_args.clone(),
-            }
-        }
-        (Some(_), true) => return Err(anyhow!("--ssh and --wsl are mutually exclusive")),
-        (None, false) => {
-            if !args.ssh_args.is_empty() {
-                return Err(anyhow!("--ssh-arg requires --ssh"));
-            }
-            if !args.wsl_args.is_empty() {
-                return Err(anyhow!("--wsl-arg requires --wsl"));
-            }
-            TmuxHostConfig::Local
-        }
-    };
-
-    Ok((socket, host, args.password))
-}
-
 /// 解析 `tmux://<socket>/<session>`：socket 可为空（默认）、名字（`-L`）或路径（`-S`）。
 pub fn parse_tmux_url(url: &str) -> Result<(TmuxSocket, String)> {
     let rest = url
@@ -153,7 +110,7 @@ pub fn build_tmx_config(args: &TmxAttachArgs) -> Result<(TmuxSocket, TmuxHostCon
     Ok((socket, host, session))
 }
 
-/// 对话创建规格：`tml create --url` 的解析结果。
+/// 对话创建规格：`tml add --url` 的解析结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationSpec {
     Shell {
@@ -314,83 +271,6 @@ mod tests {
     }
 
     #[test]
-    fn tmux_default_local() {
-        let Cmd::Tmux(tmux) = parse(&["tmux", "work", "-L", "x"]).unwrap() else {
-            panic!("expected tmux command");
-        };
-        let (socket, host, want_password) = build_tmux_config(&tmux).unwrap();
-        assert_eq!(socket, TmuxSocket::Named("x".into()));
-        assert_eq!(host, TmuxHostConfig::Local);
-        assert!(!want_password);
-    }
-
-    #[test]
-    fn tmux_ssh_with_extra_args() {
-        let Cmd::Tmux(tmux) = parse(&[
-            "tmux",
-            "work",
-            "--ssh",
-            "dev@box",
-            "--ssh-arg",
-            "-p",
-            "--ssh-arg",
-            "2222",
-        ])
-        .unwrap() else {
-            panic!("expected tmux command");
-        };
-        let (_, host, _) = build_tmux_config(&tmux).unwrap();
-        assert_eq!(
-            host,
-            TmuxHostConfig::Ssh {
-                destination: "dev@box".into(),
-                args: vec!["-p".into(), "2222".into()],
-                password: None,
-                askpass: None,
-            }
-        );
-    }
-
-    #[test]
-    fn tmux_wsl() {
-        let Cmd::Tmux(tmux) = parse(&[
-            "tmux",
-            "work",
-            "--wsl",
-            "--wsl-arg",
-            "--distribution",
-            "--wsl-arg",
-            "Ubuntu",
-        ])
-        .unwrap() else {
-            panic!("expected tmux command");
-        };
-        let (_, host, _) = build_tmux_config(&tmux).unwrap();
-        assert_eq!(
-            host,
-            TmuxHostConfig::Wsl {
-                args: vec!["--distribution".into(), "Ubuntu".into()],
-            }
-        );
-    }
-
-    #[test]
-    fn tmux_ssh_and_wsl_conflict() {
-        assert!(parse(&["tmux", "work", "--ssh", "dev@box", "--wsl"]).is_err());
-    }
-
-    #[test]
-    fn tmux_password() {
-        let Cmd::Tmux(tmux) = parse(&["tmux", "work", "--ssh", "dev@box", "--password"]).unwrap()
-        else {
-            panic!("expected tmux command");
-        };
-        let (_, host, want_password) = build_tmux_config(&tmux).unwrap();
-        assert!(matches!(host, TmuxHostConfig::Ssh { .. }));
-        assert!(want_password);
-    }
-
-    #[test]
     fn conversation_url_shell_defaults() {
         assert_eq!(
             parse_conversation_url("shell://powershell").unwrap(),
@@ -468,33 +348,32 @@ mod tests {
 
     #[test]
     fn tml_new_window_is_default() {
-        let Cmd::Tml(TmlCmd::Create(create)) =
-            parse(&["tml", "create", "--url", "shell://bash"]).unwrap()
+        let Cmd::Tml(TmlCmd::Add(add)) = parse(&["tml", "add", "--url", "shell://bash"]).unwrap()
         else {
             panic!("expected tml command");
         };
-        assert!(create.new_window);
-        assert!(create.sph.is_none());
-        assert!(create.spv.is_none());
+        assert!(add.new_window);
+        assert!(add.sph.is_none());
+        assert!(add.spv.is_none());
     }
 
     #[test]
     fn tml_split_overrides_default_window() {
-        let Cmd::Tml(TmlCmd::Create(create)) =
-            parse(&["tml", "create", "--url", "shell://bash", "--sph", "3"]).unwrap()
+        let Cmd::Tml(TmlCmd::Add(add)) =
+            parse(&["tml", "add", "--url", "shell://bash", "--sph", "3"]).unwrap()
         else {
             panic!("expected tml command");
         };
-        assert!(create.new_window);
-        assert_eq!(create.sph.as_deref(), Some("3"));
-        assert!(create.spv.is_none());
+        assert!(add.new_window);
+        assert_eq!(add.sph.as_deref(), Some("3"));
+        assert!(add.spv.is_none());
     }
 
     #[test]
     fn tml_new_window_conflicts_with_split() {
         assert!(parse(&[
             "tml",
-            "create",
+            "add",
             "--url",
             "shell://bash",
             "--new-window",
@@ -505,28 +384,36 @@ mod tests {
     }
 
     #[test]
-    fn tml_create_with_group() {
-        let Cmd::Tml(TmlCmd::Create(create)) =
-            parse(&["tml", "create", "--url", "shell://bash", "--group", "work"]).unwrap()
+    fn tml_add_with_group() {
+        let Cmd::Tml(TmlCmd::Add(add)) =
+            parse(&["tml", "add", "--url", "shell://bash", "--group", "work"]).unwrap()
         else {
             panic!("expected tml command");
         };
-        assert_eq!(create.group.as_deref(), Some("work"));
-        assert!(create.new_window);
-        assert!(create.sph.is_none());
-        assert!(create.spv.is_none());
+        assert_eq!(add.group.as_deref(), Some("work"));
+        assert!(add.new_window);
+        assert!(add.sph.is_none());
+        assert!(add.spv.is_none());
     }
 
     #[test]
-    fn tml_create_tmux_group_without_url() {
-        let Cmd::Tml(TmlCmd::Create(create)) =
-            parse(&["tml", "create", "--group", "1", "--new-window"]).unwrap()
+    fn tml_add_tmux_group_without_url() {
+        let Cmd::Tml(TmlCmd::Add(add)) =
+            parse(&["tml", "add", "--group", "1", "--new-window"]).unwrap()
         else {
             panic!("expected tml command");
         };
-        assert_eq!(create.group.as_deref(), Some("1"));
-        assert!(create.url.is_none());
-        assert!(create.new_window);
+        assert_eq!(add.group.as_deref(), Some("1"));
+        assert!(add.url.is_none());
+        assert!(add.new_window);
+    }
+
+    #[test]
+    fn tml_del_parses_pane() {
+        let Cmd::Tml(TmlCmd::Del { pane }) = parse(&["tml", "del", "3"]).unwrap() else {
+            panic!("expected tml command");
+        };
+        assert_eq!(pane, "3");
     }
 
     #[test]

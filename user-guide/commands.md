@@ -19,11 +19,8 @@ xs <command> [args...]     # 执行一条一次性命令
 
 | 命令 | 说明 |
 |---|---|
-| `shell <program> [args...]` | 新建本地 shell pane |
-| `ssh <user@host[:port]> [identity]` | 新建远程 SSH shell pane |
-| `wsl [args...]` | 新建 WSL shell pane（Windows） |
-| `tml create --url <URL> [...]` | 用 URL 统一创建 shell/ssh/wsl 对话 |
-| `tmux <session> [...]` | attach 一个 tmux 会话 |
+| `tml add [...]` | 添加本地 shell/ssh/wsl 对话或 tmux window/pane |
+| `tml del <pane-id>` | 删除 pane |
 | `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 用 URL 接入 tmux 会话 |
 | `split h\|v <program> [args...]` | 在聚焦 pane 上拆分出新 pane |
 | `write <pane-id> <text>...` | 向 pane 发送一行输入 |
@@ -43,64 +40,14 @@ xs <command> [args...]     # 执行一条一次性命令
 | `help` | 打印简洁命令清单 |
 | `daemon serve\|status\|stop` | 管理常驻 daemon |
 
-## 会话创建
+## 会话与 pane（tml）
 
-### shell
+### tml add
 
-```text
-xs shell <program> [args...]
-```
-
-- `program`：可执行文件（如 `bash`、`powershell.exe`、`cmd.exe`）。
-- `args...`：传给程序的参数，允许 `-` 开头的参数。
-- 本地 PTY（Windows 为 ConPTY），默认尺寸 80x24。
-
-示例：
+`tml` 是 `terminal` 的简写。`add` 按目标 group 分两种行为：
 
 ```text
-xs shell bash
-xs shell powershell.exe -NoLogo
-```
-
-### ssh
-
-```text
-xs ssh <user@host[:port]> [identity]
-```
-
-- `user@host[:port]`：目标主机，端口缺省 22。
-- `identity`：SSH 私钥路径（可选）。
-- 未提供 `identity` 时，在客户端边缘无回显提示密码；优先读 `XSCORE_SSH_PASSWORD` / `PASSWD`。
-- 默认尺寸 80x24。
-
-示例：
-
-```text
-xs ssh dev@example.com
-xs ssh dev@example.com C:/Users/me/.ssh/id_ed25519
-```
-
-### wsl
-
-```text
-xs wsl [args...]
-```
-
-- `args...` 原样传给 `wsl.exe`（Windows 专用）。
-
-示例：
-
-```text
-xs wsl
-xs wsl --distribution Ubuntu --exec /bin/bash
-```
-
-### tml create
-
-`tml` 是 `terminal` 的简写。`create` 按目标 group 分两种行为：
-
-```text
-xs tml create [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
+xs tml add [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
 ```
 
 - `--group <GROUP>`：目标 window group（group 名或数字 GroupId），缺省为默认 group。
@@ -132,46 +79,28 @@ URL scheme：
 示例：
 
 ```text
-xs tml create --url 'shell://powershell?cwd=/home/me/src&cols=120&rows=40' --new-window
-xs tml create --url 'shell://bash?cols=100&rows=30' --spv 3
-xs tml create --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
-xs tml create --url 'ssh://dev@box?password=secret'
-xs tml create --url 'wsl://?args=--distribution,Ubuntu'
-xs tml create --group work --new-window
-xs tml create --group work --sph 3
+xs tml add --url 'shell://powershell?cwd=/home/me/src&cols=120&rows=40' --new-window
+xs tml add --url 'shell://bash?cols=100&rows=30' --spv 3
+xs tml add --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
+xs tml add --url 'ssh://dev@box?password=secret'
+xs tml add --url 'wsl://?args=--distribution,Ubuntu'
+xs tml add --group work --new-window
+xs tml add --group work --sph 3
+```
+
+### tml del
+
+```text
+xs tml del <pane-id>
+```
+
+删除指定 pane（tmux pane 走 `kill-pane`；本地/SSH pane 关闭连接）。
+
+```text
+xs tml del 3
 ```
 
 ## tmux 会话
-
-### tmux
-
-```text
-xs tmux <session> [options]
-```
-
-只 attach 已存在的 session，不负责创建（创建请用外部 `tmux new-session`）。
-
-| 选项 | 说明 |
-|---|---|
-| `-L <NAME>` | tmux socket 名（`tmux -L <NAME>`） |
-| `-S <PATH>` | tmux socket 路径（`tmux -S <PATH>`） |
-| `--ssh <DEST>` | 在远端 SSH 主机上运行 tmux |
-| `--wsl` | 在 WSL 内运行 tmux |
-| `--password` | 密码认证（要求 `--ssh`） |
-| `--ssh-arg <ARG>` | 透传给 `ssh` 的额外参数（可重复，要求 `--ssh`） |
-| `--wsl-arg <ARG>` | 透传给 `wsl.exe` 的额外参数（可重复，要求 `--wsl`） |
-
-- `-L` 与 `-S` 互斥；`--ssh` 与 `--wsl` 互斥。
-
-示例：
-
-```text
-xs tmux work
-xs tmux work --wsl
-xs tmux work --ssh dev@example.com
-xs tmux work --ssh dev@example.com --ssh-arg -p --ssh-arg 2222
-xs tmux work --ssh dev@example.com --password
-```
 
 ### tmx
 
