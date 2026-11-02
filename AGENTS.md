@@ -27,11 +27,15 @@ cargo install --path crates/emulator-frontend   # 安装 xs 到 ~/.cargo/bin
 xs ls pane                                       # 列出当前 pane
 ```
 
-真实环境 tmux 集成测试（默认 `#[ignore]`，需要真实 SSH 主机）：
+真实环境 tmux 集成测试（默认 `#[ignore]`，配置从根目录 `test.config` 读取，
+格式见 `test-example.config`）：
+
+```text
+ssh_host=user@host
+ssh_password=...
+```
 
 ```powershell
-$env:XSCORE_SSH_HOST = 'user@host'
-$env:XSCORE_SSH_PASSWORD = '...'   # 或 $env:PASSWD
 cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
 ```
 
@@ -100,7 +104,6 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
 | `XSCORE_SSH_PASSWORD` / `PASSWD` | SSH 密码（优先于交互提示） |
-| `XSCORE_SSH_HOST` | 集成测试目标主机 |
 | `XSCORE_ASKPASS` | 内部：前端二进制作为 askpass 时输出密码 |
 
 ## 平台限制

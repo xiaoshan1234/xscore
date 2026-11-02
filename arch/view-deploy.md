@@ -46,7 +46,6 @@ emulator-frontend → 管道 → ssh -o StrictHostKeyChecking=accept-new <dest> 
 | `XSCORE_LOG` | 日志文件路径（默认 `emulator.log`） |
 | `RUST_LOG` | 日志级别 |
 | `XSCORE_SSH_PASSWORD` / `PASSWD` | SSH 密码（优先于交互提示） |
-| `XSCORE_SSH_HOST` | 集成测试目标主机 |
 
 ## 5. 平台限制
 

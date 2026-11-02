@@ -12,3 +12,6 @@
 # Build artifacts that may leak in during doctoring
 Cargo.lock.bak
 emulator.log
+
+# Local integration-test configuration may contain SSH credentials
+/test.config

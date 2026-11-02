@@ -127,12 +127,15 @@ xs layout
 
 ## 真实环境测试
 
-仓库带一个针对真实 SSH tmux 的集成测试（默认 `#[ignore]`，未设环境变量时自动跳
-过）：
+仓库带一个针对真实 SSH tmux 的集成测试（默认 `#[ignore]`）。测试从工作区根目录
+的 `test.config` 读取 SSH 连接信息，格式见 [`test-example.config`](../test-example.config)：
+
+```text
+ssh_host=user@host
+ssh_password=...
+```
 
 ```powershell
-$env:XSCORE_SSH_HOST = 'loner@shanclaw'
-$env:XSCORE_SSH_PASSWORD = '...'   # 或 $env:PASSWD
 cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
 ```
 

@@ -1,21 +1,89 @@
 //! 真实环境 tmux 集成测试：SSH 主机上的 attach / split / kill-pane / 结构枚举。
 //!
-//! 环境变量：
-//!   XSCORE_SSH_HOST        目标主机，例如 loner@shanclaw（未设置则跳过）
-//!   XSCORE_SSH_PASSWORD 或 PASSWD  密码
+//! 配置从工作区根目录的 `test.config` 读取，格式见 `test-example.config`：
+//!   ssh_host=user@host
+//!   ssh_password=password
 //!
 //! 运行：
 //!   cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
 
 use emulator::domain::TmuxDomain;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn env_or_skip(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|s| !s.is_empty())
+struct TestConfig {
+    ssh_host: String,
+    ssh_password: String,
+}
+
+impl TestConfig {
+    fn load() -> Self {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.config");
+        let contents = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "failed to read integration test config {}: {error}",
+                path.display()
+            )
+        });
+
+        Self::parse(&path.display().to_string(), &contents)
+            .unwrap_or_else(|error| panic!("invalid integration test config: {error}"))
+    }
+
+    fn parse(source: &str, contents: &str) -> Result<Self, String> {
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
+        let mut ssh_host = None;
+        let mut ssh_password = None;
+
+        for (index, raw_line) in contents.lines().enumerate() {
+            let line_number = index + 1;
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!(
+                    "{source}:{line_number}: expected `key=value`, got {line:?}"
+                ));
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(format!(
+                    "{source}:{line_number}: `{key}` must have a non-empty value"
+                ));
+            }
+
+            let target = match key {
+                "ssh_host" => &mut ssh_host,
+                "ssh_password" => &mut ssh_password,
+                _ => {
+                    return Err(format!(
+                        "{source}:{line_number}: unknown config key `{key}`"
+                    ))
+                }
+            };
+            if target.is_some() {
+                return Err(format!(
+                    "{source}:{line_number}: duplicate config key `{key}`"
+                ));
+            }
+            *target = Some(value.to_string());
+        }
+
+        Ok(Self {
+            ssh_host: ssh_host
+                .ok_or_else(|| format!("{source}: missing required key `ssh_host`"))?,
+            ssh_password: ssh_password
+                .ok_or_else(|| format!("{source}: missing required key `ssh_password`"))?,
+        })
+    }
 }
 
 fn ssh_env(cmd: &mut Command, password: &str, askpass: &str) {
@@ -38,35 +106,27 @@ fn ssh(host: &str, password: &str, askpass: &str, args: &[&str]) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires a real SSH host; set XSCORE_SSH_HOST and XSCORE_SSH_PASSWORD"]
+#[ignore = "requires test.config with a reachable SSH host"]
 async fn ssh_tmux_attach_split_kill_sync() {
-    let Some(host) = env_or_skip("XSCORE_SSH_HOST") else {
-        eprintln!("skip: XSCORE_SSH_HOST not set");
-        return;
-    };
-    let Some(password) = env_or_skip("XSCORE_SSH_PASSWORD").or_else(|| env_or_skip("PASSWD"))
-    else {
-        eprintln!("skip: password env not set");
-        return;
-    };
-    let Some(askpass) = env_or_skip("CARGO_BIN_EXE_xs") else {
-        eprintln!("skip: CARGO_BIN_EXE_xs unavailable");
-        return;
-    };
+    let config = TestConfig::load();
+    let host = &config.ssh_host;
+    let password = &config.ssh_password;
+    let askpass = std::env::var("CARGO_BIN_EXE_xs")
+        .expect("Cargo should provide CARGO_BIN_EXE_xs for this integration test");
 
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let session = format!("xscore-it-{}-{n}", std::process::id());
 
     // 清场并新建一个专用 session。
     let _ = ssh(
-        &host,
-        &password,
+        host,
+        password,
         &askpass,
         &["tmux", "kill-session", "-t", &session],
     );
     let _ = ssh(
-        &host,
-        &password,
+        host,
+        password,
         &askpass,
         &[
             "tmux",
@@ -82,9 +142,9 @@ async fn ssh_tmux_attach_split_kill_sync() {
     );
 
     let host_config = TmuxHostConfig::Ssh {
-        destination: host.clone(),
+        destination: host.to_owned(),
         args: vec![],
-        password: Some(password.clone()),
+        password: Some(password.to_owned()),
         askpass: Some(askpass.clone()),
     };
     let domain = TmuxDomain::new();
@@ -128,9 +188,36 @@ async fn ssh_tmux_attach_split_kill_sync() {
 
     // 清理。
     let _ = ssh(
-        &host,
-        &password,
+        host,
+        password,
         &askpass,
         &["tmux", "kill-session", "-t", &session],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TestConfig;
+
+    #[test]
+    fn config_parser_reads_literal_values() {
+        let config = TestConfig::parse(
+            "test.config",
+            "\u{feff}# credentials\r\n ssh_host = user@host \r\nssh_password=p=a#ss\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(config.ssh_host, "user@host");
+        assert_eq!(config.ssh_password, "p=a#ss");
+    }
+
+    #[test]
+    fn config_parser_reports_missing_required_key() {
+        let error = match TestConfig::parse("test.config", "ssh_host=user@host\n") {
+            Ok(_) => panic!("expected config without ssh_password to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("missing required key `ssh_password`"));
+    }
 }

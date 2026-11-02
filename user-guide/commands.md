@@ -234,7 +234,6 @@ xs daemon stop     # 让 daemon 退出
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
 | `XSCORE_SSH_PASSWORD` / `PASSWD` | SSH 密码（优先于交互提示） |
-| `XSCORE_SSH_HOST` | 集成测试目标主机 |
 | `XSCORE_ASKPASS` | 内部：前端二进制作为 askpass 时输出密码 |
 
 ## 平台限制
