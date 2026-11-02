@@ -21,19 +21,23 @@ xs <command> [args...]     # 执行一条一次性命令
 |---|---|
 | `tml add [...]` | 添加本地 shell/ssh/wsl 对话或 tmux window/pane |
 | `tml del <pane-id>` | 删除 pane |
-| `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 用 URL 接入 tmux 会话 |
 | `tml write <pane-id> <text>...` | 向 pane 发送一行输入 |
 | `tml read <pane-id>` | 打印 pane 当前渲染出的屏幕 |
 | `tml resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
 | `tml focus <pane-id>` | 切换焦点 |
-| `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
 | `tml fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
-| `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
+| `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 用 URL 接入 tmux 会话 |
 | `tmx sync <group-id>` | 按 tmux 服务端现状同步指定 group 的本地结构 |
+| `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
+| `ls pane` | 列出 pane |
+| `ls window [<group>]` | 列出 tmux window，可限定 group |
+| `ls group` | 列出 window group |
 | `help` | 打印简洁命令清单 |
-| `daemon serve\|status\|stop` | 管理常驻 daemon |
+| `daemon serve` | 前台运行常驻 daemon |
+| `daemon status` | 查看 daemon 当前状态 |
+| `daemon stop` | 停止常驻 daemon |
 
-## 会话与 pane（tml）
+## tml
 
 ### tml add
 
@@ -93,46 +97,6 @@ xs tml del <pane-id>
 xs tml del 3
 ```
 
-## tmux 会话
-
-### tmx
-
-`tmx` 是 `tmux` 的简写，用 URL 统一描述 tmux 目标与远端主机：
-
-```text
-xs tmx attach --url <tmux-url> [--ssh <ssh-url> | --wsl <wsl-url>]
-```
-
-- `--url tmux://<socket>/<session>`：
-  - `tmux://<session>`：默认 socket。
-  - `tmux://<name>/<session>`：命名 socket（`-L <name>`）。
-  - `tmux:///<path>/<session>`：socket 路径（`-S <path>`，path 含 `/`）。
-- `--ssh <ssh-url>`：`ssh://user@host[:port]?identity=<path>&password=<pwd>`，透传为
-  `ssh -i <identity> -p <port> user@host`。
-- `--wsl <wsl-url>`：`wsl://?args=--distribution,Ubuntu`，透传为 `wsl.exe` 参数。
-
-示例：
-
-```text
-xs tmx attach --url tmux://SOCKET/work --ssh ssh://dev@box?identity=~/.ssh/id_ed25519
-xs tmx attach --url tmux://work
-xs tmx attach --url tmux://x/work --wsl 'wsl://?args=--distribution,Ubuntu'
-xs tmx attach --url tmux:///tmp/tmux-0/default/work
-```
-
-## 布局
-
-### layout
-
-```text
-xs layout [<window-id>]
-```
-
-不带参数打印全局布局树与当前焦点；带 `<window-id>`（如 `G2-T1`、`G1-M0`）打印该
-window 内的 pane 布局。
-
-## pane 操作
-
 ### tml write
 
 ```text
@@ -173,7 +137,34 @@ xs tml fetch <pane-id> [--line <N>]
 拉取 tmux pane 的滚动历史（`capture-pane`）：不带 `--line` 拉全部，`--line <N>` 拉最近 N 行。
 仅对 tmux pane 有效。
 
-## 同步
+## tmx
+
+`tmx` 是 `tmux` 的简写，用于接入 tmux 会话并同步其结构。
+
+### tmx attach
+
+用 URL 统一描述 tmux 目标与远端主机：
+
+```text
+xs tmx attach --url <tmux-url> [--ssh <ssh-url> | --wsl <wsl-url>]
+```
+
+- `--url tmux://<socket>/<session>`：
+  - `tmux://<session>`：默认 socket。
+  - `tmux://<name>/<session>`：命名 socket（`-L <name>`）。
+  - `tmux:///<path>/<session>`：socket 路径（`-S <path>`，path 含 `/`）。
+- `--ssh <ssh-url>`：`ssh://user@host[:port]?identity=<path>&password=<pwd>`，透传为
+  `ssh -i <identity> -p <port> user@host`。
+- `--wsl <wsl-url>`：`wsl://?args=--distribution,Ubuntu`，透传为 `wsl.exe` 参数。
+
+示例：
+
+```text
+xs tmx attach --url tmux://SOCKET/work --ssh ssh://dev@box?identity=~/.ssh/id_ed25519
+xs tmx attach --url tmux://work
+xs tmx attach --url tmux://x/work --wsl 'wsl://?args=--distribution,Ubuntu'
+xs tmx attach --url tmux:///tmp/tmux-0/default/work
+```
 
 ### tmx sync
 
@@ -185,13 +176,40 @@ xs tmx sync <group-id>
 纳入服务端新增的 pane/window。`<group-id>` 可以是数字 GroupId，也可以是 tmux session
 对应的 group 名；目标必须是已 attach 的 tmux group。
 
-## daemon 生命周期
+## layout
 
 ```text
-xs daemon serve    # 前台运行 daemon（一次性命令会自动拉起）
-xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
-xs daemon stop     # 让 daemon 退出
+xs layout [<window-id>]
 ```
+
+不带参数打印全局布局树与当前焦点；带 `<window-id>`（如 `G2-T1`、`G1-M0`）打印该
+window 内的 pane 布局。
+
+## ls
+
+### ls pane
+
+```text
+xs ls pane
+```
+
+列出所有 pane。
+
+### ls window
+
+```text
+xs ls window [<group>]
+```
+
+列出 tmux window；指定 `<group>` 时只列出该 group。
+
+### ls group
+
+```text
+xs ls group
+```
+
+列出所有 window group。
 
 ## help
 
@@ -200,6 +218,14 @@ xs help
 ```
 
 打印简洁命令清单（与 `xs --help` 的 clap 帮助不同）。
+
+## daemon
+
+```text
+xs daemon serve    # 前台运行 daemon（一次性命令会自动拉起）
+xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
+xs daemon stop     # 让 daemon 退出
+```
 
 ## 环境变量
 
