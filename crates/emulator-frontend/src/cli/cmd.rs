@@ -30,9 +30,6 @@ pub enum Cmd {
         /// window id (Gxx-Tyy / Gxx-Myy); omit for the global tree
         window: Option<String>,
     },
-    /// pane operations
-    #[command(subcommand)]
-    Pane(PaneCmd),
     /// list resources (shorthand: ls)
     #[command(subcommand)]
     Ls(LsCmd),
@@ -51,6 +48,24 @@ pub enum TmlCmd {
     Del {
         /// pane id
         pane: String,
+    },
+    /// send text to a pane
+    Write {
+        pane: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
+    },
+    /// print a pane's rendered screen
+    Read { pane: String },
+    /// resize a pane
+    Resize { pane: String, cols: u16, rows: u16 },
+    /// move focus
+    Focus { pane: String },
+    /// fetch tmux pane scrollback
+    Fetch {
+        pane: String,
+        #[arg(long, value_name = "N")]
+        line: Option<usize>,
     },
 }
 
@@ -98,30 +113,6 @@ pub struct TmxAttachArgs {
     /// run the tmux server inside WSL: wsl://?args=--distribution,Ubuntu
     #[arg(long, value_name = "URL", conflicts_with = "ssh")]
     pub wsl: Option<String>,
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum PaneCmd {
-    /// send text to a pane
-    Write {
-        pane: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        text: Vec<String>,
-    },
-    /// print a pane's rendered screen
-    Read { pane: String },
-    /// resize a pane
-    Resize { pane: String, cols: u16, rows: u16 },
-    /// move focus
-    Focus { pane: String },
-    /// delete a pane
-    Del { pane: String },
-    /// fetch tmux pane scrollback
-    Fetch {
-        pane: String,
-        #[arg(long, value_name = "N")]
-        line: Option<usize>,
-    },
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]

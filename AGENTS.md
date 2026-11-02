@@ -83,7 +83,7 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
   其余 window 只登记数据不进布局；服务端 `%session-window-changed` 会触发
   reconcile 自动跟随。
 - **`%output` 不回放历史**：attach 只接收订阅之后的新字节；历史用
-  `pane fetch <id> [--line N]`（`capture-pane`）按需查询。
+  `tml fetch <id> [--line N]`（`capture-pane`）按需查询。
 - **结构事件**：`%output %N` 和 `%exit` 已被消费；`%window-add`/`%window-close`/
   `%layout-change` 等走 `classify_tmux_event` → reconcile。
 

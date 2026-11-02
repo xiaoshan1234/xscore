@@ -246,7 +246,7 @@ fn parse_args_param(params: &HashMap<String, String>) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::cmd::{LsCmd, PaneCmd, TmlCmd, TmxCmd};
+    use super::super::cmd::{LsCmd, TmlCmd, TmxCmd};
     use super::*;
 
     #[test]
@@ -448,30 +448,37 @@ mod tests {
     }
 
     #[test]
-    fn pane_commands_parse() {
-        let Cmd::Pane(PaneCmd::Write { pane, text }) =
-            parse(&["pane", "write", "3", "echo", "hello"]).unwrap()
+    fn tml_pane_operations_parse() {
+        let Cmd::Tml(TmlCmd::Write { pane, text }) =
+            parse(&["tml", "write", "3", "echo", "hello"]).unwrap()
         else {
-            panic!("expected pane write command");
+            panic!("expected tml write command");
         };
         assert_eq!(pane, "3");
         assert_eq!(text, ["echo", "hello"]);
 
         assert!(matches!(
-            parse(&["pane", "read", "3"]).unwrap(),
-            Cmd::Pane(PaneCmd::Read { pane }) if pane == "3"
+            parse(&["tml", "read", "3"]).unwrap(),
+            Cmd::Tml(TmlCmd::Read { pane }) if pane == "3"
         ));
         assert!(matches!(
-            parse(&["pane", "resize", "3", "120", "40"]).unwrap(),
-            Cmd::Pane(PaneCmd::Resize {
+            parse(&["tml", "resize", "3", "120", "40"]).unwrap(),
+            Cmd::Tml(TmlCmd::Resize {
                 pane,
                 cols: 120,
                 rows: 40,
             }) if pane == "3"
         ));
         assert!(matches!(
-            parse(&["pane", "focus", "3"]).unwrap(),
-            Cmd::Pane(PaneCmd::Focus { pane }) if pane == "3"
+            parse(&["tml", "focus", "3"]).unwrap(),
+            Cmd::Tml(TmlCmd::Focus { pane }) if pane == "3"
+        ));
+        assert!(matches!(
+            parse(&["tml", "fetch", "3", "--line", "50"]).unwrap(),
+            Cmd::Tml(TmlCmd::Fetch {
+                pane,
+                line: Some(50),
+            }) if pane == "3"
         ));
     }
 
@@ -484,6 +491,12 @@ mod tests {
             &["read", "3"][..],
             &["resize", "3", "120", "40"][..],
             &["focus", "3"][..],
+            &["pane", "write", "3", "echo", "hello"][..],
+            &["pane", "read", "3"][..],
+            &["pane", "resize", "3", "120", "40"][..],
+            &["pane", "focus", "3"][..],
+            &["pane", "del", "3"][..],
+            &["pane", "fetch", "3"][..],
             &["sync"][..],
             &["list"][..],
             &["group", "list"][..],

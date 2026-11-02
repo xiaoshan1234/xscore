@@ -62,11 +62,11 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 | `tml add --url <URL> [...]` | 添加本地 shell/ssh/wsl 对话，或 tmux window/pane |
 | `tml del <pane-id>` | 删除 pane |
 | `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 接入 tmux 会话 |
-| `pane write <pane-id> <text>` | 给 pane 发一行输入（自动补换行） |
-| `pane read <pane-id>` | 打印该 pane 当前渲染出的屏幕 |
-| `pane resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
-| `pane focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
-| `pane del <pane-id>` | 删除 pane（tmux 发 kill-pane，本地/SSH 关闭连接） |
+| `tml write <pane-id> <text>` | 给 pane 发一行输入（自动补换行） |
+| `tml read <pane-id>` | 打印该 pane 当前渲染出的屏幕 |
+| `tml resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
+| `tml focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
+| `tml fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
 | `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
 | `daemon serve \| status \| stop` | 运行 / 查看 / 停止常驻 daemon |
 | `tmx sync <group-id>` | 按 tmux 服务端现状同步指定 group：删除已消失的 pane/window，纳入新增的 pane/window |
@@ -81,8 +81,8 @@ xs tml add --url 'shell://bash'
 xs tml add --url 'shell://powershell.exe?cwd=/home/me/src&cols=120&rows=40'
 xs tml add --url 'ssh://dev@example.com'
 xs tml add --url 'wsl://?args=--distribution,Ubuntu'
-xs pane write 1 echo hello
-xs pane read 1
+xs tml write 1 echo hello
+xs tml read 1
 ```
 
 ### tmux
@@ -99,8 +99,8 @@ xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
 xs tmx attach --url tmux://work --ssh 'ssh://dev@example.com?identity=~/.ssh/id_ed25519'
 xs ls pane
 xs tmx sync work
-xs pane read <pane-id>
-xs pane write <pane-id> echo hi
+xs tml read <pane-id>
+xs tml write <pane-id> echo hi
 ```
 
 ### tmux 里的 window / pane
