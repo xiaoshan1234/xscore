@@ -62,7 +62,7 @@ pub(crate) async fn attach_session(
         let (window_cols, window_rows) = (pane.window_cols(), pane.window_rows());
         let window_active = pane.window_active();
         let handle = pane.tmux_handle().to_string();
-        let id = app.register_pane(pane, cols, rows);
+        let id = app.register_tmux_pane(pane, cols, rows, session);
         let rect = PaneRect {
             id,
             x,

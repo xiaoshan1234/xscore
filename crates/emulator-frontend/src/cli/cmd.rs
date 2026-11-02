@@ -81,6 +81,9 @@ pub enum Cmd {
     /// window operations
     #[command(subcommand)]
     Window(WindowCmd),
+    /// window group operations
+    #[command(subcommand)]
+    Group(GroupCmd),
     /// sync local panes with the tmux structure
     Sync,
     /// list panes
@@ -188,13 +191,21 @@ pub enum PaneCmd {
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum WindowCmd {
-    /// delete a tmux window
-    Del { window: String },
-    /// list tmux windows
+pub enum GroupCmd {
+    /// list window groups
     List,
-    /// switch to another tmux window
-    Select { window: String },
+}
+
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
+pub enum WindowCmd {
+    /// create a new tmux window in a group
+    Create { group: String, name: String },
+    /// delete a tmux window in a group
+    Del { group: String, window: String },
+    /// list tmux windows (optionally scoped to a group)
+    List { group: Option<String> },
+    /// switch to a tmux window in a group
+    Select { group: String, window: String },
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]

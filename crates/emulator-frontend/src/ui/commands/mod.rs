@@ -1,5 +1,6 @@
 //! 命令分发：把一条 `Cmd` 路由到对应的处理函数。
 
+mod group;
 mod local;
 mod pane;
 mod ssh;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
-use crate::cli::{Cmd, PaneCmd, TmlCmd, TmxCmd, WindowCmd};
+use crate::cli::{Cmd, GroupCmd, PaneCmd, TmlCmd, TmxCmd, WindowCmd};
 use crate::ui::app::App;
 use crate::ui::render::{self, Output};
 
@@ -47,11 +48,17 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         Cmd::Layout => render::layout_text(&guard),
         Cmd::Pane(PaneCmd::Del { pane }) => pane::pane_del(&mut guard, pane).await?,
         Cmd::Pane(PaneCmd::Fetch { pane, line }) => pane::pane_fetch(&guard, pane, line).await?,
-        Cmd::Window(WindowCmd::Del { window }) => window::window_del(&mut guard, window).await?,
-        Cmd::Window(WindowCmd::Select { window }) => {
-            window::window_select(&mut guard, window).await?
+        Cmd::Window(WindowCmd::Create { group, name }) => {
+            window::window_create(&mut guard, group, name).await?
         }
-        Cmd::Window(WindowCmd::List) => window::window_list(&guard),
+        Cmd::Window(WindowCmd::Del { group, window }) => {
+            window::window_del(&mut guard, group, window).await?
+        }
+        Cmd::Window(WindowCmd::Select { group, window }) => {
+            window::window_select(&mut guard, group, window).await?
+        }
+        Cmd::Window(WindowCmd::List { group }) => window::window_list(&guard, group)?,
+        Cmd::Group(GroupCmd::List) => group::list(&guard),
         Cmd::Sync => tmux::sync(&mut guard).await?,
         Cmd::List => render::pane_table(&guard).await,
         Cmd::Help => help(),
@@ -79,9 +86,11 @@ pub fn help() -> Output {
     out.line("  layout                      print the pane tree");
     out.line("  pane del <pane-id>          delete a pane");
     out.line("  pane fetch <pane-id> [--line <N>]   fetch tmux pane scrollback (all, or last N)");
-    out.line("  window del <handle>         delete a tmux window");
-    out.line("  window list                 list tmux windows");
-    out.line("  window select <handle>      switch to another tmux window");
+    out.line("  window create <group> <name>   create a tmux window in a group");
+    out.line("  window del <group> <window>    delete a tmux window in a group");
+    out.line("  window list [<group>]          list tmux windows (optionally scoped)");
+    out.line("  window select <group> <window> switch to a tmux window in a group");
+    out.line("  group list                     list window groups");
     out.line("  sync                        sync local panes with the tmux structure");
     out.line("  list                        list panes");
     out.line("  daemon serve|status|stop    run / inspect / stop the resident daemon");

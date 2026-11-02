@@ -55,5 +55,5 @@ async fn spawn_local(app: &mut App, command: String, args: Vec<String>) -> Resul
             rows,
         })
         .await?;
-    Ok(app.register_pane(handle, cols, rows))
+    Ok(app.register_local_pane(handle, cols, rows))
 }

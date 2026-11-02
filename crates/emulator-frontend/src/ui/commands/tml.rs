@@ -69,7 +69,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_pane(handle, *cols, *rows))
+            Ok(app.register_local_pane(handle, *cols, *rows))
         }
         ConversationSpec::Ssh {
             target,
@@ -91,7 +91,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_pane(handle, *cols, *rows))
+            Ok(app.register_local_pane(handle, *cols, *rows))
         }
         ConversationSpec::Wsl { args, cols, rows } => {
             let domain = LocalDomain::new();
@@ -104,7 +104,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     rows: *rows,
                 })
                 .await?;
-            Ok(app.register_pane(handle, *cols, *rows))
+            Ok(app.register_local_pane(handle, *cols, *rows))
         }
     }
 }

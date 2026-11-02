@@ -29,7 +29,7 @@ pub async fn ssh(
             rows,
         })
         .await?;
-    let id = app.register_pane(handle, cols, rows);
+    let id = app.register_local_pane(handle, cols, rows);
     app.layout.add(id);
     let mut out = Output::new();
     out.line(format!("pane: {id}  kind: ssh  {cols}x{rows}"));

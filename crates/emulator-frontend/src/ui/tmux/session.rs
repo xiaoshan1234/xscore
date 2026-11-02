@@ -56,7 +56,7 @@ pub async fn reconcile_session(
             spec.window_rows,
             spec.window_active,
         );
-        let id = app.register_pane(new_pane, spec.cols, spec.rows);
+        let id = app.register_tmux_pane(new_pane, spec.cols, spec.rows, session);
         app.tmux.insert(
             id,
             TmuxMeta {

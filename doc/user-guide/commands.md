@@ -33,9 +33,11 @@ xs <command> [args...]     # 执行一条一次性命令
 | `layout` | 打印窗口/布局树 |
 | `pane del <pane-id>` | 删除 pane |
 | `pane fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
-| `window del <handle>` | 删除 tmux window |
-| `window list` | 列出 tmux window |
-| `window select <handle>` | 切换 tmux window |
+| `window create <group> <name>` | 在指定 group 里创建 tmux window |
+| `window del <group> <window>` | 删除指定 group 里的 tmux window |
+| `window list [<group>]` | 列出 tmux window（可限定 group） |
+| `window select <group> <window>` | 切换指定 group 里的 tmux window |
+| `group list` | 列出 window group |
 | `sync` | 按 tmux 服务端现状同步本地结构 |
 | `list` | 列出所有 pane |
 | `help` | 打印简洁命令清单 |
@@ -264,29 +266,48 @@ xs pane fetch <pane-id> [--line <N>]
 
 ## window 操作
 
+window 现在按 group 作用域：一个 tmux session 对应一个 window group，默认 group 放本地
+shell/ssh/wsl 会话。`<group>` 可以用 group 名（session 名或 `default`）或数字 GroupId。
+
+### window create
+
+```text
+xs window create <group> <name>
+```
+
+在指定 group（tmux session）里创建新 window（`new-window`）。
+
 ### window del
 
 ```text
-xs window del <handle>
+xs window del <group> <window>
 ```
 
-删除 tmux window（`kill-window`）。
+删除指定 group 里的 tmux window（`kill-window`）。
 
 ### window list
 
 ```text
-xs window list
+xs window list [<group>]
 ```
 
-列出 tmux window（WINDOW / ACTIVE / PANES）。
+列出 tmux window（SESSION / WINDOW / ACTIVE / PANES）；带 `<group>` 时只列该 group。
 
 ### window select
 
 ```text
-xs window select <handle>
+xs window select <group> <window>
 ```
 
-切换到指定 tmux window（`select-window`）。
+切换到指定 group 里的 tmux window（`select-window`）。
+
+### group list
+
+```text
+xs group list
+```
+
+列出所有 window group（GROUP / NAME / KIND / PANES）。
 
 ## 同步
 
