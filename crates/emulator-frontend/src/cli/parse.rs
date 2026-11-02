@@ -99,6 +99,7 @@ pub enum ConversationSpec {
     Ssh {
         target: String,
         identity: Option<String>,
+        password: Option<String>,
         cols: u16,
         rows: u16,
     },
@@ -168,6 +169,7 @@ pub fn parse_conversation_url(url: &str) -> Result<ConversationSpec> {
             Ok(ConversationSpec::Ssh {
                 target: path.to_string(),
                 identity: params.get("identity").cloned(),
+                password: params.get("password").cloned(),
                 cols,
                 rows,
             })
@@ -359,8 +361,23 @@ mod tests {
             ConversationSpec::Ssh {
                 target: "dev@box:2222".into(),
                 identity: Some("~/.ssh/id_ed25519".into()),
+                password: None,
                 cols: 100,
                 rows: 30,
+            }
+        );
+    }
+
+    #[test]
+    fn conversation_url_ssh_with_password() {
+        assert_eq!(
+            parse_conversation_url("ssh://dev@box?password=secret&cols=90&rows=28").unwrap(),
+            ConversationSpec::Ssh {
+                target: "dev@box".into(),
+                identity: None,
+                password: Some("secret".into()),
+                cols: 90,
+                rows: 28,
             }
         );
     }

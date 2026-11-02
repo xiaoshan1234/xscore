@@ -74,6 +74,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
         ConversationSpec::Ssh {
             target,
             identity,
+            password: url_password,
             cols,
             rows,
         } => {
@@ -85,7 +86,7 @@ async fn spawn(app: &mut App, spec: &ConversationSpec, password: Option<String>)
                     port,
                     user,
                     identity: identity.clone(),
-                    password,
+                    password: url_password.clone().or(password),
                     cols: *cols,
                     rows: *rows,
                 })

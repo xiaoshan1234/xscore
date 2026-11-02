@@ -111,11 +111,12 @@ URL scheme：
 | scheme | 形式 | 查询参数 |
 |---|---|---|
 | `shell` | `shell://<program>?cwd=<path>&cols=<n>&rows=<n>&args=a,b` | `cwd`、`cols`、`rows`、`args`（逗号分隔） |
-| `ssh` | `ssh://<user@host[:port]>?identity=<path>&cols=<n>&rows=<n>` | `identity`、`cols`、`rows` |
+| `ssh` | `ssh://<user@host[:port]>?identity=<path>&password=<pwd>&cols=<n>&rows=<n>` | `identity`、`password`、`cols`、`rows` |
 | `wsl` | `wsl://?args=a,b&cols=<n>&rows=<n>` | `args`、`cols`、`rows` |
 
 - `cols` / `rows` 缺省 80x24；`args` 缺省为空；`cwd` 缺省为当前目录。
-- `ssh` 未提供 `identity` 时，按 `ssh` 命令同样的规则在客户端边缘提示密码。
+- `ssh` 认证：优先用 URL 里的 `password`；其次用 `identity` 密钥；两者都没有时在客户端边缘提示密码。
+- 注意：`password` 写在 URL 里会出现在进程参数和 shell 历史中，生产环境建议改用 `XSCORE_SSH_PASSWORD` / `PASSWD` 环境变量或交互提示。
 
 示例：
 
@@ -123,6 +124,7 @@ URL scheme：
 xs tml create --url 'shell://powershell?cwd=/home/me/src&cols=120&rows=40' --new-window
 xs tml create --url 'shell://bash?cols=100&rows=30' --spv 3
 xs tml create --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
+xs tml create --url 'ssh://dev@box?password=secret'
 xs tml create --url 'wsl://?args=--distribution,Ubuntu'
 ```
 

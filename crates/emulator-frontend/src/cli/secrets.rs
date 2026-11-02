@@ -33,6 +33,7 @@ pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
             if let ConversationSpec::Ssh {
                 target,
                 identity: None,
+                password: None,
                 ..
             } = parse_conversation_url(&create.url)?
             {
