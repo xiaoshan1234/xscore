@@ -77,7 +77,7 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 | `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
 | `daemon serve \| status \| stop` | 运行 / 查看 / 停止常驻 daemon |
 | `sync` | 按 tmux 服务端现状同步：删除已消失的 pane/window，纳入新增的 pane/window |
-| `layout` | 打印窗口树 |
+| `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
 | `list` | 列出所有 pane |
 
 ## 使用示例

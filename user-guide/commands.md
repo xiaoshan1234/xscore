@@ -27,7 +27,7 @@ xs <command> [args...]     # 执行一条一次性命令
 | `read <pane-id>` | 打印 pane 当前渲染出的屏幕 |
 | `resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
 | `focus <pane-id>` | 切换焦点 |
-| `layout` | 打印窗口/布局树 |
+| `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
 | `pane del <pane-id>` | 删除 pane |
 | `pane fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
 | `window create <group> <name>` | 在指定 group 里创建 tmux window |
@@ -149,10 +149,11 @@ xs focus <pane-id>
 ### layout
 
 ```text
-xs layout
+xs layout [<window-id>]
 ```
 
-打印布局树与当前焦点。
+不带参数打印全局布局树与当前焦点；带 `<window-id>`（如 `G2-T1`、`G1-M0`）打印该
+window 内的 pane 布局。
 
 ## pane 操作
 

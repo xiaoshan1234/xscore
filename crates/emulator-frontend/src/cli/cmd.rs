@@ -52,8 +52,11 @@ pub enum Cmd {
     Resize { pane: String, cols: u16, rows: u16 },
     /// move focus
     Focus { pane: String },
-    /// print the pane tree
-    Layout,
+    /// print the pane tree, or a window's layout
+    Layout {
+        /// window id (Gxx-Tyy / Gxx-Myy); omit for the global tree
+        window: Option<String>,
+    },
     /// pane operations
     #[command(subcommand)]
     Pane(PaneCmd),

@@ -4,11 +4,14 @@
 
 use std::time::Duration;
 
+use anyhow::Result;
 use emulator::domain::{PaneId, PaneKind};
 use emulator::term::{TerminalCore, VtTerm};
 use tokio::sync::Mutex;
 
 use crate::ui::app::App;
+use crate::ui::layout::PaneRect;
+use crate::ui::window_group::{parse_window_id, WindowKind};
 
 /// 追加式输出缓冲：`line` 等价于 `println!`（补一个换行），`push` 原样追加。
 #[derive(Debug, Default, Clone)]
@@ -79,6 +82,54 @@ pub async fn pane_table(app: &App) -> Output {
         ));
     }
     out
+}
+
+/// 渲染指定 window 的布局。
+pub fn window_layout_text(app: &App, spec: &str) -> Result<Output> {
+    let window = parse_window_id(spec)?;
+    let mut panes: Vec<PaneId> = app
+        .pane_windows
+        .iter()
+        .filter(|(_, w)| **w == window)
+        .map(|(pane, _)| *pane)
+        .collect();
+    panes.sort_by_key(|pane| pane.as_u64());
+
+    let mut out = Output::new();
+    match window.kind {
+        WindowKind::Tmux => {
+            let (cols, rows) = panes
+                .iter()
+                .find_map(|pane| app.tmux.get(pane))
+                .map(|meta| (meta.window_cols, meta.window_rows))
+                .unwrap_or((0, 0));
+            out.line(format!("{window} ({}x{}):", cols, rows));
+            let mut rects: Vec<PaneRect> = panes
+                .iter()
+                .filter_map(|pane| app.tmux.get(pane).map(|meta| meta.rect))
+                .collect();
+            rects.sort_by_key(|rect| (rect.y, rect.x));
+            for rect in rects {
+                out.line(format!(
+                    "  P{}({},{} {}x{})",
+                    rect.id, rect.x, rect.y, rect.cols, rect.rows
+                ));
+            }
+        }
+        WindowKind::Manual => {
+            out.line(format!("{window}:"));
+            for pane in panes {
+                let kind = match app.pane_entry(pane).map(|entry| entry.handle.kind()) {
+                    Some(PaneKind::Local) => "local",
+                    Some(PaneKind::Ssh) => "ssh",
+                    Some(PaneKind::Tmux) => "tmux",
+                    None => "?",
+                };
+                out.line(format!("  P{pane} {kind}"));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 渲染布局树文本。

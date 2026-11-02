@@ -439,6 +439,20 @@ mod tests {
     }
 
     #[test]
+    fn layout_command_parses_window() {
+        assert!(matches!(
+            parse(&["layout"]).unwrap(),
+            Cmd::Layout { window: None }
+        ));
+        assert!(matches!(
+            parse(&["layout", "G2-T1"]).unwrap(),
+            Cmd::Layout {
+                window: Some(window)
+            } if window == "G2-T1"
+        ));
+    }
+
+    #[test]
     fn tmux_url_default_socket() {
         assert_eq!(
             parse_tmux_url("tmux://work").unwrap(),

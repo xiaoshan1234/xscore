@@ -37,7 +37,8 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         Cmd::Read { pane } => pane::read(&guard, pane).await?,
         Cmd::Resize { pane, cols, rows } => pane::resize(&guard, pane, cols, rows).await?,
         Cmd::Focus { pane } => pane::focus(&mut guard, pane)?,
-        Cmd::Layout => render::layout_text(&guard),
+        Cmd::Layout { window: None } => render::layout_text(&guard),
+        Cmd::Layout { window: Some(spec) } => render::window_layout_text(&guard, &spec)?,
         Cmd::Pane(PaneCmd::Del { pane }) => pane::pane_del(&mut guard, pane).await?,
         Cmd::Pane(PaneCmd::Fetch { pane, line }) => pane::pane_fetch(&guard, pane, line).await?,
         Cmd::Window(WindowCmd::Create { group, name }) => {
@@ -75,7 +76,7 @@ pub fn help() -> Output {
     out.line("  read  <pane-id>             print accumulated output");
     out.line("  resize <pane-id> <c> <r>    resize the pane");
     out.line("  focus <pane-id>             move focus");
-    out.line("  layout                      print the pane tree");
+    out.line("  layout [<window-id>]         print the pane tree or a window's layout");
     out.line("  pane del <pane-id>          delete a pane");
     out.line("  pane fetch <pane-id> [--line <N>]   fetch tmux pane scrollback (all, or last N)");
     out.line("  window create <group> <name>   create a tmux window in a group");

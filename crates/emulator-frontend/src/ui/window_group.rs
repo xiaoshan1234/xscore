@@ -3,6 +3,7 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::{anyhow, Result};
 use emulator::domain::PaneId;
 
 /// 全局唯一的 window group 标识。
@@ -82,6 +83,30 @@ impl fmt::Display for WindowId {
     }
 }
 
+/// 解析 `Gxx-Tyy` / `Gxx-Myy` 形式的 window id。
+pub fn parse_window_id(s: &str) -> Result<WindowId> {
+    let rest = s
+        .strip_prefix('G')
+        .ok_or_else(|| anyhow!("expected window id Gxx-Tyy / Gxx-Myy, got {s}"))?;
+    let (group, rest) = rest
+        .split_once('-')
+        .ok_or_else(|| anyhow!("expected window id Gxx-Tyy / Gxx-Myy, got {s}"))?;
+    let group: GroupId = group
+        .parse()
+        .map_err(|_| anyhow!("invalid group id in {s}"))?;
+    let mut chars = rest.chars();
+    let kind = match chars.next() {
+        Some('T') => WindowKind::Tmux,
+        Some('M') => WindowKind::Manual,
+        _ => return Err(anyhow!("expected T or M in {s}")),
+    };
+    let index: u64 = chars
+        .as_str()
+        .parse()
+        .map_err(|_| anyhow!("invalid window index in {s}"))?;
+    Ok(WindowId { group, kind, index })
+}
+
 #[derive(Debug, Clone)]
 pub struct WindowGroup {
     pub id: GroupId,
@@ -144,6 +169,20 @@ mod tests {
 
         let manual = WindowId::manual("2".parse().unwrap(), 0);
         assert_eq!(manual.to_string(), "G2-M0");
+    }
+
+    #[test]
+    fn parse_window_id_roundtrip() {
+        assert_eq!(
+            parse_window_id("G2-T3").unwrap(),
+            WindowId::tmux("2".parse().unwrap(), 3)
+        );
+        assert_eq!(
+            parse_window_id("G1-M0").unwrap(),
+            WindowId::manual("1".parse().unwrap(), 0)
+        );
+        assert!(parse_window_id("2-T3").is_err());
+        assert!(parse_window_id("G2-X3").is_err());
     }
 
     #[test]
