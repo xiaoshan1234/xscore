@@ -46,6 +46,9 @@ pub enum Cmd {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// terminal conversation creation (shorthand: tml)
+    #[command(subcommand)]
+    Tml(TmlCmd),
     /// attach to a tmux session
     Tmux(TmuxArgs),
     /// split the focused pane
@@ -123,6 +126,31 @@ pub struct TmuxArgs {
         requires = "wsl"
     )]
     pub wsl_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
+pub enum TmlCmd {
+    /// create a shell/ssh/wsl conversation from a URL
+    Create(TmlCreateArgs),
+}
+
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub struct TmlCreateArgs {
+    /// conversation URL, e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
+    #[arg(long, value_name = "URL")]
+    pub url: String,
+    /// create in a new window (default)
+    #[arg(long, default_value_t = true, conflicts_with_all = ["sph", "spv"])]
+    pub new_window: bool,
+    /// split the specified pane horizontally to create
+    #[arg(long, value_name = "ID", conflicts_with_all = ["new_window", "spv"])]
+    pub sph: Option<String>,
+    /// split the specified pane vertically to create
+    #[arg(long, value_name = "ID", conflicts_with_all = ["new_window", "sph"])]
+    pub spv: Option<String>,
+    /// resolved client-side; never parsed from argv
+    #[arg(skip)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]

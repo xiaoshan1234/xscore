@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 
-use super::cmd::Cmd;
-use super::parse::parse_ssh_target;
+use super::cmd::{Cmd, TmlCmd};
+use super::parse::{parse_conversation_url, parse_ssh_target, ConversationSpec};
 
 pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
     match cmd {
@@ -28,6 +28,17 @@ pub fn resolve_secrets(cmd: Cmd) -> Result<Cmd> {
                 tmux.password_value = Some(prompt_tmux_password()?);
             }
             Ok(Cmd::Tmux(tmux))
+        }
+        Cmd::Tml(TmlCmd::Create(mut create)) => {
+            if let ConversationSpec::Ssh {
+                target,
+                identity: None,
+                ..
+            } = parse_conversation_url(&create.url)?
+            {
+                create.password = Some(prompt_ssh_password(&target)?);
+            }
+            Ok(Cmd::Tml(TmlCmd::Create(create)))
         }
         other => Ok(other),
     }

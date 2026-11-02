@@ -70,7 +70,25 @@ impl Layout {
         self.insert_node(Direction::Vertical, Node::TmuxMirror(container));
     }
 
+    /// 在指定 pane 上拆分，新 pane 为右/下兄弟。
+    pub fn split_pane(&mut self, direction: Direction, target: PaneId, pane: PaneId) {
+        self.insert_node_at(direction, Some(target), Node::Leaf(pane));
+    }
+
+    /// 布局树中是否包含某个 pane。
+    pub fn contains(&self, pane: PaneId) -> bool {
+        self.root
+            .as_ref()
+            .map(|root| contains_in(root, pane))
+            .unwrap_or(false)
+    }
+
     fn insert_node(&mut self, direction: Direction, node: Node) {
+        let target = self.focused;
+        self.insert_node_at(direction, target, node);
+    }
+
+    fn insert_node_at(&mut self, direction: Direction, target: Option<PaneId>, node: Node) {
         let focus = node_focus(&node);
         let root = match self.root.take() {
             None => {
@@ -78,7 +96,7 @@ impl Layout {
                 self.focused = focus;
                 return;
             }
-            Some(root) => match self.focused {
+            Some(root) => match target {
                 Some(target) => split_at(root, target, direction, node),
                 None => Node::Branch {
                     direction,
@@ -144,6 +162,14 @@ fn node_focus(node: &Node) -> Option<PaneId> {
             .active
             .or_else(|| container.panes.first().map(|rect| rect.id)),
         Node::Branch { left, .. } => node_focus(left),
+    }
+}
+
+fn contains_in(node: &Node, pane: PaneId) -> bool {
+    match node {
+        Node::Leaf(id) => *id == pane,
+        Node::TmuxMirror(container) => container.panes.iter().any(|rect| rect.id == pane),
+        Node::Branch { left, right, .. } => contains_in(left, pane) || contains_in(right, pane),
     }
 }
 
@@ -338,6 +364,17 @@ mod tests {
         layout.add(PaneId::new(1));
         layout.add(PaneId::new(2));
         assert_eq!(layout.render(), "v: 0.50\n  P1\n  P2");
+    }
+
+    #[test]
+    fn split_pane_targets_a_specific_pane() {
+        let mut layout = Layout::new();
+        layout.add(PaneId::new(1));
+        layout.add(PaneId::new(2));
+        layout.split_pane(Direction::Horizontal, PaneId::new(1), PaneId::new(3));
+        assert_eq!(layout.render(), "v: 0.50\n  h: 0.50\n    P1\n    P3\n  P2");
+        assert!(layout.contains(PaneId::new(3)));
+        assert!(!layout.contains(PaneId::new(9)));
     }
 
     #[test]

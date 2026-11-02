@@ -7,6 +7,11 @@ mod cmd;
 mod parse;
 mod secrets;
 
-pub use cmd::{Cmd, DaemonCmd, PaneCmd, SplitDirection, TmuxArgs, WindowCmd};
-pub use parse::{build_tmux_config, parse_args, parse_ssh_target, print_help};
+pub use cmd::{
+    Cmd, DaemonCmd, PaneCmd, SplitDirection, TmlCmd, TmlCreateArgs, TmuxArgs, WindowCmd,
+};
+pub use parse::{
+    build_tmux_config, parse_args, parse_conversation_url, parse_ssh_target, print_help,
+    ConversationSpec,
+};
 pub use secrets::resolve_secrets;
