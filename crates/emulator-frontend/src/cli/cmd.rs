@@ -3,7 +3,7 @@
 //! `Cmd` 的 serde 派生就是 daemon 的 IPC 线协议，重构时不得重命名任何变体
 //! 或字段，否则会与已在运行的 daemon 不兼容。
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
@@ -17,14 +17,6 @@ pub struct Command {
     pub command: Cmd,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
-pub enum SplitDirection {
-    #[value(name = "h")]
-    Horizontal,
-    #[value(name = "v")]
-    Vertical,
-}
-
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum Cmd {
     /// terminal pane/window management (shorthand: tml)
@@ -33,13 +25,6 @@ pub enum Cmd {
     /// tmux session management (shorthand: tmx)
     #[command(subcommand)]
     Tmx(TmxCmd),
-    /// split the focused pane
-    Split {
-        direction: SplitDirection,
-        program: String,
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
     /// send text to a pane
     Write {
         pane: String,
@@ -60,16 +45,8 @@ pub enum Cmd {
     /// pane operations
     #[command(subcommand)]
     Pane(PaneCmd),
-    /// window operations
-    #[command(subcommand)]
-    Window(WindowCmd),
-    /// window group operations
-    #[command(subcommand)]
-    Group(GroupCmd),
     /// sync local panes with the tmux structure
     Sync,
-    /// list panes
-    List,
     /// list resources (shorthand: ls)
     #[command(subcommand)]
     Ls(LsCmd),
@@ -145,12 +122,6 @@ pub enum PaneCmd {
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum GroupCmd {
-    /// list window groups
-    List,
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum LsCmd {
     /// list panes
     Pane,
@@ -158,18 +129,6 @@ pub enum LsCmd {
     Window { group: Option<String> },
     /// list window groups
     Group,
-}
-
-#[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
-pub enum WindowCmd {
-    /// create a new tmux window in a group
-    Create { group: String, name: String },
-    /// delete a tmux window in a group
-    Del { group: String, window: String },
-    /// list tmux windows (optionally scoped to a group)
-    List { group: Option<String> },
-    /// switch to a tmux window in a group
-    Select { group: String, window: String },
 }
 
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]

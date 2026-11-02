@@ -25,7 +25,6 @@ cargo install --path crates/emulator-frontend
 
 ```bash
 cargo build --workspace
-xs list
 ```
 
 不带参数时打印帮助（已无交互式 REPL）：
@@ -33,7 +32,7 @@ xs list
 ```bash
 ./target/debug/xs tml add --url shell://powershell
 .\target\debug\xs.exe tml add --url shell://powershell   # Windows
-xs list
+xs ls pane
 xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
 xs
 ```
@@ -44,7 +43,7 @@ xs
 
 一次性命令不直接持有连接：命令通过本地回环 TCP 发给一个常驻 daemon，由它持有所有
 live 连接与 pane 状态。这样 `xs tml add --url shell://powershell` 退出后，pane
-仍在 daemon 里，下一条 `xs list` 还能看到。daemon 在第一条命令时自动拉起，也可以
+仍在 daemon 里，下一条 `xs ls pane` 还能看到。daemon 在第一条命令时自动拉起，也可以
 手动管理：
 
 ```text
@@ -63,22 +62,15 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 | `tml add --url <URL> [...]` | 添加本地 shell/ssh/wsl 对话，或 tmux window/pane |
 | `tml del <pane-id>` | 删除 pane |
 | `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 接入 tmux 会话 |
-| `split h\|v <program> [args...]` | 在聚焦 pane 处拆出新 pane |
 | `write <pane-id> <text>` | 给 pane 发一行输入（自动补换行） |
 | `read <pane-id>` | 打印该 pane 当前渲染出的屏幕 |
 | `resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
 | `focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
 | `pane del <pane-id>` | 删除 pane（tmux 发 kill-pane，本地/SSH 关闭连接） |
-| `window create <group> <name>` | 在 group 里创建 tmux window |
-| `window del <group> <window>` | 删除 tmux window（kill-window） |
-| `window list [<group>]` | 列出 tmux window |
-| `window select <group> <window>` | 切换 tmux window |
-| `group list` | 列出 window group |
 | `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
 | `daemon serve \| status \| stop` | 运行 / 查看 / 停止常驻 daemon |
 | `sync` | 按 tmux 服务端现状同步：删除已消失的 pane/window，纳入新增的 pane/window |
 | `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
-| `list` | 列出所有 pane |
 
 ## 使用示例
 
@@ -105,7 +97,7 @@ tmux new-session -d -s work
 xs tmx attach --url tmux://work
 xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
 xs tmx attach --url tmux://work --ssh 'ssh://dev@example.com?identity=~/.ssh/id_ed25519'
-xs list
+xs ls pane
 xs read <pane-id>
 xs write <pane-id> echo hi
 ```
@@ -115,8 +107,7 @@ xs write <pane-id> echo hi
 ```text
 xs tml add --group work --new-window
 xs tml add --group work --sph 3
-xs window list work
-xs window select work @0
+xs ls window work
 ```
 
 window 标识统一编码为 `Gxx-Tyy` / `Gxx-Myy`：`xx` 是 group id，`yy` 是 group 内
@@ -126,12 +117,12 @@ window 序号，`T` 表示 tmux window，`M` 表示 shell/ssh/wsl window。
 
 ```text
 xs tml add --url 'shell://bash'
-xs split h bash
+xs tml add --url 'shell://bash' --sph 1
 xs layout
 ```
 
-`split` 在本地 pane 上拆出新 pane；在 tmux 镜像容器上拆分时，容器保持完整，新 pane
-成为它的平级兄弟，tmux 内部 pane 不会出现在本地树里。
+`tml add --sph/--spv` 在指定 pane 上拆出新 pane；在 tmux 镜像容器上拆分时，容器保持
+完整，新 pane 成为它的平级兄弟，tmux 内部 pane 不会出现在本地树里。
 
 ## 真实环境测试
 

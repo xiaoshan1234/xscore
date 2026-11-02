@@ -1,7 +1,6 @@
 //! 命令分发：把一条 `Cmd` 路由到对应的处理函数。
 
 mod group;
-mod local;
 mod pane;
 mod tml;
 mod tmux;
@@ -13,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
-use crate::cli::{Cmd, GroupCmd, LsCmd, PaneCmd, TmlCmd, TmxCmd, WindowCmd};
+use crate::cli::{Cmd, LsCmd, PaneCmd, TmlCmd, TmxCmd};
 use crate::ui::app::App;
 use crate::ui::render::{self, Output};
 
@@ -28,11 +27,6 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         Cmd::Tmx(tmx_cmd) => match tmx_cmd {
             TmxCmd::Attach(attach) => tmx::attach(&mut guard, &attach, app.clone()).await?,
         },
-        Cmd::Split {
-            direction,
-            program,
-            args,
-        } => local::split(&mut guard, direction, program, args).await?,
         Cmd::Write { pane, text } => pane::write(&guard, pane, text).await?,
         Cmd::Read { pane } => pane::read(&guard, pane).await?,
         Cmd::Resize { pane, cols, rows } => pane::resize(&guard, pane, cols, rows).await?,
@@ -41,22 +35,10 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
         Cmd::Layout { window: Some(spec) } => render::window_layout_text(&guard, &spec)?,
         Cmd::Pane(PaneCmd::Del { pane }) => pane::pane_del(&mut guard, pane).await?,
         Cmd::Pane(PaneCmd::Fetch { pane, line }) => pane::pane_fetch(&guard, pane, line).await?,
-        Cmd::Window(WindowCmd::Create { group, name }) => {
-            window::window_create(&mut guard, group, name).await?
-        }
-        Cmd::Window(WindowCmd::Del { group, window }) => {
-            window::window_del(&mut guard, group, window).await?
-        }
-        Cmd::Window(WindowCmd::Select { group, window }) => {
-            window::window_select(&mut guard, group, window).await?
-        }
-        Cmd::Window(WindowCmd::List { group }) => window::window_list(&guard, group)?,
-        Cmd::Group(GroupCmd::List) => group::list(&guard),
         Cmd::Sync => tmux::sync(&mut guard).await?,
         Cmd::Ls(LsCmd::Pane) => render::pane_table(&guard).await,
         Cmd::Ls(LsCmd::Window { group }) => window::window_list(&guard, group)?,
         Cmd::Ls(LsCmd::Group) => group::list(&guard),
-        Cmd::List => render::pane_table(&guard).await,
         Cmd::Help => help(),
         Cmd::Daemon(_) => return Err(anyhow!("daemon subcommand is handled by the entry point")),
     };
@@ -71,7 +53,6 @@ pub fn help() -> Output {
     out.line(
         "  tmx attach --url <url> [--ssh <ssh-url> | --wsl <wsl-url>]   attach to a tmux session by URL",
     );
-    out.line("  split h|v <program> [args...]   split the focused pane");
     out.line("  write <pane-id> <text>      send text + newline to the pane");
     out.line("  read  <pane-id>             print accumulated output");
     out.line("  resize <pane-id> <c> <r>    resize the pane");
@@ -79,14 +60,8 @@ pub fn help() -> Output {
     out.line("  layout [<window-id>]         print the pane tree or a window's layout");
     out.line("  pane del <pane-id>          delete a pane");
     out.line("  pane fetch <pane-id> [--line <N>]   fetch tmux pane scrollback (all, or last N)");
-    out.line("  window create <group> <name>   create a tmux window in a group");
-    out.line("  window del <group> <window>    delete a tmux window in a group");
-    out.line("  window list [<group>]          list tmux windows (optionally scoped)");
-    out.line("  window select <group> <window> switch to a tmux window in a group");
-    out.line("  group list                     list window groups");
     out.line("  ls pane|window [<group>]|group   list panes / windows / groups");
     out.line("  sync                        sync local panes with the tmux structure");
-    out.line("  list                        list panes");
     out.line("  daemon serve|status|stop    run / inspect / stop the resident daemon");
     out
 }

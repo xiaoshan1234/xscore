@@ -24,7 +24,7 @@ cargo fmt --all -- --check
 
 ```bash
 cargo install --path crates/emulator-frontend   # 安装 xs 到 ~/.cargo/bin
-xs list                                          # 不带参数时打印帮助（无交互式 REPL）
+xs ls pane                                       # 列出当前 pane
 ```
 
 真实环境 tmux 集成测试（默认 `#[ignore]`，需要真实 SSH 主机）：
@@ -80,8 +80,8 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 - **Windows ConPTY 输入回车用 `\r\n`**，Unix 用 `\n`。本地 shell 的 `write` 按
   `PaneKind::Local` 区分；SSH/tmux 仍是 `\n`（Unix 语义）。
 - **一个 tmux window 独占全屏**：`layout` 只放当前（active）window 的镜像容器，
-  其余 window 只登记数据不进布局；用 `window select <handle>` 切换，服务端
-  `%session-window-changed` 会触发 reconcile 自动跟随。
+  其余 window 只登记数据不进布局；服务端 `%session-window-changed` 会触发
+  reconcile 自动跟随。
 - **`%output` 不回放历史**：attach 只接收订阅之后的新字节；历史用
   `pane fetch <id> [--line N]`（`capture-pane`）按需查询。
 - **结构事件**：`%output %N` 和 `%exit` 已被消费；`%window-add`/`%window-close`/

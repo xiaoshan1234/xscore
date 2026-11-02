@@ -439,6 +439,26 @@ mod tests {
     }
 
     #[test]
+    fn removed_commands_are_rejected() {
+        for args in [
+            &["split", "h", "bash"][..],
+            &["split", "v", "bash"][..],
+            &["list"][..],
+            &["group", "list"][..],
+            &["window", "create", "work", "shell"][..],
+            &["window", "del", "work", "@1"][..],
+            &["window", "list"][..],
+            &["window", "select", "work", "@1"][..],
+        ] {
+            assert!(
+                parse(args).is_err(),
+                "expected removed command to fail: {}",
+                args.join(" ")
+            );
+        }
+    }
+
+    #[test]
     fn layout_command_parses_window() {
         assert!(matches!(
             parse(&["layout"]).unwrap(),
