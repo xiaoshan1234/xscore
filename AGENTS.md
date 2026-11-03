@@ -27,8 +27,8 @@ cargo install --path crates/emulator-frontend   # 安装 xs 到 ~/.cargo/bin
 xs ls pane                                       # 列出当前 pane
 ```
 
-真实环境 tmux 集成测试（默认 `#[ignore]`，配置从根目录 `test.config` 读取，
-格式见 `test-example.config`）：
+集成测试（本地 PTY、SSH shell、远端 tmux、前端 tmux）从根目录 `test.config`
+读取连接配置，格式见 `test-example.config`：
 
 ```text
 ssh_host=user@host
@@ -36,8 +36,11 @@ ssh_password=...
 ```
 
 ```powershell
-cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
+python scripts/run_integration_tests.py
 ```
+
+脚本会构建前端 askpass helper，运行全部集成测试，并在 `test-results/` 生成
+Markdown、JSON、JUnit XML 和逐套件日志。
 
 ## 架构与模块
 

@@ -127,20 +127,24 @@ xs layout
 
 ## 真实环境测试
 
-仓库带一个针对真实 SSH tmux 的集成测试（默认 `#[ignore]`）。测试从工作区根目录
-的 `test.config` 读取 SSH 连接信息，格式见 [`test-example.config`](../test-example.config)：
+仓库带有 SSH shell、远端 tmux 和前端 tmux 集成测试。测试从工作区根目录的
+`test.config` 读取 SSH 连接信息，格式见
+[`test-example.config`](../test-example.config)：
 
 ```text
 ssh_host=user@host
 ssh_password=...
+ssh_port=22
 ```
 
 ```powershell
-cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
+python scripts/run_integration_tests.py
 ```
 
-该测试在远端新建一个专用 session，覆盖 attach、split-window、结构枚举、kill-pane
-与清理，结束后自动 `kill-session`。
+脚本会运行本地 PTY、SSH shell 往返/resize、tmux attach/输入/输出/resize/split/
+kill，以及前端 tmux 路径。每次运行会在 `test-results/<UTC 时间>/` 生成
+`summary.md`、`results.json`、`junit.xml` 和逐套件日志；日志中的 SSH 密码会被
+脱敏。
 
 ## 平台支持
 

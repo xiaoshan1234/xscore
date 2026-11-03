@@ -77,8 +77,13 @@ cargo fmt --all -- --check
 |---|---|
 | emulator unit | tmux 协议/格式、VT 核心、argv |
 | `local_domain` | 本地 PTY 端到端 roundtrip |
+| `ssh_shell`（`#[ignore]`） | 真实 SSH shell：PTY 输入输出与 resize |
+| `tmux_ssh` emulator（`#[ignore]`） | 真实 SSH tmux：I/O、resize、split、kill |
+| `tmux_ssh` frontend（`#[ignore]`） | 前端 askpass 与远端 tmux 路径 |
 | layout unit | 布局树拆分、删除、镜像焦点 |
-| `tmux_ssh`（`#[ignore]`） | 真实 SSH tmux：attach/split/kill/枚举 |
+
+集成测试统一通过 `python scripts/run_integration_tests.py` 运行，结果写入
+`test-results/`。
 
 ## 6. 扩展点
 

@@ -19,7 +19,8 @@
 ## 2. 线程模型
 
 - `LocalPty`：reader / writer 两个 OS 线程，异步侧经无界 channel。
-- `SshConnection`：reader 任务用 10ms 超时轮询释放 channel 锁，读写不互饿死。
+- `SshConnection`：单任务持有 SSH channel，通过命令队列串行处理 read/write/resize/
+  close，避免超时取消读取导致后续消息丢失。
 - `TmuxControl`：writer 线程写 stdin，reader 线程解析 stdout；SSH 场景用管道，
   Local/WSL 场景用 ConPTY。
 

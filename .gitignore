@@ -15,3 +15,6 @@ emulator.log
 
 # Local integration-test configuration may contain SSH credentials
 /test.config
+
+# Generated integration-test results and logs
+/test-results/
