@@ -51,9 +51,7 @@ impl Domain for RemoteSshDomain {
         let tx_pump = tx.clone();
         tokio::spawn(async move {
             while let Some(chunk) = rx.recv().await {
-                if tx_pump.send(chunk).is_err() {
-                    break;
-                }
+                let _ = tx_pump.send(chunk);
             }
         });
 

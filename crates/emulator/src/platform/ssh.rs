@@ -6,9 +6,8 @@ use async_trait::async_trait;
 use russh::client::{self, Config, Handler};
 use russh::{Channel, ChannelMsg};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 #[derive(Clone, Default)]
 struct SshHandler;
@@ -33,7 +32,13 @@ pub struct SshConnection {
     identity: Option<String>,
     password: Option<String>,
     handle: Arc<Mutex<Option<client::Handle<SshHandler>>>>,
-    channel: Arc<Mutex<Option<Channel<client::Msg>>>>,
+    commands: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<SshCommand>>>>,
+}
+
+enum SshCommand {
+    Write(Vec<u8>, oneshot::Sender<Result<usize>>),
+    Resize(Size, oneshot::Sender<Result<()>>),
+    Close(oneshot::Sender<Result<()>>),
 }
 
 impl std::fmt::Debug for SshConnection {
@@ -61,7 +66,7 @@ impl SshConnection {
             identity,
             password,
             handle: Arc::new(Mutex::new(None)),
-            channel: Arc::new(Mutex::new(None)),
+            commands: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -136,67 +141,113 @@ impl SshConnection {
             .map_err(|e| Error::Transport(format!("ssh request_shell: {e}")))?;
 
         *self.handle.lock().await = Some(handle);
-        *self.channel.lock().await = Some(channel);
-
         let (out_tx, out_rx) = unbounded_channel::<Vec<u8>>();
-        let channel = self.channel.clone();
+        let (command_tx, command_rx) = unbounded_channel();
+        *self.commands.lock().await = Some(command_tx);
         tokio::spawn(async move {
-            loop {
-                // `wait` 独占 &mut channel；用 10ms 超时周期性释放锁，
-                // 让 write/resize 有机会拿到 channel 发送数据。
-                let msg = {
-                    let mut guard = channel.lock().await;
-                    match guard.as_mut() {
-                        Some(ch) => tokio::time::timeout(Duration::from_millis(10), ch.wait())
-                            .await
-                            .ok()
-                            .flatten(),
-                        None => None,
-                    }
-                };
-                match msg {
-                    Some(ChannelMsg::Data { data }) => {
-                        if out_tx.send(data.to_vec()).is_err() {
-                            break;
-                        }
-                    }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
-                    Some(_) => continue,
-                }
-            }
+            run_channel(channel, command_rx, out_tx).await;
         });
 
         Ok(out_rx)
     }
 
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
-        let guard = self.channel.lock().await;
-        let channel = guard
-            .as_ref()
-            .ok_or_else(|| Error::Transport("ssh: not connected".into()))?;
-        let len = data.len();
-        channel
-            .data(data)
+        let (reply, result) = oneshot::channel();
+        let command_tx = self
+            .commands
+            .lock()
             .await
-            .map_err(|e| Error::Transport(format!("ssh write: {e}")))?;
-        Ok(len)
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::Transport("ssh: not connected".into()))?;
+        command_tx
+            .send(SshCommand::Write(data.to_vec(), reply))
+            .map_err(|_| Error::Transport("ssh: not connected".into()))?;
+        result
+            .await
+            .map_err(|_| Error::Transport("ssh: command task stopped".into()))?
     }
 
     pub async fn resize(&self, size: Size) -> Result<()> {
-        let guard = self.channel.lock().await;
-        let channel = guard
-            .as_ref()
-            .ok_or_else(|| Error::Transport("ssh: not connected".into()))?;
-        channel
-            .window_change(size.cols as u32, size.rows as u32, 0, 0)
+        let (reply, result) = oneshot::channel();
+        let command_tx = self
+            .commands
+            .lock()
             .await
-            .map_err(|e| Error::Transport(format!("ssh window_change: {e}")))?;
-        Ok(())
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::Transport("ssh: not connected".into()))?;
+        command_tx
+            .send(SshCommand::Resize(size, reply))
+            .map_err(|_| Error::Transport("ssh: not connected".into()))?;
+        result
+            .await
+            .map_err(|_| Error::Transport("ssh: command task stopped".into()))?
     }
 
     pub async fn close(&self) -> Result<()> {
-        *self.channel.lock().await = None;
+        let command_tx = self.commands.lock().await.take();
+        if let Some(command_tx) = command_tx {
+            let (reply, result) = oneshot::channel();
+            if command_tx.send(SshCommand::Close(reply)).is_ok() {
+                let _ = result.await;
+            }
+        }
         *self.handle.lock().await = None;
         Ok(())
+    }
+}
+
+async fn run_channel(
+    mut channel: Channel<client::Msg>,
+    mut commands: UnboundedReceiver<SshCommand>,
+    out_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+) {
+    loop {
+        tokio::select! {
+            message = channel.wait() => {
+                match message {
+                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        if out_tx.send(data.to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => break,
+                    Some(_) => {}
+                }
+            }
+            command = commands.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    SshCommand::Write(data, reply) => {
+                        let result = channel
+                            .data(data.as_slice())
+                            .await
+                            .map(|()| data.len())
+                            .map_err(|error| Error::Transport(format!("ssh write: {error}")));
+                        let _ = reply.send(result);
+                    }
+                    SshCommand::Resize(size, reply) => {
+                        let result = channel
+                            .window_change(size.cols as u32, size.rows as u32, 0, 0)
+                            .await
+                            .map_err(|error| {
+                                Error::Transport(format!("ssh window_change: {error}"))
+                            });
+                        let _ = reply.send(result);
+                    }
+                    SshCommand::Close(reply) => {
+                        let result = channel
+                            .close()
+                            .await
+                            .map_err(|error| Error::Transport(format!("ssh close: {error}")));
+                        let _ = reply.send(result);
+                        break;
+                    }
+                }
+            }
+        }
     }
 }

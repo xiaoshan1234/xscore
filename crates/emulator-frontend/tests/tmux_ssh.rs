@@ -19,6 +19,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 struct TestConfig {
     ssh_host: String,
     ssh_password: String,
+    ssh_port: u16,
 }
 
 impl TestConfig {
@@ -39,6 +40,7 @@ impl TestConfig {
         let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
         let mut ssh_host = None;
         let mut ssh_password = None;
+        let mut ssh_port = None;
 
         for (index, raw_line) in contents.lines().enumerate() {
             let line_number = index + 1;
@@ -63,6 +65,7 @@ impl TestConfig {
             let target = match key {
                 "ssh_host" => &mut ssh_host,
                 "ssh_password" => &mut ssh_password,
+                "ssh_port" => &mut ssh_port,
                 _ => {
                     return Err(format!(
                         "{source}:{line_number}: unknown config key `{key}`"
@@ -82,6 +85,11 @@ impl TestConfig {
                 .ok_or_else(|| format!("{source}: missing required key `ssh_host`"))?,
             ssh_password: ssh_password
                 .ok_or_else(|| format!("{source}: missing required key `ssh_password`"))?,
+            ssh_port: ssh_port
+                .as_deref()
+                .unwrap_or("22")
+                .parse()
+                .map_err(|_| format!("{source}: `ssh_port` must be a valid TCP port"))?,
         })
     }
 }
@@ -94,10 +102,15 @@ fn ssh_env(cmd: &mut Command, password: &str, askpass: &str) {
         .env("DISPLAY", "localhost:0");
 }
 
-fn ssh(host: &str, password: &str, askpass: &str, args: &[&str]) -> String {
+fn ssh(host: &str, port: u16, password: &str, askpass: &str, args: &[&str]) -> String {
+    let known_hosts = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut cmd = Command::new("ssh");
     cmd.arg("-o")
         .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={known_hosts}"))
+        .arg("-p")
+        .arg(port.to_string())
         .arg(host);
     cmd.args(args);
     ssh_env(&mut cmd, password, askpass);
@@ -110,6 +123,7 @@ fn ssh(host: &str, password: &str, askpass: &str, args: &[&str]) -> String {
 async fn ssh_tmux_attach_split_kill_sync() {
     let config = TestConfig::load();
     let host = &config.ssh_host;
+    let port = config.ssh_port;
     let password = &config.ssh_password;
     let askpass = std::env::var("CARGO_BIN_EXE_xs")
         .expect("Cargo should provide CARGO_BIN_EXE_xs for this integration test");
@@ -120,12 +134,14 @@ async fn ssh_tmux_attach_split_kill_sync() {
     // 清场并新建一个专用 session。
     let _ = ssh(
         host,
+        port,
         password,
         &askpass,
         &["tmux", "kill-session", "-t", &session],
     );
     let _ = ssh(
         host,
+        port,
         password,
         &askpass,
         &[
@@ -143,7 +159,15 @@ async fn ssh_tmux_attach_split_kill_sync() {
 
     let host_config = TmuxHostConfig::Ssh {
         destination: host.to_owned(),
-        args: vec![],
+        args: vec![
+            "-o".to_string(),
+            format!(
+                "UserKnownHostsFile={}",
+                if cfg!(windows) { "NUL" } else { "/dev/null" }
+            ),
+            "-p".to_string(),
+            port.to_string(),
+        ],
         password: Some(password.to_owned()),
         askpass: Some(askpass.clone()),
     };
@@ -189,6 +213,7 @@ async fn ssh_tmux_attach_split_kill_sync() {
     // 清理。
     let _ = ssh(
         host,
+        port,
         password,
         &askpass,
         &["tmux", "kill-session", "-t", &session],
@@ -203,12 +228,13 @@ mod tests {
     fn config_parser_reads_literal_values() {
         let config = TestConfig::parse(
             "test.config",
-            "\u{feff}# credentials\r\n ssh_host = user@host \r\nssh_password=p=a#ss\r\n",
+            "\u{feff}# credentials\r\n ssh_host = user@host \r\nssh_password=p=a#ss\r\nssh_port=2222\r\n",
         )
         .unwrap();
 
         assert_eq!(config.ssh_host, "user@host");
         assert_eq!(config.ssh_password, "p=a#ss");
+        assert_eq!(config.ssh_port, 2222);
     }
 
     #[test]
