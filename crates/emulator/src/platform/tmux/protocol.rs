@@ -3,37 +3,82 @@
 /// 一行协议，按前缀分类。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
+    /// 一条命令回复块开始。
     Begin {
+        /// tmux 命令编号。
         num: u64,
+        /// `%begin` 携带的标志位。
         flags: u32,
     },
+    /// 一条命令回复块结束。
     End {
+        /// tmux 命令编号。
         num: u64,
     },
+    /// 一条命令回复块报错。
     Error {
+        /// tmux 命令编号。
         num: u64,
+        /// tmux 返回的错误文本。
         message: String,
     },
     /// 窗格字节。`pane` 是 tmux 句柄（`"%3"`）。
     Output {
+        /// 产生输出的 pane 句柄。
         pane: String,
+        /// 已解除 tmux 转义的原始终端字节。
         bytes: Vec<u8>,
     },
+    /// 结构变更事件。
     Event(TmuxEvent),
+    /// 未识别或格式不完整的控制模式记录。
     Unknown(String),
 }
 
 /// 结构通知。
 #[derive(Debug, Clone, PartialEq)]
 pub enum TmuxEvent {
-    WindowAdd { handle: String },
-    WindowClose { handle: String },
-    WindowRenamed { handle: String },
-    LayoutChange { handle: String, layout: String },
-    SessionWindowChanged { session: String, window: String },
-    SessionChanged { session: String },
+    /// 新增 window。
+    WindowAdd {
+        /// 新增 window 的 tmux 句柄。
+        handle: String,
+    },
+    /// 关闭 window。
+    WindowClose {
+        /// 被关闭 window 的 tmux 句柄。
+        handle: String,
+    },
+    /// 重命名 window。
+    WindowRenamed {
+        /// 被重命名 window 的 tmux 句柄。
+        handle: String,
+    },
+    /// window 布局发生变化。
+    LayoutChange {
+        /// 发生布局变化的 window 句柄。
+        handle: String,
+        /// 新的 tmux 布局字符串。
+        layout: String,
+    },
+    /// session 的当前活动 window 发生变化。
+    SessionWindowChanged {
+        /// session 句柄。
+        session: String,
+        /// 新的活动 window 句柄。
+        window: String,
+    },
+    /// 控制连接切换了 session。
+    SessionChanged {
+        /// 新的 session 句柄。
+        session: String,
+    },
+    /// session 集合发生变化。
     SessionsChanged,
-    Exit { reason: String },
+    /// tmux 控制连接退出。
+    Exit {
+        /// tmux 提供的退出原因。
+        reason: String,
+    },
 }
 
 /// 跨读保留的解析器：喂入字节，返回完整记录。
@@ -44,10 +89,17 @@ pub struct ProtocolParser {
 }
 
 impl ProtocolParser {
+    /// 创建一个保留跨 chunk 状态的空解析器。
+    ///
+    /// 参数/输出：无输入；返回新的 [`ProtocolParser`]。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 喂入一段控制模式字节，并返回其中已完整解析的记录。
+    ///
+    /// 参数/输出：`self` 为输入输出，会保留未完成行；`chunk` 为输入字节；
+    /// 返回本次新增的完整 [`Parsed`] 记录。
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Parsed> {
         self.carry.extend_from_slice(chunk);
         let mut out = Vec::new();
@@ -74,6 +126,9 @@ impl ProtocolParser {
     }
 }
 
+/// 解除 tmux 控制模式字符串中的反斜杠八进制转义。
+///
+/// 参数/输出：`data` 为输入；返回解码后的原始字节。
 pub fn unescape(data: &str) -> Vec<u8> {
     unescape_bytes(data.as_bytes())
 }

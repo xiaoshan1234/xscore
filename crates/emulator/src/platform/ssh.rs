@@ -25,6 +25,10 @@ impl Handler for SshHandler {
     }
 }
 
+/// 单条 russh SSH 连接及其 PTY shell channel。
+///
+/// 连接创建后由一个异步任务独占 channel，并通过命令队列串行处理读写、resize
+/// 和关闭。
 pub struct SshConnection {
     user: String,
     host: String,
@@ -52,6 +56,10 @@ impl std::fmt::Debug for SshConnection {
 }
 
 impl SshConnection {
+    /// 创建 SSH 连接配置，但暂不建立网络连接。
+    ///
+    /// 参数/输出：`user`、`host`、`port`、`identity` 和 `password` 为输入；
+    /// 返回尚未连接的 [`SshConnection`]。
     pub fn new(
         user: String,
         host: String,
@@ -71,6 +79,9 @@ impl SshConnection {
     }
 
     /// 连接、认证、申请 PTY 与 shell，返回远程输出字节流。
+    ///
+    /// 参数/输出：`self` 为输入输出，会保存连接和命令通道；`size` 为输入初始
+    /// 终端尺寸；返回远程输出接收端。
     pub async fn connect(&self, size: Size) -> Result<UnboundedReceiver<Vec<u8>>> {
         tracing::debug!(
             host = %self.host,
@@ -151,6 +162,9 @@ impl SshConnection {
         Ok(out_rx)
     }
 
+    /// 向远端 shell 写入原始字节。
+    ///
+    /// 参数/输出：`self` 为输入；`data` 为输入字节；返回成功写入的字节数。
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
         let (reply, result) = oneshot::channel();
         let command_tx = self
@@ -168,6 +182,9 @@ impl SshConnection {
             .map_err(|_| Error::Transport("ssh: command task stopped".into()))?
     }
 
+    /// 通知远端调整 PTY 尺寸。
+    ///
+    /// 参数/输出：`self` 为输入；`size` 为输入尺寸；成功时无返回值。
     pub async fn resize(&self, size: Size) -> Result<()> {
         let (reply, result) = oneshot::channel();
         let command_tx = self
@@ -185,6 +202,9 @@ impl SshConnection {
             .map_err(|_| Error::Transport("ssh: command task stopped".into()))?
     }
 
+    /// 关闭 SSH channel 和客户端连接。
+    ///
+    /// 参数/输出：`self` 为输入输出，会清空命令通道并释放连接状态；成功时无返回值。
     pub async fn close(&self) -> Result<()> {
         let command_tx = self.commands.lock().await.take();
         if let Some(command_tx) = command_tx {

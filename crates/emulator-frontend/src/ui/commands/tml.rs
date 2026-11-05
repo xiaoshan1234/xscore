@@ -12,6 +12,9 @@ use crate::ui::render::Output;
 use crate::ui::tmux::session::reconcile_session;
 use crate::ui::window_group::{GroupId, GroupKind, WindowId, WindowKind};
 
+/// 按目标 group 类型创建本地对话、SSH/WSL pane 或 tmux window/pane。
+///
+/// 参数/输出：`app` 为输入输出；`args` 为输入；返回创建结果文本。
 pub async fn add(app: &mut App, args: TmlAddArgs) -> Result<Output> {
     let group = match &args.group {
         Some(spec) => app

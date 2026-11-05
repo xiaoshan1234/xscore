@@ -8,6 +8,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
+/// 初始化文件日志与 stderr WARN 日志。
+///
+/// 参数/输出：无输入；成功时安装全局 tracing subscriber，否则返回错误。
 pub fn init() -> Result<()> {
     let path = std::env::var("XSCORE_LOG").unwrap_or_else(|_| "emulator.log".to_string());
     let file = std::fs::OpenOptions::new()

@@ -11,11 +11,17 @@ use emulator::domain::PaneId;
 pub struct GroupId(u64);
 
 impl GroupId {
+    /// 分配全局唯一的下一个 group ID。
+    ///
+    /// 参数/输出：无输入；返回新 ID。
     pub fn next() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         Self(NEXT.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
+    /// 读取 group ID 的整数形式。
+    ///
+    /// 参数/输出：`self` 为输入；返回 ID 数值。
     pub fn as_u64(&self) -> u64 {
         self.0
     }
@@ -35,26 +41,39 @@ impl std::str::FromStr for GroupId {
     }
 }
 
+/// window group 的类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupKind {
+    /// 默认的非 tmux 会话组。
     Default,
+    /// 对应一个 tmux session 的组。
     Tmux,
 }
 
+/// 窗口类别。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WindowKind {
+    /// tmux 窗口。
     Tmux,
+    /// 本地手动创建窗口。
     Manual,
 }
 
+/// 由 group、类别和序号组成的窗口标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WindowId {
+    /// 所属 group。
     pub group: GroupId,
+    /// 窗口类别。
     pub kind: WindowKind,
+    /// 组内窗口序号。
     pub index: u64,
 }
 
 impl WindowId {
+    /// 构造 tmux window ID。
+    ///
+    /// 参数/输出：`group` 和 `index` 为输入；返回 tmux 类别 ID。
     pub fn tmux(group: GroupId, index: u64) -> Self {
         Self {
             group,
@@ -63,6 +82,9 @@ impl WindowId {
         }
     }
 
+    /// 构造手动 window ID。
+    ///
+    /// 参数/输出：`group` 和 `index` 为输入；返回 manual 类别 ID。
     pub fn manual(group: GroupId, index: u64) -> Self {
         Self {
             group,
@@ -84,6 +106,8 @@ impl fmt::Display for WindowId {
 }
 
 /// 解析 `Gxx-Tyy` / `Gxx-Myy` 形式的 window id。
+///
+/// 参数/输出：`s` 为输入；成功时返回 [`WindowId`]，格式非法时返回错误。
 pub fn parse_window_id(s: &str) -> Result<WindowId> {
     let rest = s
         .strip_prefix('G')
@@ -107,15 +131,23 @@ pub fn parse_window_id(s: &str) -> Result<WindowId> {
     Ok(WindowId { group, kind, index })
 }
 
+/// 一个 window group 及其 pane 成员。
 #[derive(Debug, Clone)]
 pub struct WindowGroup {
+    /// group 唯一标识。
     pub id: GroupId,
+    /// group 显示名。
     pub name: String,
+    /// group 类别。
     pub kind: GroupKind,
+    /// 属于该 group 的 pane。
     pub panes: Vec<PaneId>,
 }
 
 impl WindowGroup {
+    /// 创建空默认 group。
+    ///
+    /// 参数/输出：无输入；返回新的默认组。
     pub fn default_group() -> Self {
         Self {
             id: GroupId::next(),
@@ -125,6 +157,9 @@ impl WindowGroup {
         }
     }
 
+    /// 创建与 tmux session 关联的空 group。
+    ///
+    /// 参数/输出：`session` 为输入；返回新的 tmux group。
     pub fn tmux_session(session: &str) -> Self {
         Self {
             id: GroupId::next(),
@@ -134,12 +169,18 @@ impl WindowGroup {
         }
     }
 
+    /// 将一个 pane 加入 group，重复加入会被忽略。
+    ///
+    /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
     pub fn add_pane(&mut self, pane: PaneId) {
         if !self.panes.contains(&pane) {
             self.panes.push(pane);
         }
     }
 
+    /// 从 group 中移除一个 pane。
+    ///
+    /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
     pub fn remove_pane(&mut self, pane: PaneId) {
         self.panes.retain(|p| *p != pane);
     }

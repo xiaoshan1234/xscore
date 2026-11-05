@@ -11,20 +11,34 @@ use crate::ui::pane::{PaneEntry, PaneRegistry};
 use crate::ui::tmux::session::TmuxMeta;
 use crate::ui::window_group::{GroupId, GroupKind, WindowGroup, WindowId};
 
+/// CLI 前端的全局应用状态。
 pub struct App {
+    /// 所有已注册 pane。
     pub panes: PaneRegistry,
+    /// 本地布局树。
     pub layout: Layout,
+    /// tmux pane 的会话和几何元数据。
     pub tmux: HashMap<PaneId, TmuxMeta>,
+    /// 按 tmux session 保存的控制连接。
     pub tmux_controls: HashMap<String, Arc<TmuxControl>>,
+    /// 全部 window group。
     pub groups: HashMap<GroupId, WindowGroup>,
+    /// tmux session 到 group 的映射。
     pub session_groups: HashMap<String, GroupId>,
+    /// pane 到 group 的映射。
     pub pane_groups: HashMap<PaneId, GroupId>,
+    /// pane 到 window 的映射。
     pub pane_windows: HashMap<PaneId, WindowId>,
+    /// 每个 group 下一个可用的 manual window 序号。
     pub next_manual_window: HashMap<GroupId, u64>,
+    /// 默认 group ID。
     pub default_group: GroupId,
 }
 
 impl App {
+    /// 创建带默认 group 的空应用状态。
+    ///
+    /// 参数/输出：无输入；返回新的 [`App`]。
     pub fn new() -> Self {
         let default_group = WindowGroup::default_group();
         let mut groups = HashMap::new();
@@ -44,6 +58,9 @@ impl App {
     }
 
     /// 注册一个 pane，并归入 group 里的一个新 manual window。
+    ///
+    /// 参数/输出：`self` 为输入输出；`handle`、`cols`、`rows`、`group` 为输入；
+    /// 返回新 pane ID。
     pub fn register_pane_in_group(
         &mut self,
         handle: Arc<dyn PaneHandle>,
@@ -59,6 +76,9 @@ impl App {
     }
 
     /// 注册一个 pane，并归入指定的 window。
+    ///
+    /// 参数/输出：`self` 为输入输出；`handle`、`cols`、`rows`、`window` 为输入；
+    /// 返回新 pane ID。
     pub fn register_pane_in_window(
         &mut self,
         handle: Arc<dyn PaneHandle>,
@@ -73,6 +93,9 @@ impl App {
     }
 
     /// 注册一个 tmux pane，归入该 session 对应 group 的 tmux window。
+    ///
+    /// 参数/输出：`self` 为输入输出；`handle`、`cols`、`rows`、`session` 和
+    /// `window_handle` 为输入；返回新 pane ID。
     pub fn register_tmux_pane(
         &mut self,
         handle: Arc<dyn PaneHandle>,
@@ -90,6 +113,9 @@ impl App {
     }
 
     /// 同步 pane 的 tmux window id（tmux window 序号变化时调用）。
+    ///
+    /// 参数/输出：`self` 为输入输出；`id`、`session`、`window_handle` 为输入；
+    /// 不返回值。
     pub fn update_tmux_window(&mut self, id: PaneId, session: &str, window_handle: &str) {
         if let Some(group) = self.session_groups.get(session).copied() {
             let index = tmux_window_index(window_handle);
@@ -104,15 +130,23 @@ impl App {
         WindowId::manual(group, index)
     }
 
+    /// 按 pane ID 读取注册条目。
+    ///
+    /// 参数/输出：`self` 和 `id` 为输入；存在时返回条目引用。
     pub fn pane_entry(&self, id: PaneId) -> Option<&PaneEntry> {
         self.panes.get(id)
     }
 
+    /// 按 session 名读取 tmux 控制连接。
+    ///
+    /// 参数/输出：`self` 和 `session` 为输入；存在时返回共享控制连接。
     pub fn tmux_control(&self, session: &str) -> Option<Arc<TmuxControl>> {
         self.tmux_controls.get(session).cloned()
     }
 
     /// 每个 tmux session 对应一个 window group；已存在则复用。
+    ///
+    /// 参数/输出：`self` 为输入输出；`session` 为输入；返回对应 group ID。
     pub fn ensure_tmux_group(&mut self, session: &str) -> GroupId {
         if let Some(id) = self.session_groups.get(session) {
             return *id;
@@ -124,6 +158,9 @@ impl App {
         id
     }
 
+    /// 将 pane 加入 group 并更新反向映射。
+    ///
+    /// 参数/输出：`self` 为输入输出；`group` 和 `pane` 为输入；不返回值。
     pub fn add_pane_to_group(&mut self, group: GroupId, pane: PaneId) {
         if let Some(group) = self.groups.get_mut(&group) {
             group.add_pane(pane);
@@ -131,19 +168,30 @@ impl App {
         self.pane_groups.insert(pane, group);
     }
 
+    /// 读取 pane 所属 group。
+    ///
+    /// 参数/输出：`self` 和 `id` 为输入；存在时返回 group ID。
     pub fn pane_group(&self, id: PaneId) -> Option<GroupId> {
         self.pane_groups.get(&id).copied()
     }
 
+    /// 读取 pane 所属 window。
+    ///
+    /// 参数/输出：`self` 和 `id` 为输入；存在时返回 window ID。
     pub fn pane_window(&self, id: PaneId) -> Option<WindowId> {
         self.pane_windows.get(&id).copied()
     }
 
+    /// 读取 group 显示名。
+    ///
+    /// 参数/输出：`self` 和 `id` 为输入；存在时返回名称引用。
     pub fn group_name(&self, id: GroupId) -> Option<&str> {
         self.groups.get(&id).map(|group| group.name.as_str())
     }
 
     /// 按 GroupId（数字）或 group 名（`default` / session 名）解析。
+    ///
+    /// 参数/输出：`self` 和 `spec` 为输入；匹配时返回 group ID。
     pub fn resolve_group(&self, spec: &str) -> Option<GroupId> {
         if let Ok(id) = spec.parse::<GroupId>() {
             if self.groups.contains_key(&id) {
@@ -157,6 +205,8 @@ impl App {
     }
 
     /// tmux window group 对应的 session 名。
+    ///
+    /// 参数/输出：`self` 和 `id` 为输入；tmux group 存在时返回 session 名。
     pub fn group_session(&self, id: GroupId) -> Option<&str> {
         self.groups
             .get(&id)
@@ -164,6 +214,9 @@ impl App {
             .map(|group| group.name.as_str())
     }
 
+    /// 从本地应用状态中移除 pane 及其全部映射。
+    ///
+    /// 参数/输出：`self` 为输入输出；`id` 为输入；不返回值。
     pub fn remove_pane_local(&mut self, id: PaneId) {
         self.panes.remove(id);
         self.tmux.remove(&id);

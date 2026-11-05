@@ -6,13 +6,17 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
+/// daemon IPC 使用的双向异步字节流。
 pub trait DaemonStream: AsyncRead + AsyncWrite + Unpin + Send {}
 
 impl<T> DaemonStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
+/// 装箱后的 daemon IPC 字节流。
 pub type BoxDaemonStream = Box<dyn DaemonStream>;
 
 /// 由用户目录稳定派生出的回环端口，同一用户始终指向同一 daemon。
+///
+/// 参数/输出：无输入；返回回环 TCP 端口。
 pub fn port() -> u16 {
     #[cfg(windows)]
     let identity = std::env::var("USERPROFILE").unwrap_or_default();
@@ -31,12 +35,18 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// 连接当前用户的 daemon IPC 端口。
+///
+/// 参数/输出：无输入；成功返回连接流，否则返回 I/O 错误。
 pub async fn connect() -> io::Result<BoxDaemonStream> {
     let stream = tokio::net::TcpStream::connect(("127.0.0.1", port())).await?;
     stream.set_nodelay(true)?;
     Ok(Box::new(stream))
 }
 
+/// 探测 daemon 是否可连接。
+///
+/// 参数/输出：无输入；返回是否连接成功。
 pub async fn probe() -> bool {
     connect().await.is_ok()
 }

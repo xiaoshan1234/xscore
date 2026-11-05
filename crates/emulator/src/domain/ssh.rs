@@ -8,10 +8,16 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// russh SSH 域。
+///
+/// 每次创建 pane 都会建立独立 SSH 连接和 PTY shell channel。
 #[derive(Debug, Default)]
 pub struct RemoteSshDomain;
 
 impl RemoteSshDomain {
+    /// 创建一个无内部状态的 SSH 域。
+    ///
+    /// 参数/输出：无输入；返回新的 [`RemoteSshDomain`]。
     pub fn new() -> Self {
         Self
     }
@@ -67,6 +73,9 @@ impl Domain for RemoteSshDomain {
     }
 }
 
+/// 单连接 SSH 窗格句柄。
+///
+/// 输入输出直接映射到该 pane 独占的 SSH channel。
 pub struct SshPane {
     id: PaneId,
     conn: Arc<SshConnection>,

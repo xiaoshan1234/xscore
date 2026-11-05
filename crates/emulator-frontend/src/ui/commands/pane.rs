@@ -9,6 +9,9 @@ use emulator::term::TerminalCore;
 use crate::ui::app::App;
 use crate::ui::render::{snapshot_text, Output};
 
+/// 向指定 pane 写入以空格拼接的文本并补平台换行。
+///
+/// 参数/输出：`app`、`pane`、`text` 为输入；返回空输出，失败时返回错误。
 pub async fn write(app: &App, pane: String, text: Vec<String>) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     let entry = app.pane_entry(id).unwrap();
@@ -23,6 +26,9 @@ pub async fn write(app: &App, pane: String, text: Vec<String>) -> Result<Output>
     Ok(Output::new())
 }
 
+/// 读取指定 pane 的当前屏幕快照。
+///
+/// 参数/输出：`app` 和 `pane` 为输入；返回快照文本。
 pub async fn read(app: &App, pane: String) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     let entry = app.pane_entry(id).unwrap();
@@ -31,6 +37,9 @@ pub async fn read(app: &App, pane: String) -> Result<Output> {
     Ok(out)
 }
 
+/// 调整指定 pane 及其终端网格尺寸。
+///
+/// 参数/输出：`app`、`pane`、`cols`、`rows` 为输入；返回空输出。
 pub async fn resize(app: &App, pane: String, cols: u16, rows: u16) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     let entry = app.pane_entry(id).unwrap();
@@ -39,6 +48,9 @@ pub async fn resize(app: &App, pane: String, cols: u16, rows: u16) -> Result<Out
     Ok(Output::new())
 }
 
+/// 切换本地 pane 或 tmux 容器内 pane 的焦点。
+///
+/// 参数/输出：`app` 为输入输出；`pane` 为输入；返回焦点提示文本。
 pub fn focus(app: &mut App, pane: String) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     if let Some(window) = app.tmux.get(&id).map(|m| m.window.clone()) {
@@ -53,6 +65,9 @@ pub fn focus(app: &mut App, pane: String) -> Result<Output> {
     Ok(out)
 }
 
+/// 关闭并删除指定 pane。
+///
+/// 参数/输出：`app` 为输入输出；`pane` 为输入；返回删除提示文本。
 pub async fn pane_del(app: &mut App, pane: String) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     {
@@ -65,6 +80,9 @@ pub async fn pane_del(app: &mut App, pane: String) -> Result<Output> {
     Ok(out)
 }
 
+/// 从 tmux 拉取指定 pane 的滚动历史。
+///
+/// 参数/输出：`app` 和 `pane` 为输入；`line` 为可选最近行数输入；返回历史文本。
 pub async fn pane_fetch(app: &App, pane: String, line: Option<usize>) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     let start = match line {

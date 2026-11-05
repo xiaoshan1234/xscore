@@ -8,6 +8,9 @@ use crate::ui::app::App;
 use crate::ui::render::Output;
 use crate::ui::window_group::{WindowId, WindowKind};
 
+/// 列出全部或指定 group 的 window。
+///
+/// 参数/输出：`app` 为输入；`group` 为可选 group 名/ID 输入；返回表格文本。
 pub fn window_list(app: &App, group: Option<String>) -> Result<Output> {
     let gid = match &group {
         Some(spec) => Some(

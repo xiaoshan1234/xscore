@@ -72,6 +72,13 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 命名规范见 [rules/rust-name-rules.md](rules/rust-name-rules.md)：函数/变量
 `snake_case`、类型/枚举/枚举变体 `UpperCamelCase`、布尔 `is_/has_/should_/can_` 前缀。
 
+## 对外接口文档
+
+- 跨文件可见的 `pub` / `pub(crate)` 类型、字段、枚举变体、常量和函数必须有
+  `///` 注释。
+- 函数和方法注释必须写明作用、参数方向（输入、输出或输入输出）和返回值/异步输出。
+- `emulator` 库启用 `missing_docs`；新增 crate 外公共接口缺失注释会触发编译警告。
+
 ## 必须知道的技术坑
 
 - **一次性 CLI 走常驻 daemon**：`xs <command>` 通过本地回环 TCP 把命令发给

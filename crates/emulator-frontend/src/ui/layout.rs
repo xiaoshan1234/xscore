@@ -2,44 +2,66 @@
 
 use emulator::domain::PaneId;
 
+/// 分屏方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
+    /// 左右分屏。
     Horizontal,
+    /// 上下分屏。
     Vertical,
 }
 
 /// 一个 tmux pane 在 window 内的几何：列偏移、行偏移、宽、高。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneRect {
+    /// 对应 pane ID。
     pub id: PaneId,
+    /// 相对容器左偏移。
     pub x: u16,
+    /// 相对容器上偏移。
     pub y: u16,
+    /// pane 列数。
     pub cols: u16,
+    /// pane 行数。
     pub rows: u16,
 }
 
 /// tmux window 的不可拆分布局原子。内部 pane 只在这里，不进本地树。
 #[derive(Debug, Clone)]
 pub struct TmuxContainer {
+    /// tmux window 句柄。
     pub window: String,
+    /// window 列数。
     pub cols: u16,
+    /// window 行数。
     pub rows: u16,
+    /// window 内的 pane 几何。
     pub panes: Vec<PaneRect>,
+    /// 容器当前活动的 pane。
     pub active: Option<PaneId>,
 }
 
+/// 本地布局树节点。
 #[derive(Debug, Clone)]
 pub enum Node {
+    /// 单个本地 pane 叶节点。
     Leaf(PaneId),
+    /// 二分屏分支。
     Branch {
+        /// 分屏方向。
         direction: Direction,
+        /// 左侧/上方节点占比。
         ratio: f32,
+        /// 第一个子节点。
         left: Box<Node>,
+        /// 第二个子节点。
         right: Box<Node>,
     },
+    /// 不可拆分的 tmux window 镜像。
     TmuxMirror(TmuxContainer),
 }
 
+/// 本地分屏树及焦点状态。
 #[derive(Debug, Default)]
 pub struct Layout {
     root: Option<Node>,
@@ -47,35 +69,52 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// 创建空布局。
+    ///
+    /// 参数/输出：无输入；返回空 [`Layout`]。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 返回当前聚焦的 pane。
+    ///
+    /// 参数/输出：`self` 为输入；返回焦点或 `None`。
     pub fn focused(&self) -> Option<PaneId> {
         self.focused
     }
 
     /// 本地 pane：第一个为根，后续作为聚焦节点兄弟（默认垂直拆分）。
+    ///
+    /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
     pub fn add(&mut self, pane: PaneId) {
         self.split_focused(Direction::Vertical, pane);
     }
 
     /// 拆分聚焦节点，新 pane 为右/下兄弟。
+    ///
+    /// 参数/输出：`self` 为输入输出；`direction` 和 `pane` 为输入；不返回值。
     pub fn split_focused(&mut self, direction: Direction, pane: PaneId) {
         self.insert_node(direction, Node::Leaf(pane));
     }
 
     /// 插入一个 tmux 镜像容器（不可拆分布局原子）。
+    ///
+    /// 参数/输出：`self` 为输入输出；`container` 为输入；不返回值。
     pub fn add_mirror(&mut self, container: TmuxContainer) {
         self.insert_node(Direction::Vertical, Node::TmuxMirror(container));
     }
 
     /// 在指定 pane 上拆分，新 pane 为右/下兄弟。
+    ///
+    /// 参数/输出：`self` 为输入输出；`direction`、`target`、`pane` 为输入；
+    /// 不返回值。
     pub fn split_pane(&mut self, direction: Direction, target: PaneId, pane: PaneId) {
         self.insert_node_at(direction, Some(target), Node::Leaf(pane));
     }
 
     /// 布局树中是否包含某个 pane。
+    ///
+    /// 参数/输出：`self` 和 `pane` 为输入；返回是否存在。
     pub fn contains(&self, pane: PaneId) -> bool {
         self.root
             .as_ref()
@@ -111,11 +150,15 @@ impl Layout {
     }
 
     /// 本地叶子焦点。
+    ///
+    /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
     pub fn focus(&mut self, pane: PaneId) {
         self.focused = Some(pane);
     }
 
     /// 容器内焦点：找到指定 window 的镜像并设置 active。
+    ///
+    /// 参数/输出：`self` 为输入输出；`window` 和 `pane` 为输入；返回是否找到。
     pub fn set_mirror_active(&mut self, window: &str, pane: PaneId) -> bool {
         let found = match self.root.as_mut() {
             Some(root) => set_mirror_active_in(root, window, pane),
@@ -127,11 +170,17 @@ impl Layout {
         found
     }
 
+    /// 从布局树移除指定 pane，并自动收缩空分支。
+    ///
+    /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
     pub fn remove_pane(&mut self, pane: PaneId) {
         self.root = self.root.take().and_then(|root| remove_pane_in(root, pane));
         self.focused = self.root.as_ref().and_then(node_focus);
     }
 
+    /// 从布局树移除指定 tmux window 镜像。
+    ///
+    /// 参数/输出：`self` 为输入输出；`window` 为输入；不返回值。
     pub fn remove_window(&mut self, window: &str) {
         self.root = self
             .root
@@ -140,6 +189,9 @@ impl Layout {
         self.focused = self.root.as_ref().and_then(node_focus);
     }
 
+    /// 将布局树渲染为缩进文本。
+    ///
+    /// 参数/输出：`self` 为输入；返回布局文本。
     pub fn render(&self) -> String {
         match &self.root {
             None => "(empty)".to_string(),

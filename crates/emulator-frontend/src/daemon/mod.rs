@@ -9,6 +9,9 @@ use anyhow::Result;
 
 use crate::cli::DaemonCmd;
 
+/// 根据 `daemon` 子命令执行启动、状态查询或停止。
+///
+/// 参数/输出：`cmd` 为输入；成功时无返回值。
 pub async fn run_bootstrap(cmd: DaemonCmd) -> Result<()> {
     match cmd {
         DaemonCmd::Serve => server::run().await,

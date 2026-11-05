@@ -3,6 +3,8 @@
 //! 分层严格单向：`platform`（L0）← `domain`（L1）← `term`（L2 纯逻辑）。
 //! 权威架构见 `doc/arch/terminal-emulator.md`。
 
+#![warn(missing_docs)]
+
 pub mod domain;
 pub mod error;
 pub mod platform;

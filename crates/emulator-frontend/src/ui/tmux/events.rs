@@ -7,26 +7,40 @@ use std::collections::HashMap;
 /// 一个结构事件应触发的本地动作。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructureAction {
+    /// 重新枚举当前 session 的结构。
     ReconcileSession,
+    /// 删除指定 tmux window 的本地镜像。
     RemoveWindow(String),
+    /// 关闭会话并清理全部本地 pane。
     Shutdown,
 }
 
 /// 新增 pane 的完整描述：tmux 句柄、所属 window、几何信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneAddSpec {
+    /// tmux pane 句柄。
     pub handle: String,
+    /// 所属 tmux window 句柄。
     pub window: String,
+    /// pane 列数。
     pub cols: u16,
+    /// pane 行数。
     pub rows: u16,
+    /// pane 左偏移。
     pub x: u16,
+    /// pane 上偏移。
     pub y: u16,
+    /// window 列数。
     pub window_cols: u16,
+    /// window 行数。
     pub window_rows: u16,
+    /// window 是否为活动 window。
     pub window_active: bool,
 }
 
 /// 把 tmux 结构事件映射为本地动作。
+///
+/// 参数/输出：`event` 为输入；返回对应的 [`StructureAction`]。
 pub fn classify_tmux_event(event: &TmuxEvent) -> StructureAction {
     match event {
         TmuxEvent::WindowClose { handle } => StructureAction::RemoveWindow(handle.clone()),
@@ -38,6 +52,7 @@ pub fn classify_tmux_event(event: &TmuxEvent) -> StructureAction {
 /// 计算远端结构与本地句柄的差集。
 ///
 /// 返回 `(需要删除的 PaneId, 需要新增的 PaneAddSpec)`。
+/// 参数/输出：`local` 和 `remote` 为输入；返回待删除与待新增列表。
 pub fn diff_tmux_structure(
     local: &HashMap<String, PaneId>,
     remote: &[TmuxWindowInfo],

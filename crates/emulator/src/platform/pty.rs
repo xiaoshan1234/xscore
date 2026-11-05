@@ -34,6 +34,9 @@ impl std::fmt::Debug for LocalPty {
 }
 
 impl LocalPty {
+    /// 创建本地 PTY 启动配置，但暂不启动子进程。
+    ///
+    /// 参数/输出：`command`、`args` 和 `cwd` 为输入；返回尚未打开的 [`LocalPty`]。
     pub fn new(command: impl Into<String>, args: Vec<String>, cwd: Option<String>) -> Self {
         Self {
             command: command.into(),
@@ -46,6 +49,9 @@ impl LocalPty {
     }
 
     /// 打开 PTY、启动子进程，返回子进程输出字节流（每段一个 chunk）。
+    ///
+    /// 参数/输出：`self` 为输入输出，会记录已启动的 PTY 和子进程；`size` 为
+    /// 输入初始尺寸；返回异步输出接收端。
     pub fn spawn(&self, size: Size) -> Result<UnboundedReceiver<Vec<u8>>> {
         tracing::debug!(
             command = %self.command,
@@ -133,6 +139,9 @@ impl LocalPty {
         Ok(out_rx)
     }
 
+    /// 向 PTY 写入原始字节。
+    ///
+    /// 参数/输出：`self` 为输入；`data` 为输入字节；返回提交成功的字节数。
     pub fn write(&self, data: &[u8]) -> Result<usize> {
         if data.is_empty() {
             return Ok(0);
@@ -148,6 +157,9 @@ impl LocalPty {
         Ok(data.len())
     }
 
+    /// 调整 PTY 对应的终端尺寸。
+    ///
+    /// 参数/输出：`self` 为输入；`size` 为输入尺寸；成功时无返回值。
     pub fn resize(&self, size: Size) -> Result<()> {
         let guard = self.master.lock().unwrap();
         let master = guard
@@ -163,6 +175,9 @@ impl LocalPty {
             .map_err(|e| Error::Transport(format!("pty resize: {e}")))
     }
 
+    /// 关闭写端、终止子进程并释放 PTY 主端。
+    ///
+    /// 参数/输出：`self` 为输入输出，会清空内部子进程和通道；成功时无返回值。
     pub fn close(&self) -> Result<()> {
         // 先关 writer：结束写线程并释放重复的 master fd。
         *self.to_child.lock().unwrap() = None;

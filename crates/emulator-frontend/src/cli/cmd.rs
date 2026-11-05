@@ -6,6 +6,7 @@
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+/// `xs` 的顶层 clap 命令。
 #[derive(Debug, Parser)]
 #[command(
     name = "xs",
@@ -13,10 +14,12 @@ use serde::{Deserialize, Serialize};
     disable_help_subcommand = true
 )]
 pub struct Command {
+    /// 实际子命令。
     #[command(subcommand)]
     pub command: Cmd,
 }
 
+/// 前端支持的全部命令。
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum Cmd {
     /// terminal pane/window management (shorthand: tml)
@@ -40,6 +43,7 @@ pub enum Cmd {
     Daemon(DaemonCmd),
 }
 
+/// `tml` 子命令。
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum TmlCmd {
     /// add a local shell/ssh/wsl conversation or a tmux window/pane
@@ -51,24 +55,42 @@ pub enum TmlCmd {
     },
     /// send text to a pane
     Write {
+        /// 目标 pane ID。
         pane: String,
+        /// 要拼接后发送的文本分段。
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         text: Vec<String>,
     },
     /// print a pane's rendered screen
-    Read { pane: String },
+    Read {
+        /// 目标 pane ID。
+        pane: String,
+    },
     /// resize a pane
-    Resize { pane: String, cols: u16, rows: u16 },
+    Resize {
+        /// 目标 pane ID。
+        pane: String,
+        /// 新列数。
+        cols: u16,
+        /// 新行数。
+        rows: u16,
+    },
     /// move focus
-    Focus { pane: String },
+    Focus {
+        /// 目标 pane ID。
+        pane: String,
+    },
     /// fetch tmux pane scrollback
     Fetch {
+        /// 目标 pane ID。
         pane: String,
+        /// 只取最近 N 行；省略时取全部历史。
         #[arg(long, value_name = "N")]
         line: Option<usize>,
     },
 }
 
+/// `tml add` 的参数。
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub struct TmlAddArgs {
     /// conversation URL (optional for tmux groups), e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
@@ -91,6 +113,7 @@ pub struct TmlAddArgs {
     pub password: Option<String>,
 }
 
+/// `tmx` 子命令。
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum TmxCmd {
     /// attach to a tmux session by URL
@@ -102,6 +125,7 @@ pub enum TmxCmd {
     },
 }
 
+/// `tmx attach` 的参数。
 #[derive(Debug, Clone, Args, Serialize, Deserialize)]
 pub struct TmxAttachArgs {
     /// tmux target URL: tmux://<socket>/<session>
@@ -115,16 +139,21 @@ pub struct TmxAttachArgs {
     pub wsl: Option<String>,
 }
 
+/// `ls` 子命令。
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum LsCmd {
     /// list panes
     Pane,
     /// list tmux windows (optionally scoped to a group)
-    Window { group: Option<String> },
+    Window {
+        /// 可选的 group 名或 ID。
+        group: Option<String>,
+    },
     /// list window groups
     Group,
 }
 
+/// daemon 生命周期子命令。
 #[derive(Debug, Clone, Subcommand, Serialize, Deserialize)]
 pub enum DaemonCmd {
     /// run the daemon in the foreground

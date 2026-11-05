@@ -23,6 +23,9 @@ pub struct VtTerm {
 }
 
 impl VtTerm {
+    /// 创建指定初始尺寸的终端状态机。
+    ///
+    /// 参数/输出：`cols` 和 `rows` 为输入；返回初始化的 [`VtTerm`]。
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             grid: Grid::new(cols as usize, rows as usize),
@@ -34,10 +37,16 @@ impl VtTerm {
         }
     }
 
+    /// 返回当前网格列数。
+    ///
+    /// 参数/输出：`self` 为输入；返回列数。
     pub fn cols(&self) -> usize {
         self.grid.cols()
     }
 
+    /// 返回当前网格行数。
+    ///
+    /// 参数/输出：`self` 为输入；返回行数。
     pub fn rows(&self) -> usize {
         self.grid.rows()
     }

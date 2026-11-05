@@ -1,23 +1,36 @@
 //! tmux 目标模型：宿主机与 socket 选择。
 
+/// tmux 控制连接所在的宿主机类型。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum TmuxHostConfig {
+    /// 直接在当前主机启动 tmux。
     #[default]
     Local,
+    /// 通过系统 SSH 连接远端主机。
     Ssh {
+        /// SSH 目标，例如 `user@host`。
         destination: String,
+        /// 追加给 `ssh` 的参数。
         args: Vec<String>,
+        /// 可选的登录密码。
         password: Option<String>,
+        /// 可选的 askpass helper 可执行文件路径。
         askpass: Option<String>,
     },
+    /// 通过 `wsl.exe` 在 WSL 中启动 tmux。
     Wsl {
+        /// 追加给 `wsl.exe` 的参数。
         args: Vec<String>,
     },
 }
 
+/// tmux server 的 socket 选择。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TmuxSocket {
+    /// 使用 tmux 默认 socket。
     Default,
+    /// 使用 `tmux -L` 指定的命名 socket。
     Named(String),
+    /// 使用 `tmux -S` 指定的 socket 路径。
     Path(String),
 }

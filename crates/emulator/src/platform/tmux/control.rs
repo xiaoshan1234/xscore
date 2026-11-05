@@ -26,6 +26,9 @@ fn gone(session: &str) -> Error {
 
 type PendingReply = oneshot::Sender<Result<Vec<String>>>;
 
+/// 构造 `tmux -C attach` 的完整命令行。
+///
+/// 参数/输出：`prefix`、`socket` 和 `session` 为输入；返回按执行顺序排列的参数列表。
 pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String> {
     let mut argv = prefix.to_vec();
     argv.push("tmux".to_string());
@@ -114,6 +117,9 @@ type SpawnIo = (
     Box<dyn std::io::Write + Send>,
 );
 
+/// 一个 tmux session 的控制模式客户端。
+///
+/// 持有子进程/PTY、读写线程、命令回复队列、事件与 pane 输出订阅。
 pub struct TmuxControl {
     session: String,
     child: Mutex<Option<ChildHandle>>,
@@ -125,10 +131,17 @@ pub struct TmuxControl {
 }
 
 impl TmuxControl {
+    /// 返回当前控制连接对应的 tmux session 名。
+    ///
+    /// 参数/输出：`self` 为输入；返回 session 名引用。
     pub fn session(&self) -> &str {
         &self.session
     }
 
+    /// 启动 tmux 控制子进程并建立读写线程。
+    ///
+    /// 参数/输出：`prefix`、`socket`、`session`、`password`、`askpass` 和
+    /// `use_pty` 为输入；返回已启动的 [`TmuxControl`]。
     pub fn spawn(
         prefix: &[String],
         socket: &TmuxSocket,
@@ -236,6 +249,9 @@ impl TmuxControl {
         })
     }
 
+    /// 发送一条 tmux 命令并等待对应的 `%begin/%end` 回复。
+    ///
+    /// 参数/输出：`self` 为输入；`command` 为输入命令；返回回复中的文本行。
     pub async fn send(&self, command: &str) -> Result<Vec<String>> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(gone(&self.session));
@@ -272,6 +288,9 @@ impl TmuxControl {
         }
     }
 
+    /// 订阅后续 tmux 结构事件。
+    ///
+    /// 参数/输出：`self` 为输入；返回事件接收端，订阅前的历史事件不会回放。
     pub fn subscribe(&self) -> UnboundedReceiver<TmuxEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         if !self.shared.closed.load(Ordering::SeqCst) {
@@ -282,6 +301,9 @@ impl TmuxControl {
         rx
     }
 
+    /// 订阅指定 tmux pane 的后续原始输出。
+    ///
+    /// 参数/输出：`self` 和 `pane` 为输入；返回字节流接收端，订阅前的输出不会回放。
     pub fn output(&self, pane: &str) -> UnboundedReceiver<Vec<u8>> {
         let (tx, rx) = mpsc::unbounded_channel();
         if !self.shared.closed.load(Ordering::SeqCst) {
@@ -291,10 +313,16 @@ impl TmuxControl {
         rx
     }
 
+    /// 判断控制连接是否已关闭。
+    ///
+    /// 参数/输出：`self` 为输入；返回关闭状态。
     pub fn is_closed(&self) -> bool {
         self.shared.closed.load(Ordering::SeqCst)
     }
 
+    /// 停止子进程和读写线程，并释放 askpass 临时文件。
+    ///
+    /// 参数/输出：`self` 为输入输出，会清理全部连接资源；成功时无返回值。
     pub async fn close(&self) -> Result<()> {
         self.shared.closed.store(true, Ordering::SeqCst);
         drop(lock(&self.writer).take());

@@ -8,30 +8,48 @@ use std::fmt::Write as _;
 use super::{TmuxHostConfig, TmuxSocket};
 use crate::{Error, Result};
 
+/// `list-windows -F` 使用的字段格式。
 pub const LIST_WINDOWS_FORMAT: &str =
     "#{window_id}|#{window_name}|#{window_width}|#{window_height}|#{window_layout}|#{window_active}";
+/// `list-panes -F` 使用的字段格式。
 pub const LIST_PANES_FORMAT: &str =
     "#{pane_id}|#{pane_width}|#{pane_height}|#{pane_left}|#{pane_top}";
 
+/// 解析后的一行 tmux window 信息。
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowLine {
+    /// tmux window 句柄。
     pub handle: String,
+    /// window 名称。
     pub name: String,
+    /// window 列数。
     pub cols: u16,
+    /// window 行数。
     pub rows: u16,
+    /// tmux 布局字符串。
     pub layout: String,
+    /// 是否为当前活动 window。
     pub active: bool,
 }
 
+/// 解析后的一行 tmux pane 信息。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaneLine {
+    /// tmux pane 句柄。
     pub handle: String,
+    /// pane 列数。
     pub cols: u16,
+    /// pane 行数。
     pub rows: u16,
+    /// pane 在 window 中的左偏移。
     pub x: u16,
+    /// pane 在 window 中的上偏移。
     pub y: u16,
 }
 
+/// 解析 `list-windows -F` 输出的一行。
+///
+/// 参数/输出：`line` 为输入；格式合法时返回 [`WindowLine`]，否则返回 `None`。
 pub fn parse_window_line(line: &str) -> Option<WindowLine> {
     let fields: Vec<&str> = line.split('|').collect();
     if fields.len() != 6 {
@@ -51,6 +69,9 @@ pub fn parse_window_line(line: &str) -> Option<WindowLine> {
     })
 }
 
+/// 解析 `list-panes -F` 输出的一行。
+///
+/// 参数/输出：`line` 为输入；格式合法时返回 [`PaneLine`]，否则返回 `None`。
 pub fn parse_pane_line(line: &str) -> Option<PaneLine> {
     let fields: Vec<&str> = line.split('|').collect();
     if fields.len() != 5 {
@@ -70,6 +91,8 @@ pub fn parse_pane_line(line: &str) -> Option<PaneLine> {
 }
 
 /// 为 tmux 自身的命令解析器给单个参数加引号（控制通道上没有 shell）。
+///
+/// 参数/输出：`text` 为输入；返回可直接拼入 tmux 命令的单引号字符串。
 pub fn quote_arg(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('\'');
@@ -86,6 +109,9 @@ pub fn quote_arg(text: &str) -> String {
 
 /// 把 `payload` 逐字投递给 pane `handle`：无换行走 `-l -- '...'`，有换行走
 /// `-H <hex>`。NUL 无线路表示，拒绝。
+///
+/// 参数/输出：`handle` 和 `payload` 为输入；返回 tmux `send-keys` 命令，NUL
+/// 输入返回错误。
 pub fn send_keys_literal(handle: &str, payload: &str) -> Result<String> {
     if payload.contains('\0') {
         return Err(Error::Invalid(
@@ -105,6 +131,9 @@ pub fn send_keys_literal(handle: &str, payload: &str) -> Result<String> {
     ))
 }
 
+/// 根据宿主机类型构造启动 tmux 所需的程序前缀。
+///
+/// 参数/输出：`host` 为输入；返回本地、SSH 或 WSL 的命令参数前缀。
 pub fn host_prefix(host: &TmuxHostConfig) -> Vec<String> {
     match host {
         TmuxHostConfig::Local => Vec::new(),
@@ -132,6 +161,9 @@ pub fn host_prefix(host: &TmuxHostConfig) -> Vec<String> {
     }
 }
 
+/// 构造列出 session 内 window 的 tmux 控制命令。
+///
+/// 参数/输出：`session` 为输入；返回完整命令字符串。
 pub fn list_windows_command(session: &str) -> String {
     format!(
         "list-windows -t {} -F {}",
@@ -140,6 +172,9 @@ pub fn list_windows_command(session: &str) -> String {
     )
 }
 
+/// 构造列出指定 window 内 pane 的 tmux 控制命令。
+///
+/// 参数/输出：`window_handle` 为输入；返回完整命令字符串。
 pub fn list_panes_command(window_handle: &str) -> String {
     format!(
         "list-panes -t {} -F {}",
@@ -148,10 +183,16 @@ pub fn list_panes_command(window_handle: &str) -> String {
     )
 }
 
+/// 构造调整单个 tmux pane 尺寸的命令。
+///
+/// 参数/输出：`handle`、`cols` 和 `rows` 为输入；返回完整命令字符串。
 pub fn resize_pane_command(handle: &str, cols: u16, rows: u16) -> String {
     format!("resize-pane -t {handle} -x {cols} -y {rows}")
 }
 
+/// 把 socket 选择转换为 tmux 命令行参数。
+///
+/// 参数/输出：`socket` 为输入；返回空参数、`-L <name>` 或 `-S <path>`。
 pub fn socket_args(socket: &TmuxSocket) -> Vec<String> {
     match socket {
         TmuxSocket::Default => Vec::new(),

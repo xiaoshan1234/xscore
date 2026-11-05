@@ -4,6 +4,9 @@ use crate::ui::app::App;
 use crate::ui::render::Output;
 use crate::ui::window_group::{GroupKind, WindowGroup};
 
+/// 列出所有 window group。
+///
+/// 参数/输出：`app` 为输入；返回 group 表格文本。
 pub fn list(app: &App) -> Output {
     let mut out = Output::new();
     out.line(format!(

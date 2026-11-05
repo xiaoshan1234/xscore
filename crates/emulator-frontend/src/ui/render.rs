@@ -20,25 +20,39 @@ pub struct Output {
 }
 
 impl Output {
+    /// 创建空文本输出。
+    ///
+    /// 参数/输出：无输入；返回空缓冲。
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// 追加一行文本并补换行。
+    ///
+    /// 参数/输出：`self` 为输入输出；`value` 为输入文本；不返回值。
     pub fn line(&mut self, value: impl AsRef<str>) {
         self.text.push_str(value.as_ref());
         self.text.push('\n');
     }
 
+    /// 原样追加文本，不自动补换行。
+    ///
+    /// 参数/输出：`self` 为输入输出；`value` 为输入文本；不返回值。
     pub fn push(&mut self, value: impl AsRef<str>) {
         self.text.push_str(value.as_ref());
     }
 
+    /// 取出缓冲中的完整文本。
+    ///
+    /// 参数/输出：`self` 为输入并消耗；返回文本字符串。
     pub fn into_string(self) -> String {
         self.text
     }
 }
 
 /// 把网格快照渲染为文本；先等待极短的静默窗口，让字节泵赶上。
+///
+/// 参数/输出：`term` 为输入；异步等待后返回以换行结尾的快照文本。
 pub async fn snapshot_text(term: &Mutex<VtTerm>) -> String {
     tokio::time::sleep(Duration::from_millis(60)).await;
     let mut text = term.lock().await.snapshot();
@@ -49,6 +63,8 @@ pub async fn snapshot_text(term: &Mutex<VtTerm>) -> String {
 }
 
 /// 渲染 pane 列表表格。
+///
+/// 参数/输出：`app` 为输入；异步返回 pane 表格文本。
 pub async fn pane_table(app: &App) -> Output {
     let mut out = Output::new();
     out.line(format!(
@@ -85,6 +101,8 @@ pub async fn pane_table(app: &App) -> Output {
 }
 
 /// 渲染指定 window 的布局。
+///
+/// 参数/输出：`app` 和 `spec` 为输入；成功时返回文本，非法 window ID 返回错误。
 pub fn window_layout_text(app: &App, spec: &str) -> Result<Output> {
     let window = parse_window_id(spec)?;
     let mut panes: Vec<PaneId> = app
@@ -133,6 +151,8 @@ pub fn window_layout_text(app: &App, spec: &str) -> Result<Output> {
 }
 
 /// 渲染布局树文本。
+///
+/// 参数/输出：`app` 为输入；返回布局树和焦点文本。
 pub fn layout_text(app: &App) -> Output {
     let mut out = Output::new();
     out.line(app.layout.render());
@@ -143,6 +163,8 @@ pub fn layout_text(app: &App) -> Output {
 }
 
 /// 渲染 daemon 状态摘要。
+///
+/// 参数/输出：`app` 为输入；返回 pane 与 tmux session 摘要。
 pub fn status_text(app: &App) -> Output {
     let mut out = Output::new();
     out.line(format!("daemon: {} pane(s)", app.panes.len()));

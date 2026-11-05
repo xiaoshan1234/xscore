@@ -13,6 +13,9 @@ use crate::ui::app::App;
 use crate::ui::commands::dispatch;
 use crate::ui::render::status_text;
 
+/// 启动 daemon 并处理 IPC 请求，直到收到停止请求。
+///
+/// 参数/输出：无输入；正常停止时无返回值，绑定或运行失败时返回错误。
 pub async fn run() -> Result<()> {
     let port = ipc::port();
     if ipc::probe().await {

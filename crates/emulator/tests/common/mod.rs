@@ -5,16 +5,25 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Instant};
 
+/// 集成测试从根目录 `test.config` 读取的连接参数。
 #[derive(Clone)]
 pub struct TestConfig {
+    /// 完整 SSH 目标，格式为 `user@host`。
     pub ssh_destination: String,
+    /// SSH 用户名。
     pub ssh_user: String,
+    /// SSH 主机名或 IP。
     pub ssh_host: String,
+    /// SSH TCP 端口。
     pub ssh_port: u16,
+    /// SSH 登录密码。
     pub ssh_password: String,
 }
 
 impl TestConfig {
+    /// 读取并校验工作区根目录的 `test.config`。
+    ///
+    /// 参数/输出：无输入；成功返回配置，文件或字段非法时 panic。
     pub fn load() -> Self {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test.config");
         let contents = fs::read_to_string(&path).unwrap_or_else(|error| {
@@ -102,6 +111,9 @@ impl TestConfig {
     }
 }
 
+/// 从广播通道读取输出直到出现标记或超时。
+///
+/// 参数/输出：`receiver` 为输入输出；`needle` 和 `limit` 为输入；返回已读取字节。
 pub async fn receive_until(
     receiver: &mut broadcast::Receiver<Vec<u8>>,
     needle: &[u8],

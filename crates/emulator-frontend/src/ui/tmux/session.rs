@@ -13,16 +13,28 @@ use crate::ui::app::App;
 use crate::ui::layout::{PaneRect, TmuxContainer};
 use crate::ui::tmux::events::{classify_tmux_event, diff_tmux_structure, StructureAction};
 
+/// 本地 tmux pane 对应的元数据。
 pub struct TmuxMeta {
+    /// 所属 session 名。
     pub session: String,
+    /// 所属 window 句柄。
     pub window: String,
+    /// tmux pane 句柄。
     pub handle: String,
+    /// window 是否为活动 window。
     pub window_active: bool,
+    /// 本地几何矩形。
     pub rect: PaneRect,
+    /// window 列数。
     pub window_cols: u16,
+    /// window 行数。
     pub window_rows: u16,
 }
 
+/// 重新枚举并收敛一个 tmux session 的本地 pane 结构。
+///
+/// 参数/输出：`app` 为输入输出，会被就地更新；`session` 和 `control` 为输入；
+/// 返回 `(删除数量, 新增数量)`。
 pub async fn reconcile_session(
     app: &mut App,
     session: &str,
@@ -104,6 +116,9 @@ pub async fn reconcile_session(
     Ok((gone.len(), new_panes.len()))
 }
 
+/// 用当前 active tmux window 重建本地镜像布局。
+///
+/// 参数/输出：`app` 为输入输出；`session` 为输入；不返回值。
 pub fn rebuild_active_mirror(app: &mut App, session: &str) {
     let windows: HashSet<String> = app
         .tmux
@@ -142,6 +157,10 @@ pub fn rebuild_active_mirror(app: &mut App, session: &str) {
     app.layout.add_mirror(container);
 }
 
+/// 将一个 tmux 事件应用到应用状态。
+///
+/// 参数/输出：`app` 为共享输入输出；`session`、`control`、`event` 为输入；
+/// 返回是否应结束事件循环。
 pub async fn handle_event(
     app: &Arc<Mutex<App>>,
     session: &str,

@@ -7,10 +7,16 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+/// 本地 PTY 域。
+///
+/// 每次创建 pane 都会启动一个独立子进程，并维护其输入输出通道。
 #[derive(Debug, Default)]
 pub struct LocalDomain;
 
 impl LocalDomain {
+    /// 创建一个无内部状态的本地域。
+    ///
+    /// 参数/输出：无输入；返回新的 [`LocalDomain`]。
     pub fn new() -> Self {
         Self
     }
@@ -62,6 +68,9 @@ impl Domain for LocalDomain {
     }
 }
 
+/// 本地 PTY 窗格句柄。
+///
+/// 实现 [`PaneHandle`] 的本地字节读写、尺寸调整和进程关闭。
 pub struct LocalPane {
     id: PaneId,
     pty: Arc<LocalPty>,

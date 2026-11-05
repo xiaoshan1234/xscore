@@ -17,6 +17,8 @@ use crate::ui::app::App;
 use crate::ui::render::{self, Output};
 
 /// 分发一条命令，返回输出文本。
+///
+/// 参数/输出：`app` 为共享输入输出状态；`cmd` 为输入命令；返回命令输出。
 pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
     let mut guard = app.lock().await;
     let out = match cmd {
@@ -44,6 +46,9 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
     Ok(out)
 }
 
+/// 构造基础命令帮助文本。
+///
+/// 参数/输出：无输入；返回可直接输出给用户的文本。
 pub fn help() -> Output {
     let mut out = Output::new();
     out.line("commands:");

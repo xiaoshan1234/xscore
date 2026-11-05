@@ -9,12 +9,16 @@ use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use super::cmd::{Cmd, Command, TmxAttachArgs};
 
 /// 解析一段命令行参数（argv，不含程序名）。
+///
+/// 参数/输出：`args` 为输入；成功返回 [`Cmd`]，解析失败返回 clap 错误。
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::Error> {
     Command::try_parse_from(std::iter::once("xs".to_string()).chain(args))
         .map(|command| command.command)
 }
 
 /// 无参数时打印 clap 生成的帮助（替代已移除的交互式 REPL）。
+///
+/// 参数/输出：无输入；帮助写 stdout，I/O 失败时返回错误。
 pub fn print_help() -> std::io::Result<()> {
     use clap::CommandFactory;
 
@@ -25,6 +29,8 @@ pub fn print_help() -> std::io::Result<()> {
 }
 
 /// 解析 `user@host[:port]`。
+///
+/// 参数/输出：`target` 为输入；返回 `(user, host, port)`。
 pub fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
     let (user, rest) = target
         .split_once('@')
@@ -44,6 +50,8 @@ pub fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
 
 /// 把 clap 的 tmux 参数转换成 socket / host / 是否需要密码。
 /// 解析 `tmux://<socket>/<session>`：socket 可为空（默认）、名字（`-L`）或路径（`-S`）。
+///
+/// 参数/输出：`url` 为输入；返回 `(socket, session)`。
 pub fn parse_tmux_url(url: &str) -> Result<(TmuxSocket, String)> {
     let rest = url
         .strip_prefix("tmux://")
@@ -68,6 +76,8 @@ pub fn parse_tmux_url(url: &str) -> Result<(TmuxSocket, String)> {
 }
 
 /// 把 `tmx attach` 的参数转换成 socket / host / session。
+///
+/// 参数/输出：`args` 为输入；返回 `(socket, host_config, session)`。
 pub fn build_tmx_config(args: &TmxAttachArgs) -> Result<(TmuxSocket, TmuxHostConfig, String)> {
     let (socket, session) = parse_tmux_url(&args.url)?;
     let host = match (&args.ssh, &args.wsl) {
@@ -113,28 +123,47 @@ pub fn build_tmx_config(args: &TmxAttachArgs) -> Result<(TmuxSocket, TmuxHostCon
 /// 对话创建规格：`tml add --url` 的解析结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationSpec {
+    /// 本地 shell 对话。
     Shell {
+        /// 要启动的程序。
         program: String,
+        /// 程序参数。
         args: Vec<String>,
+        /// 工作目录。
         cwd: Option<String>,
+        /// 初始列数。
         cols: u16,
+        /// 初始行数。
         rows: u16,
     },
+    /// SSH shell 对话。
     Ssh {
+        /// `user@host[:port]` 目标。
         target: String,
+        /// 可选私钥路径。
         identity: Option<String>,
+        /// 可选密码。
         password: Option<String>,
+        /// 初始列数。
         cols: u16,
+        /// 初始行数。
         rows: u16,
     },
+    /// WSL shell 对话。
     Wsl {
+        /// 传给 `wsl.exe` 的参数。
         args: Vec<String>,
+        /// 初始列数。
         cols: u16,
+        /// 初始行数。
         rows: u16,
     },
 }
 
 impl ConversationSpec {
+    /// 返回对话 URL 的 scheme 名称。
+    ///
+    /// 参数/输出：`self` 为输入；返回静态 scheme 字符串。
     pub fn scheme(&self) -> &'static str {
         match self {
             ConversationSpec::Shell { .. } => "shell",
@@ -143,6 +172,9 @@ impl ConversationSpec {
         }
     }
 
+    /// 返回对话的初始列数。
+    ///
+    /// 参数/输出：`self` 为输入；返回列数。
     pub fn cols(&self) -> u16 {
         match self {
             ConversationSpec::Shell { cols, .. }
@@ -151,6 +183,9 @@ impl ConversationSpec {
         }
     }
 
+    /// 返回对话的初始行数。
+    ///
+    /// 参数/输出：`self` 为输入；返回行数。
     pub fn rows(&self) -> u16 {
         match self {
             ConversationSpec::Shell { rows, .. }
@@ -161,6 +196,8 @@ impl ConversationSpec {
 }
 
 /// 解析 `scheme://path?key=value&...` 形式的对话 URL。
+///
+/// 参数/输出：`url` 为输入；返回解析后的 [`ConversationSpec`]。
 pub fn parse_conversation_url(url: &str) -> Result<ConversationSpec> {
     let (scheme, rest) = url
         .split_once("://")

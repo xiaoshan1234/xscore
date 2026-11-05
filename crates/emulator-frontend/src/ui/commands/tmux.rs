@@ -14,6 +14,10 @@ use crate::ui::layout::{PaneRect, TmuxContainer};
 use crate::ui::render::Output;
 use crate::ui::tmux::session::{handle_event, reconcile_session, TmuxMeta};
 
+/// 接入 tmux session，注册 pane 并启动结构事件监听。
+///
+/// 参数/输出：`app` 为输入输出；`host`、`socket`、`session`、`app_arc` 为输入；
+/// 返回 attach 摘要。
 pub(crate) async fn attach_session(
     app: &mut App,
     host: &TmuxHostConfig,
@@ -102,6 +106,9 @@ pub(crate) async fn attach_session(
     Ok(out)
 }
 
+/// 将指定 tmux group 与服务端结构双向同步。
+///
+/// 参数/输出：`app` 为输入输出；`group_id` 为输入；返回增删数量摘要。
 pub async fn sync(app: &mut App, group_id: String) -> Result<Output> {
     let group = app
         .resolve_group(&group_id)
