@@ -13,11 +13,16 @@ use cli::Cmd;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 作为 SSH_ASKPASS 辅助程序被 ssh 调用时，输出密码并退出。
-    if std::env::var("XSCORE_ASKPASS").is_ok() {
-        if let Ok(password) = std::env::var("XSCORE_SSH_PASSWORD") {
-            println!("{password}");
+    // 作为 SSH_ASKPASS 辅助程序被 ssh 调用时，从受限临时文件读取密码。
+    if let Some(path) = std::env::var_os("XSCORE_ASKPASS_FILE") {
+        let password = std::fs::read(path)?;
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        stdout.write_all(&password)?;
+        if !password.ends_with(b"\n") {
+            stdout.write_all(b"\n")?;
         }
+        stdout.flush()?;
         return Ok(());
     }
     if let Err(error) = logging::init() {

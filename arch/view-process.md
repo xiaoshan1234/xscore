@@ -50,7 +50,7 @@ reader 线程 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N �
 | 同步点 | 保护对象 |
 |---|---|
 | `TmuxControl.shared` | waiter 队列、事件订阅、`%N` 输出订阅、closed |
-| `SshConnection.channel` | russh channel（读用超时轮询） |
+| `SshConnection.commands` | 单 channel 任务串行处理 read/write/resize/close |
 | `App.panes` | pane 句柄与 TerminalCore |
 | `App.layout` | 本地布局树与焦点 |
 

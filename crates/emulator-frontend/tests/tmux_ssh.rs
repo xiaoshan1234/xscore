@@ -10,9 +10,11 @@
 use emulator::domain::TmuxDomain;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tempfile::NamedTempFile;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -94,15 +96,12 @@ impl TestConfig {
     }
 }
 
-fn ssh_env(cmd: &mut Command, password: &str, askpass: &str) {
-    cmd.env("SSH_ASKPASS", askpass)
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("XSCORE_SSH_PASSWORD", password)
-        .env("XSCORE_ASKPASS", "1")
-        .env("DISPLAY", "localhost:0");
-}
-
 fn ssh(host: &str, port: u16, password: &str, askpass: &str, args: &[&str]) -> String {
+    let mut password_file = NamedTempFile::new().expect("create askpass file");
+    password_file
+        .write_all(password.as_bytes())
+        .and_then(|()| password_file.flush())
+        .expect("write askpass file");
     let known_hosts = if cfg!(windows) { "NUL" } else { "/dev/null" };
     let mut cmd = Command::new("ssh");
     cmd.arg("-o")
@@ -113,7 +112,10 @@ fn ssh(host: &str, port: u16, password: &str, askpass: &str, args: &[&str]) -> S
         .arg(port.to_string())
         .arg(host);
     cmd.args(args);
-    ssh_env(&mut cmd, password, askpass);
+    cmd.env("SSH_ASKPASS", askpass)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("XSCORE_ASKPASS_FILE", password_file.path())
+        .env("DISPLAY", "localhost:0");
     let output = cmd.output().expect("run ssh");
     String::from_utf8_lossy(&output.stdout).into_owned()
 }

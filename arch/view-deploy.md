@@ -32,7 +32,8 @@ emulator-frontend → ConPTY → wsl.exe --exec tmux -C attach -t <session>
 emulator-frontend → 管道 → ssh -o StrictHostKeyChecking=accept-new <dest> tmux -C attach -t <session>
 ```
 
-密码由 `SSH_ASKPASS` 交给系统 ssh；密钥则复用 `~/.ssh/config` 与 agent。
+密码由 `SSH_ASKPASS` 交给系统 ssh，helper 从连接级临时文件读取；密钥则复用
+`~/.ssh/config` 与 agent。
 
 ## 3. SSH 认证
 
@@ -45,7 +46,7 @@ emulator-frontend → 管道 → ssh -o StrictHostKeyChecking=accept-new <dest> 
 |---|---|
 | `XSCORE_LOG` | 日志文件路径（默认 `emulator.log`） |
 | `RUST_LOG` | 日志级别 |
-| `XSCORE_SSH_PASSWORD` / `PASSWD` | SSH 密码（优先于交互提示） |
+| `XSCORE_ASKPASS_FILE` | 内部：askpass helper 读取一次性密码文件 |
 
 ## 5. 平台限制
 

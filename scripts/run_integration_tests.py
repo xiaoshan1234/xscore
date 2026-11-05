@@ -229,8 +229,6 @@ def main() -> int:
         config = {"ssh_password": ""}
 
     env = os.environ.copy()
-    for key in ("XSCORE_SSH_HOST", "XSCORE_SSH_PASSWORD", "PASSWD"):
-        env.pop(key, None)
     env["CARGO_TERM_COLOR"] = "never"
 
     if not suites:

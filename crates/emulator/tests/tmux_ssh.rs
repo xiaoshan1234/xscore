@@ -6,10 +6,12 @@ use common::{receive_until, TestConfig};
 use emulator::domain::{PaneHandle, TmuxDomain};
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tempfile::NamedTempFile;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -54,6 +56,9 @@ impl RemoteSession {
     }
 
     fn ssh(&self, args: &[&str]) -> std::io::Result<Output> {
+        let mut password_file = NamedTempFile::new()?;
+        password_file.write_all(self.config.ssh_password.as_bytes())?;
+        password_file.flush()?;
         let mut command = Command::new("ssh");
         command
             .args(ssh_options(&self.config))
@@ -61,8 +66,7 @@ impl RemoteSession {
             .args(args)
             .env("SSH_ASKPASS", &self.askpass)
             .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("XSCORE_SSH_PASSWORD", &self.config.ssh_password)
-            .env("XSCORE_ASKPASS", "1")
+            .env("XSCORE_ASKPASS_FILE", password_file.path())
             .env("DISPLAY", "localhost:0");
         command.output()
     }

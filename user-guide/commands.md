@@ -71,7 +71,8 @@ URL scheme：
 
 - `cols` / `rows` 缺省 80x24；`args` 缺省为空；`cwd` 缺省为当前目录。
 - `ssh` 认证：优先用 URL 里的 `password`；其次用 `identity` 密钥；两者都没有时在客户端边缘提示密码。
-- 注意：`password` 写在 URL 里会出现在进程参数和 shell 历史中，生产环境建议改用 `XSCORE_SSH_PASSWORD` / `PASSWD` 环境变量或交互提示。
+- 注意：`password` 写在 URL 里会出现在进程参数和 shell 历史中，生产环境建议使用
+  交互提示。
 
 示例：
 
@@ -233,8 +234,7 @@ xs daemon stop     # 让 daemon 退出
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
-| `XSCORE_SSH_PASSWORD` / `PASSWD` | SSH 密码（优先于交互提示） |
-| `XSCORE_ASKPASS` | 内部：前端二进制作为 askpass 时输出密码 |
+| `XSCORE_ASKPASS_FILE` | 内部：askpass helper 读取一次性密码文件 |
 
 ## 平台限制
 

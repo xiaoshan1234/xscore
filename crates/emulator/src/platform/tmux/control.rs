@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 
 use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
 use std::process::{Command, Stdio};
+use tempfile::NamedTempFile;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 
@@ -119,6 +120,7 @@ pub struct TmuxControl {
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<UnboundedSender<String>>>,
     reader: Mutex<Option<JoinHandle<()>>>,
+    askpass_file: Mutex<Option<NamedTempFile>>,
     shared: Arc<Shared>,
 }
 
@@ -144,6 +146,7 @@ impl TmuxControl {
             .split_first()
             .ok_or_else(|| Error::Transport("empty tmux command line".into()))?;
 
+        let mut askpass_file = None;
         let (child, master, stdout, stdin): SpawnIo = if use_pty {
             let pair = native_pty_system()
                 .openpty(PtySize {
@@ -179,10 +182,16 @@ impl TmuxControl {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit());
             if let (Some(password), Some(askpass)) = (password, askpass) {
+                let mut file = NamedTempFile::new()
+                    .map_err(|e| Error::Transport(format!("create askpass file: {e}")))?;
+                file.write_all(password.as_bytes())
+                    .and_then(|()| file.flush())
+                    .map_err(|e| Error::Transport(format!("write askpass file: {e}")))?;
                 command.env("SSH_ASKPASS", askpass);
                 command.env("SSH_ASKPASS_REQUIRE", "force");
-                command.env("XSCORE_SSH_PASSWORD", password);
-                command.env("XSCORE_ASKPASS", "1");
+                command.env("XSCORE_ASKPASS_FILE", file.path());
+                command.env("DISPLAY", "localhost:0");
+                askpass_file = Some(file);
             }
             let mut child = command
                 .spawn()
@@ -222,6 +231,7 @@ impl TmuxControl {
             master: Mutex::new(master),
             writer: Mutex::new(Some(write_tx)),
             reader: Mutex::new(Some(reader)),
+            askpass_file: Mutex::new(askpass_file),
             shared,
         })
     }
@@ -295,6 +305,7 @@ impl TmuxControl {
         if let Some(reader) = lock(&self.reader).take() {
             let _ = reader.join();
         }
+        drop(lock(&self.askpass_file).take());
         self.shared.shutdown();
         Ok(())
     }
@@ -306,6 +317,7 @@ impl Drop for TmuxControl {
         if let Some(mut child) = lock(&self.child).take() {
             child.kill();
         }
+        drop(lock(&self.askpass_file).take());
         drop(lock(&self.master).take());
     }
 }

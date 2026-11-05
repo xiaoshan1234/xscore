@@ -82,7 +82,7 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
   可打印的 `|` 才能原样输出。
 - **tmux 控制客户端两种 spawn**：
   - SSH：普通管道进程 + `SSH_ASKPASS`（前端二进制自己兼任 askpass，见
-    `XSCORE_ASKPASS`）。
+    `XSCORE_ASKPASS_FILE`；密码只存在于连接生命周期内的受限临时文件）。
   - Local / WSL：portable-pty 的 ConPTY（`wsl.exe` 需要独立控制台，避免抢宿主输入）。
 - **Windows ConPTY 输入回车用 `\r\n`**，Unix 用 `\n`。本地 shell 的 `write` 按
   `PaneKind::Local` 区分；SSH/tmux 仍是 `\n`（Unix 语义）。
@@ -106,8 +106,7 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
-| `XSCORE_SSH_PASSWORD` / `PASSWD` | SSH 密码（优先于交互提示） |
-| `XSCORE_ASKPASS` | 内部：前端二进制作为 askpass 时输出密码 |
+| `XSCORE_ASKPASS_FILE` | 内部：askpass helper 读取一次性密码文件 |
 
 ## 平台限制
 
