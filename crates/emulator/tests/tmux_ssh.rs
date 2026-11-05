@@ -2,16 +2,12 @@
 
 mod common;
 
-use common::{receive_until, TestConfig};
+use common::{receive_until, ssh_exec, TestConfig};
 use emulator::domain::{PaneHandle, TmuxDomain};
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use emulator::platform::Size;
-use std::io::Write as _;
-use std::path::PathBuf;
-use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tempfile::NamedTempFile;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -19,114 +15,50 @@ const TMUX_OK: &[u8] = b"XSCORE_TMUX_DOMAIN_OK";
 
 struct RemoteSession {
     config: TestConfig,
-    askpass: PathBuf,
     name: String,
 }
 
 impl RemoteSession {
-    fn create(config: TestConfig, askpass: PathBuf) -> Self {
+    async fn create(config: TestConfig) -> Self {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("xscore-it-{}-{id}", std::process::id());
-        let session = Self {
-            config,
-            askpass,
-            name,
-        };
-
-        let output = session
-            .ssh(&[
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                &session.name,
-                "-x",
-                "100",
-                "-y",
-                "30",
-            ])
-            .expect("run ssh to create tmux session");
-        assert!(
-            output.status.success(),
-            "failed to create tmux session: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
+        let session = Self { config, name };
+        ssh_exec(
+            &session.config,
+            &format!("tmux new-session -d -s {} -x 100 -y 30", session.name),
+        )
+        .await
+        .expect("create tmux session over russh");
         session
-    }
-
-    fn ssh(&self, args: &[&str]) -> std::io::Result<Output> {
-        let mut password_file = NamedTempFile::new()?;
-        password_file.write_all(self.config.ssh_password.as_bytes())?;
-        password_file.flush()?;
-        let mut command = Command::new("ssh");
-        command
-            .args(ssh_options(&self.config))
-            .arg(&self.config.ssh_destination)
-            .args(args)
-            .env("SSH_ASKPASS", &self.askpass)
-            .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("XSCORE_ASKPASS_FILE", password_file.path())
-            .env("DISPLAY", "localhost:0");
-        command.output()
     }
 }
 
 impl Drop for RemoteSession {
     fn drop(&mut self) {
-        let _ = self.ssh(&["tmux", "kill-session", "-t", &self.name]);
+        let config = self.config.clone();
+        let command = format!("tmux kill-session -t {}", self.name);
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let _ = runtime.block_on(ssh_exec(&config, &command));
+        })
+        .join();
     }
-}
-
-fn ssh_options(config: &TestConfig) -> Vec<String> {
-    let known_hosts = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    vec![
-        "-o".to_string(),
-        "StrictHostKeyChecking=accept-new".to_string(),
-        "-o".to_string(),
-        format!("UserKnownHostsFile={known_hosts}"),
-        "-p".to_string(),
-        config.ssh_port.to_string(),
-    ]
-}
-
-fn askpass_binary() -> PathBuf {
-    if let Some(path) = std::env::var_os("XSCORE_TEST_ASKPASS") {
-        return PathBuf::from(path);
-    }
-
-    let executable = std::env::current_exe().expect("resolve integration test executable");
-    let target_dir = executable
-        .parent()
-        .and_then(|path| path.parent())
-        .expect("resolve target directory");
-    let candidate = target_dir.join(if cfg!(windows) { "xs.exe" } else { "xs" });
-    assert!(
-        candidate.is_file(),
-        "xs askpass helper not found at {}; run scripts/run_integration_tests.py",
-        candidate.display()
-    );
-    candidate
 }
 
 #[tokio::test]
-#[ignore = "requires test.config and an xs askpass helper"]
+#[ignore = "requires test.config with a reachable SSH host"]
 async fn tmux_ssh_io_resize_split_kill() {
     let config = TestConfig::load();
-    let askpass = askpass_binary();
-    let session = RemoteSession::create(config.clone(), askpass.clone());
+    let session = RemoteSession::create(config.clone()).await;
 
     let host = TmuxHostConfig::Ssh {
-        user: config
-            .ssh_destination
-            .split_once('@')
-            .map(|(user, _)| user.to_string())
-            .expect("ssh_destination must be user@host"),
-        host: config
-            .ssh_destination
-            .split_once('@')
-            .map(|(_, host)| host.to_string())
-            .expect("ssh_destination must be user@host"),
+        user: config.ssh_user.clone(),
+        host: config.ssh_host.clone(),
         port: config.ssh_port,
         identity: None,
         password: Some(config.ssh_password.clone()),

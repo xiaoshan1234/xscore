@@ -65,18 +65,6 @@ def parse_config(path: Path) -> dict[str, str]:
     return values
 
 
-def target_directory() -> Path:
-    output = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
-    return Path(json.loads(output.stdout)["target_directory"])
-
-
 def redact(text: str, secret: str) -> str:
     return text.replace(secret, "***") if secret else text
 
@@ -232,44 +220,29 @@ def main() -> int:
     env["CARGO_TERM_COLOR"] = "never"
 
     if not suites:
-        target = target_directory()
-        askpass = target / "debug" / ("xs.exe" if os.name == "nt" else "xs")
-        build = run_suite(
-            Suite("build", ["cargo", "build", "-p", "emulator-frontend"]),
-            env,
-            logs_dir,
-            args.timeout,
-            config["ssh_password"],
-        )
-        suites.append(build)
-
-        if build["status"] == "passed":
-            env["XSCORE_TEST_ASKPASS"] = str(askpass)
-            planned = [
-                Suite(
-                    "local-domain",
-                    ["cargo", "test", "-p", "emulator", "--test", "local_domain", "--", "--nocapture"],
-                ),
-                Suite(
-                    "ssh-shell",
-                    ["cargo", "test", "-p", "emulator", "--test", "ssh_shell", "--", "--ignored", "--nocapture"],
-                ),
-                Suite(
-                    "tmux-emulator",
-                    ["cargo", "test", "-p", "emulator", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
-                ),
-                Suite(
-                    "tmux-frontend",
-                    ["cargo", "test", "-p", "emulator-frontend", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
-                ),
-            ]
-            for suite in planned:
-                result = run_suite(
-                    suite, env, logs_dir, args.timeout, config["ssh_password"]
-                )
-                suites.append(result)
-                if result["status"] != "passed":
-                    status = "failed"
+        planned = [
+            Suite(
+                "local-domain",
+                ["cargo", "test", "-p", "emulator", "--test", "local_domain", "--", "--nocapture"],
+            ),
+            Suite(
+                "ssh-shell",
+                ["cargo", "test", "-p", "emulator", "--test", "ssh_shell", "--", "--ignored", "--nocapture"],
+            ),
+            Suite(
+                "tmux-emulator",
+                ["cargo", "test", "-p", "emulator", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
+            ),
+            Suite(
+                "tmux-frontend",
+                ["cargo", "test", "-p", "emulator-frontend", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
+            ),
+        ]
+        for suite in planned:
+            result = run_suite(suite, env, logs_dir, args.timeout, config["ssh_password"])
+            suites.append(result)
+            if result["status"] != "passed":
+                status = "failed"
 
     if any(suite["status"] != "passed" for suite in suites):
         status = "failed"

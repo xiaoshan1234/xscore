@@ -46,7 +46,6 @@ emulator-frontend → russh channel → exec tmux -C attach -t <session>
 |---|---|
 | `XSCORE_LOG` | 日志文件路径（默认 `emulator.log`） |
 | `RUST_LOG` | 日志级别 |
-| `XSCORE_ASKPASS_FILE` | 内部兼容：被外部 SSH 作为 askpass helper 调用时读取密码文件 |
 
 ## 5. 平台限制
 

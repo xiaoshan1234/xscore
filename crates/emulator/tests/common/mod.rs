@@ -1,7 +1,11 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use russh::client::{self, Config as SshConfig, Handler};
+use russh::ChannelMsg;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Instant};
 
@@ -137,6 +141,80 @@ pub async fn receive_until(
     }
 
     output
+}
+
+#[derive(Clone, Default)]
+#[allow(dead_code)]
+struct TestSshHandler;
+
+#[async_trait]
+impl Handler for TestSshHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh_keys::key::PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+/// 通过 russh exec channel 执行一条远端命令。
+///
+/// 参数/输出：`config` 和 `command` 为输入；返回 stdout 字节，连接、认证或
+/// 非零退出状态会返回错误文本。
+#[allow(dead_code)]
+pub async fn ssh_exec(config: &TestConfig, command: &str) -> Result<Vec<u8>, String> {
+    timeout(Duration::from_secs(15), async {
+        let mut handle = client::connect(
+            Arc::new(SshConfig::default()),
+            (config.ssh_host.clone(), config.ssh_port),
+            TestSshHandler,
+        )
+        .await
+        .map_err(|error| format!("ssh connect: {error}"))?;
+        let authenticated = handle
+            .authenticate_password(&config.ssh_user, config.ssh_password.clone())
+            .await
+            .map_err(|error| format!("ssh auth: {error}"))?;
+        if !authenticated {
+            return Err("ssh authentication failed".to_string());
+        }
+
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|error| format!("ssh channel: {error}"))?;
+        channel
+            .exec(true, command.as_bytes())
+            .await
+            .map_err(|error| format!("ssh exec: {error}"))?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_status = 0;
+        let mut channel = channel;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => stdout.extend_from_slice(&data),
+                Some(ChannelMsg::ExtendedData { data, .. }) => stderr.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus {
+                    exit_status: status,
+                }) => exit_status = status,
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                Some(_) => {}
+            }
+        }
+        if exit_status != 0 {
+            return Err(format!(
+                "ssh command exited with {exit_status}: {}",
+                String::from_utf8_lossy(&stderr)
+            ));
+        }
+        Ok(stdout)
+    })
+    .await
+    .map_err(|_| "ssh command timed out".to_string())?
 }
 
 #[cfg(test)]

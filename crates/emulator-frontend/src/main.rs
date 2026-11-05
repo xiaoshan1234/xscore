@@ -1,4 +1,4 @@
-//! 前端入口：askpass 角色、日志初始化、模式路由（一次性命令 / daemon）。
+//! 前端入口：日志初始化与模式路由（一次性命令 / daemon）。
 
 mod cli;
 mod daemon;
@@ -13,18 +13,6 @@ use cli::Cmd;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 作为 SSH_ASKPASS 辅助程序被 ssh 调用时，从受限临时文件读取密码。
-    if let Some(path) = std::env::var_os("XSCORE_ASKPASS_FILE") {
-        let password = std::fs::read(path)?;
-        let stdout = std::io::stdout();
-        let mut stdout = stdout.lock();
-        stdout.write_all(&password)?;
-        if !password.ends_with(b"\n") {
-            stdout.write_all(b"\n")?;
-        }
-        stdout.flush()?;
-        return Ok(());
-    }
     if let Err(error) = logging::init() {
         eprintln!("warning: logging disabled: {error:#}");
     }

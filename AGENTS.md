@@ -39,7 +39,7 @@ ssh_password=...
 python scripts/run_integration_tests.py
 ```
 
-脚本会构建前端 askpass helper，运行全部集成测试，并在 `test-results/` 生成
+脚本会运行全部集成测试，并在 `test-results/` 生成
 Markdown、JSON、JUnit XML 和逐套件日志。
 
 ## 架构与模块
@@ -53,7 +53,7 @@ crates/emulator/            L0–L2 后端库
   term/                     L2：VT 状态机 + 网格（Grid/VtTerm）
 
 crates/emulator-frontend/   L3–L5 CLI 前端
-  src/main.rs               入口：askpass 角色、日志、模式路由（一次性 / daemon）
+  src/main.rs               入口：日志、模式路由（一次性 / daemon）
   src/cli/                  clap 命令定义（cmd）+ 参数/URL 解析（parse）+ 密码边缘解析（secrets）
   src/ui/                   应用核心（GUI 可复用）
     app.rs                  App 状态：pane 注册表、布局、window group、tmux 会话
@@ -112,7 +112,6 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
-| `XSCORE_ASKPASS_FILE` | 内部兼容：被外部 SSH 作为 askpass helper 调用时读取密码文件 |
 
 ## 平台限制
 

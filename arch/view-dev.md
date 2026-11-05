@@ -8,7 +8,7 @@
 ```text
 crates/
   emulator/              后端库（L0–L2）
-  emulator-frontend/     CLI 前端（L3–L5 模拟），含 askpass 角色
+  emulator-frontend/     CLI 前端（L3–L5 模拟）
   xscore/                前身 CLI/daemon，已过时，保留待清理
 ```
 
@@ -38,7 +38,7 @@ crates/emulator/src/
   lib.rs
 
 crates/emulator-frontend/src/
-  main.rs                 REPL、命令解析、askpass 入口、日志初始化
+  main.rs                 REPL、命令解析、日志初始化
   layout.rs               Node / TmuxContainer / Layout
 ```
 

@@ -7,17 +7,21 @@
 //! 运行：
 //!   cargo test -p emulator-frontend --test tmux_ssh -- --ignored --nocapture
 
+use async_trait::async_trait;
 use emulator::domain::TmuxDomain;
 use emulator::platform::tmux::{TmuxHostConfig, TmuxSocket};
+use russh::client::{self, Config as SshConfig, Handler};
+use russh::ChannelMsg;
 use std::fs;
-use std::io::Write as _;
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tempfile::NamedTempFile;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone)]
 struct TestConfig {
     ssh_host: String,
     ssh_password: String,
@@ -96,82 +100,131 @@ impl TestConfig {
     }
 }
 
-fn ssh(host: &str, port: u16, password: &str, askpass: &str, args: &[&str]) -> String {
-    let mut password_file = NamedTempFile::new().expect("create askpass file");
-    password_file
-        .write_all(password.as_bytes())
-        .and_then(|()| password_file.flush())
-        .expect("write askpass file");
-    let known_hosts = if cfg!(windows) { "NUL" } else { "/dev/null" };
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-o")
-        .arg("StrictHostKeyChecking=accept-new")
-        .arg("-o")
-        .arg(format!("UserKnownHostsFile={known_hosts}"))
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(host);
-    cmd.args(args);
-    cmd.env("SSH_ASKPASS", askpass)
-        .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("XSCORE_ASKPASS_FILE", password_file.path())
-        .env("DISPLAY", "localhost:0");
-    let output = cmd.output().expect("run ssh");
-    String::from_utf8_lossy(&output.stdout).into_owned()
+#[derive(Clone, Default)]
+struct TestSshHandler;
+
+#[async_trait]
+impl Handler for TestSshHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh_keys::key::PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+async fn ssh_exec(config: &TestConfig, command: &str) -> Result<(), String> {
+    let (user, host) = config
+        .ssh_host
+        .split_once('@')
+        .ok_or_else(|| "ssh_host must use user@host format".to_string())?;
+    timeout(Duration::from_secs(15), async {
+        let mut handle = client::connect(
+            Arc::new(SshConfig::default()),
+            (host.to_string(), config.ssh_port),
+            TestSshHandler,
+        )
+        .await
+        .map_err(|error| format!("ssh connect: {error}"))?;
+        let authenticated = handle
+            .authenticate_password(user, config.ssh_password.clone())
+            .await
+            .map_err(|error| format!("ssh auth: {error}"))?;
+        if !authenticated {
+            return Err("ssh authentication failed".to_string());
+        }
+
+        let mut channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|error| format!("ssh channel: {error}"))?;
+        channel
+            .exec(true, command.as_bytes())
+            .await
+            .map_err(|error| format!("ssh exec: {error}"))?;
+
+        let mut stderr = Vec::new();
+        let mut exit_status = 0;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::ExtendedData { data, .. }) => stderr.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus {
+                    exit_status: status,
+                }) => exit_status = status,
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                Some(_) => {}
+            }
+        }
+        if exit_status != 0 {
+            return Err(format!(
+                "ssh command exited with {exit_status}: {}",
+                String::from_utf8_lossy(&stderr)
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "ssh command timed out".to_string())?
+}
+
+struct RemoteSession {
+    config: TestConfig,
+    name: String,
+}
+
+impl RemoteSession {
+    async fn create(config: TestConfig) -> Self {
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("xscore-it-{}-{id}", std::process::id());
+        let session = Self { config, name };
+        ssh_exec(
+            &session.config,
+            &format!("tmux new-session -d -s {} -x 100 -y 30", session.name),
+        )
+        .await
+        .expect("create tmux session over russh");
+        session
+    }
+}
+
+impl Drop for RemoteSession {
+    fn drop(&mut self) {
+        let config = self.config.clone();
+        let command = format!("tmux kill-session -t {}", self.name);
+        let _ = std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let _ = runtime.block_on(ssh_exec(&config, &command));
+        })
+        .join();
+    }
 }
 
 #[tokio::test]
 #[ignore = "requires test.config with a reachable SSH host"]
 async fn ssh_tmux_attach_split_kill_sync() {
     let config = TestConfig::load();
-    let host = &config.ssh_host;
-    let port = config.ssh_port;
-    let password = &config.ssh_password;
-    let askpass = std::env::var("CARGO_BIN_EXE_xs")
-        .expect("Cargo should provide CARGO_BIN_EXE_xs for this integration test");
-
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let session = format!("xscore-it-{}-{n}", std::process::id());
-
-    // 清场并新建一个专用 session。
-    let _ = ssh(
-        host,
-        port,
-        password,
-        &askpass,
-        &["tmux", "kill-session", "-t", &session],
-    );
-    let _ = ssh(
-        host,
-        port,
-        password,
-        &askpass,
-        &[
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-x",
-            "100",
-            "-y",
-            "30",
-        ],
-    );
-
-    let (user, remote_host) = host
+    let session = RemoteSession::create(config.clone()).await;
+    let (user, remote_host) = config
+        .ssh_host
         .split_once('@')
         .expect("test.config ssh_host must be user@host");
     let host_config = TmuxHostConfig::Ssh {
         user: user.to_string(),
         host: remote_host.to_string(),
-        port,
+        port: config.ssh_port,
         identity: None,
-        password: Some(password.to_owned()),
+        password: Some(config.ssh_password.clone()),
     };
     let domain = TmuxDomain::new();
     let panes = domain
-        .attach(&host_config, &TmuxSocket::Default, &session)
+        .attach(&host_config, &TmuxSocket::Default, &session.name)
         .await
         .expect("attach to tmux session");
 
@@ -207,15 +260,6 @@ async fn ssh_tmux_attach_split_kill_sync() {
         .map(|w| w.panes.len())
         .sum::<usize>();
     assert_eq!(total, 1, "after kill there should be 1 pane");
-
-    // 清理。
-    let _ = ssh(
-        host,
-        port,
-        password,
-        &askpass,
-        &["tmux", "kill-session", "-t", &session],
-    );
 }
 
 #[cfg(test)]
