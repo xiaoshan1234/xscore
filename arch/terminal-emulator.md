@@ -76,8 +76,8 @@ trait SshTransport {
 }
 ```
 
-**关键点**：L0 不理解 tmux。`tmux -CC attach` 在本层看来就是“在某个 PTY 上启
-动一个程序”，其控制模式协议完全由 L1 处理。
+**关键点**：L0 不理解 tmux。`tmux -C attach` 在本地/WSL 场景中作为 PTY 子进程
+启动，在 SSH 场景中作为 russh exec channel 启动；两种传输都由 L1 之上统一解析。
 
 ---
 
@@ -90,7 +90,7 @@ trait SshTransport {
 
 | 概念 | 含义 | 基数 |
 |---|---|---|
-| **Connection** | 实际 I/O 通道（一个 PTY、一个 SSH channel、一个 tmux 控制模式 PTY） | 每个 Domain 实例至少 1 个 |
+| **Connection** | 实际 I/O 通道（PTY、SSH channel 或 tmux 控制传输） | 每个 Domain 实例至少 1 个 |
 | **PaneHandle** | 逻辑窗格句柄：绑定一个模拟核心 + 输入路由 + 输出事件流 | SSH/本地域为 1；tmux 域为 N |
 
 `Domain` 的职责定义为：**PaneHandle 的工厂 + 本域内所有 PaneHandle 的注册表 +
@@ -130,7 +130,8 @@ trait PaneHandle {
 
 **TmuxDomain（1:N 域）**
 
-- **Connection**：唯一一个运行 `tmux -CC attach` 的本地 PTY。
+- **Connection**：一个 `TmuxTransport`。Local/WSL 是运行 `tmux -C attach` 的
+  PTY，SSH 是运行同一命令的 russh exec channel。
 - **内部常驻 reader**：解析控制模式线路协议：
   - `%output %<pane-id> <escaped-bytes>` → 解码后**原样**推入
     `pane_registry[pane-id]` 的 `output_stream`。注意这些字节是终端原始字节，
@@ -140,7 +141,7 @@ trait PaneHandle {
     `pane_registry`，一路向 L3 广播（用于容器增删与镜像布局更新）。
   - `%begin`/`%end` 块按命令编号路由回复。
 - **输入路由**：每个 PaneHandle 知道自己的 `%pane-id`：
-  - `send_input` → `send-keys -t %<id> -H <hex>` 写入控制 PTY。
+  - `send_input` → `send-keys -t %<id> -H <hex>` 写入控制传输。
   - `resize` 由容器整体发起，不按 pane 单独发（见 L3）。
 - **生命周期双向**：本地关闭 → 发 `kill-pane`/`kill-window`；远端
   `kill-pane` → `%window-close`/`%layout-change` → 触发对应 PaneHandle 的

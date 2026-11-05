@@ -1,23 +1,26 @@
-//! `tmux -C` 控制客户端：一个 session 一个进程，独立 reader/writer 线程。
+//! `tmux -C` 控制客户端：一个 session 一个传输，统一处理本地 PTY 与 SSH channel。
 //!
-//! 跑在独立 PTY 上以隔离宿主控制台（尤其 `wsl.exe` 这类会抢占控制台输入的程序）。
+//! Local/WSL 跑在独立 PTY 上以隔离宿主控制台；SSH 通过 russh exec channel 传输。
 //! `-F` 分隔符用可打印 `|`，tmux 不会转义，因此 tty 与否都不影响解析。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
 
+use async_trait::async_trait;
 use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
-use std::process::{Command, Stdio};
-use tempfile::NamedTempFile;
+use russh::client;
+use russh::Disconnect;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
-use super::format::socket_args;
+use super::format::{process_prefix, quote_arg, socket_args};
 use super::protocol::{Parsed, ProtocolParser, TmuxEvent};
-use super::TmuxSocket;
+use super::{TmuxHostConfig, TmuxSocket};
+use crate::platform::ssh::{connect_authenticated, SshHandler};
 use crate::{Error, Result};
 
 fn gone(session: &str) -> Error {
@@ -25,6 +28,7 @@ fn gone(session: &str) -> Error {
 }
 
 type PendingReply = oneshot::Sender<Result<Vec<String>>>;
+type ReaderTask = JoinHandle<()>;
 
 /// 构造 `tmux -C attach` 的完整命令行。
 ///
@@ -90,43 +94,102 @@ impl Shared {
     }
 }
 
-enum ChildHandle {
-    Pty(Box<dyn PtyChild + Send + Sync>),
-    Process(std::process::Child),
+type ChildHandle = Box<dyn PtyChild + Send + Sync>;
+
+fn kill_child(child: &mut ChildHandle) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
-impl ChildHandle {
-    fn kill(&mut self) {
-        match self {
-            ChildHandle::Pty(child) => {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            ChildHandle::Process(child) => {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
+/// tmux 控制命令的底层写入与关闭接口。
+#[async_trait]
+trait TmuxTransport: Send + Sync {
+    /// 向 tmux 控制连接写入一条不含换行的命令。
+    ///
+    /// 参数/输出：`line` 为输入，实现在写入时补充换行；成功返回空值。
+    async fn write_command(&self, line: &str) -> Result<()>;
+
+    /// 关闭 tmux 控制连接及其底层资源。
+    ///
+    /// 参数/输出：`self` 为输入输出；成功关闭时返回空值。
+    async fn close(&self) -> Result<()>;
+}
+
+fn queue_line(writer: &Mutex<Option<UnboundedSender<String>>>, line: &str) -> Result<()> {
+    let queued = match lock(writer).as_ref() {
+        Some(writer) => writer.send(format!("{line}\n")).is_ok(),
+        None => false,
+    };
+    if queued {
+        Ok(())
+    } else {
+        Err(Error::Transport("tmux control transport closed".into()))
     }
 }
 
-type SpawnIo = (
-    ChildHandle,
-    Option<Box<dyn MasterPty + Send>>,
-    Box<dyn std::io::Read + Send>,
-    Box<dyn std::io::Write + Send>,
-);
-
-/// 一个 tmux session 的控制模式客户端。
-///
-/// 持有子进程/PTY、读写线程、命令回复队列、事件与 pane 输出订阅。
-pub struct TmuxControl {
-    session: String,
+struct LocalTransport {
     child: Mutex<Option<ChildHandle>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     writer: Mutex<Option<UnboundedSender<String>>>,
-    reader: Mutex<Option<JoinHandle<()>>>,
-    askpass_file: Mutex<Option<NamedTempFile>>,
+}
+
+#[async_trait]
+impl TmuxTransport for LocalTransport {
+    async fn write_command(&self, line: &str) -> Result<()> {
+        queue_line(&self.writer, line)
+    }
+
+    async fn close(&self) -> Result<()> {
+        drop(lock(&self.writer).take());
+        let child = lock(&self.child).take();
+        if let Some(mut child) = child {
+            let _ = tokio::task::spawn_blocking(move || kill_child(&mut child)).await;
+        }
+        drop(lock(&self.master).take());
+        Ok(())
+    }
+}
+
+impl Drop for LocalTransport {
+    fn drop(&mut self) {
+        drop(lock(&self.writer).take());
+        if let Some(mut child) = lock(&self.child).take() {
+            kill_child(&mut child);
+        }
+        drop(lock(&self.master).take());
+    }
+}
+
+struct SshTransport {
+    handle: Mutex<Option<client::Handle<SshHandler>>>,
+    writer: Mutex<Option<UnboundedSender<String>>>,
+}
+
+#[async_trait]
+impl TmuxTransport for SshTransport {
+    async fn write_command(&self, line: &str) -> Result<()> {
+        queue_line(&self.writer, line)
+    }
+
+    async fn close(&self) -> Result<()> {
+        drop(lock(&self.writer).take());
+        let Some(handle) = lock(&self.handle).take() else {
+            return Ok(());
+        };
+        handle
+            .disconnect(Disconnect::ByApplication, "", "")
+            .await
+            .map_err(|e| Error::Transport(format!("ssh disconnect: {e}")))
+    }
+}
+
+/// 一个 tmux session 的控制模式客户端。
+///
+/// 持有传输后端、读取任务、命令回复队列、事件与 pane 输出订阅。
+pub struct TmuxControl {
+    session: String,
+    transport: Arc<dyn TmuxTransport>,
+    reader: Mutex<Option<ReaderTask>>,
     shared: Arc<Shared>,
 }
 
@@ -138,113 +201,37 @@ impl TmuxControl {
         &self.session
     }
 
-    /// 启动 tmux 控制子进程并建立读写线程。
+    /// 启动 tmux 控制传输并建立输出读取任务。
     ///
-    /// 参数/输出：`prefix`、`socket`、`session`、`password`、`askpass` 和
-    /// `use_pty` 为输入；返回已启动的 [`TmuxControl`]。
-    pub fn spawn(
-        prefix: &[String],
+    /// 参数/输出：`host`、`socket` 和 `session` 为输入；本地/WSL 使用 PTY 子进程，
+    /// SSH 使用 russh exec channel；返回已启动的 [`TmuxControl`]。
+    pub async fn spawn(
+        host: &TmuxHostConfig,
         socket: &TmuxSocket,
         session: &str,
-        password: Option<&str>,
-        askpass: Option<&str>,
-        use_pty: bool,
     ) -> Result<TmuxControl> {
         if session.is_empty() {
             return Err(Error::Invalid("tmux session name must not be empty".into()));
         }
-        let argv = argv(prefix, socket, session);
-        tracing::debug!(argv = %argv.join(" "), session, "tmux control: spawn");
-        let (program, args) = argv
-            .split_first()
-            .ok_or_else(|| Error::Transport("empty tmux command line".into()))?;
-
-        let mut askpass_file = None;
-        let (child, master, stdout, stdin): SpawnIo = if use_pty {
-            let pair = native_pty_system()
-                .openpty(PtySize {
-                    rows: 40,
-                    cols: 120,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(|e| Error::Transport(format!("tmux control openpty: {e}")))?;
-            let mut command = CommandBuilder::new(program);
-            for arg in args {
-                command.arg(arg);
-            }
-            let child = pair
-                .slave
-                .spawn_command(command)
-                .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
-            drop(pair.slave);
-            let stdout = pair
-                .master
-                .try_clone_reader()
-                .map_err(|e| Error::Transport(format!("tmux control reader: {e}")))?;
-            let stdin = pair
-                .master
-                .take_writer()
-                .map_err(|e| Error::Transport(format!("tmux control writer: {e}")))?;
-            (ChildHandle::Pty(child), Some(pair.master), stdout, stdin)
-        } else {
-            let mut command = Command::new(program);
-            command
-                .args(args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit());
-            if let (Some(password), Some(askpass)) = (password, askpass) {
-                let mut file = NamedTempFile::new()
-                    .map_err(|e| Error::Transport(format!("create askpass file: {e}")))?;
-                file.write_all(password.as_bytes())
-                    .and_then(|()| file.flush())
-                    .map_err(|e| Error::Transport(format!("write askpass file: {e}")))?;
-                command.env("SSH_ASKPASS", askpass);
-                command.env("SSH_ASKPASS_REQUIRE", "force");
-                command.env("XSCORE_ASKPASS_FILE", file.path());
-                command.env("DISPLAY", "localhost:0");
-                askpass_file = Some(file);
-            }
-            let mut child = command
-                .spawn()
-                .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| Error::Transport("tmux stdout unavailable".into()))?;
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| Error::Transport("tmux stdin unavailable".into()))?;
-            (
-                ChildHandle::Process(child),
-                None,
-                Box::new(stdout),
-                Box::new(stdin),
-            )
-        };
 
         let shared = Arc::new(Shared::new());
-        let (write_tx, write_rx) = mpsc::unbounded_channel::<String>();
-        std::thread::Builder::new()
-            .name("tmux-control-stdin".into())
-            .spawn(move || writer_loop(stdin, write_rx))
-            .map_err(|e| Error::Transport(format!("tmux control writer thread: {e}")))?;
+        let (transport, reader): (Arc<dyn TmuxTransport>, ReaderTask) = match host {
+            TmuxHostConfig::Ssh { .. } => {
+                spawn_ssh_transport(host, socket, session, Arc::clone(&shared)).await?
+            }
+            TmuxHostConfig::Local | TmuxHostConfig::Wsl { .. } => {
+                let prefix = process_prefix(host)
+                    .ok_or_else(|| Error::Transport("missing process prefix".into()))?;
+                spawn_process_transport(prefix, socket, session, Arc::clone(&shared))?
+            }
+        };
 
-        let reader_state = Arc::clone(&shared);
-        let reader = std::thread::Builder::new()
-            .name("tmux-control-stdout".into())
-            .spawn(move || reader_loop(stdout, reader_state))
-            .map_err(|e| Error::Transport(format!("tmux control reader thread: {e}")))?;
+        tracing::debug!(session, host = ?host, socket = ?socket, "tmux control: spawned");
 
         Ok(TmuxControl {
             session: session.to_string(),
-            child: Mutex::new(Some(child)),
-            master: Mutex::new(master),
-            writer: Mutex::new(Some(write_tx)),
+            transport,
             reader: Mutex::new(Some(reader)),
-            askpass_file: Mutex::new(askpass_file),
             shared,
         })
     }
@@ -263,11 +250,7 @@ impl TmuxControl {
         let (tx, rx) = oneshot::channel();
         lock(&self.shared.waiters).push_back(tx);
 
-        let queued = match lock(&self.writer).as_ref() {
-            Some(writer) => writer.send(format!("{command}\n")).is_ok(),
-            None => false,
-        };
-        if !queued {
+        if self.transport.write_command(command).await.is_err() {
             lock(&self.shared.waiters).pop_back();
             return Err(gone(&self.session));
         }
@@ -320,33 +303,26 @@ impl TmuxControl {
         self.shared.closed.load(Ordering::SeqCst)
     }
 
-    /// 停止子进程和读写线程，并释放 askpass 临时文件。
+    /// 停止传输后端和读取任务，并清理等待者与订阅者。
     ///
     /// 参数/输出：`self` 为输入输出，会清理全部连接资源；成功时无返回值。
     pub async fn close(&self) -> Result<()> {
         self.shared.closed.store(true, Ordering::SeqCst);
-        drop(lock(&self.writer).take());
-        if let Some(mut child) = lock(&self.child).take() {
-            child.kill();
+        let close_result = self.transport.close().await;
+        let reader = lock(&self.reader).take();
+        if let Some(reader) = reader {
+            let _ = reader.await;
         }
-        drop(lock(&self.master).take());
-        if let Some(reader) = lock(&self.reader).take() {
-            let _ = reader.join();
-        }
-        drop(lock(&self.askpass_file).take());
         self.shared.shutdown();
-        Ok(())
+        close_result
     }
 }
 
 impl Drop for TmuxControl {
     fn drop(&mut self) {
-        drop(lock(&self.writer).take());
-        if let Some(mut child) = lock(&self.child).take() {
-            child.kill();
+        if let Some(reader) = lock(&self.reader).take() {
+            reader.abort();
         }
-        drop(lock(&self.askpass_file).take());
-        drop(lock(&self.master).take());
     }
 }
 
@@ -360,6 +336,128 @@ fn writer_loop<W: Write>(mut stdin: W, mut rx: mpsc::UnboundedReceiver<String>) 
             break;
         }
     }
+}
+
+fn spawn_process_transport(
+    prefix: Vec<String>,
+    socket: &TmuxSocket,
+    session: &str,
+    shared: Arc<Shared>,
+) -> Result<(Arc<dyn TmuxTransport>, ReaderTask)> {
+    let argv = argv(&prefix, socket, session);
+    tracing::debug!(argv = %argv.join(" "), session, "tmux control: spawn process");
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| Error::Transport("empty tmux command line".into()))?;
+
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 120,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| Error::Transport(format!("tmux control openpty: {e}")))?;
+    let mut command = CommandBuilder::new(program);
+    for arg in args {
+        command.arg(arg);
+    }
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
+    drop(pair.slave);
+    let stdout = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| Error::Transport(format!("tmux control reader: {e}")))?;
+    let stdin = pair
+        .master
+        .take_writer()
+        .map_err(|e| Error::Transport(format!("tmux control writer: {e}")))?;
+
+    let (write_tx, write_rx) = mpsc::unbounded_channel::<String>();
+    tokio::task::spawn_blocking(move || writer_loop(stdin, write_rx));
+    let reader = tokio::task::spawn_blocking(move || reader_loop(stdout, shared));
+
+    let transport = LocalTransport {
+        child: Mutex::new(Some(child)),
+        master: Mutex::new(Some(pair.master)),
+        writer: Mutex::new(Some(write_tx)),
+    };
+    Ok((Arc::new(transport), reader))
+}
+
+async fn spawn_ssh_transport(
+    host: &TmuxHostConfig,
+    socket: &TmuxSocket,
+    session: &str,
+    shared: Arc<Shared>,
+) -> Result<(Arc<dyn TmuxTransport>, ReaderTask)> {
+    let TmuxHostConfig::Ssh {
+        user,
+        host,
+        port,
+        identity,
+        password,
+    } = host
+    else {
+        return Err(Error::Invalid(
+            "ssh tmux transport requires ssh host".into(),
+        ));
+    };
+    let command = remote_tmux_command(socket, session);
+    tracing::debug!(
+        user,
+        host,
+        port,
+        command,
+        session,
+        "tmux control: spawn ssh channel"
+    );
+
+    let handle =
+        connect_authenticated(user, host, *port, identity.as_deref(), password.as_deref()).await?;
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| Error::Transport(format!("ssh channel_open_session: {e}")))?;
+    channel
+        .exec(true, command.as_bytes())
+        .await
+        .map_err(|e| Error::Transport(format!("ssh exec tmux control: {e}")))?;
+
+    let (stdout, stdin) = tokio::io::split(channel.into_stream());
+    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let mut stdin = stdin;
+        while let Some(line) = write_rx.recv().await {
+            if stdin.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdin.flush().await.is_err() {
+                break;
+            }
+        }
+        let _ = stdin.shutdown().await;
+    });
+    let reader = tokio::spawn(async move {
+        async_reader_loop(stdout, shared).await;
+    });
+
+    let transport = SshTransport {
+        handle: Mutex::new(Some(handle)),
+        writer: Mutex::new(Some(write_tx)),
+    };
+    Ok((Arc::new(transport), reader))
+}
+
+fn remote_tmux_command(socket: &TmuxSocket, session: &str) -> String {
+    argv(&[], socket, session)
+        .iter()
+        .map(|arg| quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct ReaderState {
@@ -481,6 +579,36 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<Shared>) {
     shared.shutdown();
 }
 
+async fn async_reader_loop<R: tokio::io::AsyncRead + Unpin>(stdout: R, shared: Arc<Shared>) {
+    let mut parser = ProtocolParser::new();
+    let mut state = ReaderState::new();
+    let mut reader = TokioBufReader::new(stdout);
+    let mut line: Vec<u8> = Vec::new();
+
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line).await {
+            Ok(0) => {
+                tracing::debug!("tmux control: channel EOF");
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "tmux control: channel read error");
+                break;
+            }
+        }
+
+        for parsed in parser.feed(&line) {
+            if !handle_parsed(&mut state, &shared, parsed) {
+                return;
+            }
+        }
+    }
+
+    shared.shutdown();
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -516,6 +644,14 @@ mod tests {
                 "-t",
                 "work"
             ]
+        );
+    }
+
+    #[test]
+    fn remote_command_quotes_socket_and_session() {
+        assert_eq!(
+            remote_tmux_command(&TmuxSocket::Named("x y".into()), "work space"),
+            "'tmux' '-L' 'x y' '-C' 'attach' '-t' 'work space'"
         );
     }
 }

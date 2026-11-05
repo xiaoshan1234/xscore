@@ -9,8 +9,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use tokio::sync::{oneshot, Mutex};
 
+/// russh 客户端事件处理器；当前接受服务端提供的主机密钥。
 #[derive(Clone, Default)]
-struct SshHandler;
+pub(crate) struct SshHandler;
 
 #[async_trait]
 impl Handler for SshHandler {
@@ -55,6 +56,57 @@ impl std::fmt::Debug for SshConnection {
     }
 }
 
+/// 建立并认证一条 russh 客户端连接。
+///
+/// 参数/输出：`user`、`host`、`port`、`identity` 和 `password` 为输入；
+/// 返回已完成认证、可用于打开 session channel 的客户端句柄。
+pub(crate) async fn connect_authenticated(
+    user: &str,
+    host: &str,
+    port: u16,
+    identity: Option<&str>,
+    password: Option<&str>,
+) -> Result<client::Handle<SshHandler>> {
+    let key_arc = match identity {
+        Some(path) => {
+            let key = russh_keys::load_secret_key(path, None)
+                .map_err(|e| Error::Transport(format!("ssh key {path}: {e}")))?;
+            Some(Arc::new(key))
+        }
+        None => None,
+    };
+
+    let config = Arc::new(Config::default());
+    let mut handle = client::connect(config, (host.to_string(), port), SshHandler)
+        .await
+        .map_err(|e| Error::Transport(format!("ssh connect {host}:{port}: {e}")))?;
+
+    let auth_ok = match key_arc {
+        Some(key) => handle
+            .authenticate_publickey(user, key)
+            .await
+            .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
+        None => match password {
+            Some(password) => handle
+                .authenticate_password(user, password.to_string())
+                .await
+                .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
+            None => {
+                return Err(Error::Transport(format!(
+                    "ssh: provide identity= or password for {user}@{host}"
+                )));
+            }
+        },
+    };
+    if !auth_ok {
+        return Err(Error::Transport(format!(
+            "ssh: authentication failed for {user}@{host}"
+        )));
+    }
+
+    Ok(handle)
+}
+
 impl SshConnection {
     /// 创建 SSH 连接配置，但暂不建立网络连接。
     ///
@@ -89,46 +141,14 @@ impl SshConnection {
             user = %self.user,
             "ssh connect"
         );
-        let key_arc = match &self.identity {
-            Some(path) => {
-                let key = russh_keys::load_secret_key(path, None)
-                    .map_err(|e| Error::Transport(format!("ssh key {path}: {e}")))?;
-                Some(Arc::new(key))
-            }
-            None => None,
-        };
-
-        let config = Arc::new(Config::default());
-        let mut handle = client::connect(config, (self.host.clone(), self.port), SshHandler)
-            .await
-            .map_err(|e| {
-                Error::Transport(format!("ssh connect {}:{}: {e}", self.host, self.port))
-            })?;
-
-        let auth_ok = match key_arc {
-            Some(key) => handle
-                .authenticate_publickey(&self.user, key)
-                .await
-                .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
-            None => match &self.password {
-                Some(password) => handle
-                    .authenticate_password(&self.user, password.clone())
-                    .await
-                    .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
-                None => {
-                    return Err(Error::Transport(format!(
-                        "ssh: provide identity= or password for {}@{}",
-                        self.user, self.host
-                    )));
-                }
-            },
-        };
-        if !auth_ok {
-            return Err(Error::Transport(format!(
-                "ssh: authentication failed for {}@{}",
-                self.user, self.host
-            )));
-        }
+        let handle = connect_authenticated(
+            &self.user,
+            &self.host,
+            self.port,
+            self.identity.as_deref(),
+            self.password.as_deref(),
+        )
+        .await?;
 
         let channel = handle
             .channel_open_session()

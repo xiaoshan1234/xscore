@@ -7,7 +7,7 @@ pub mod protocol;
 
 pub use control::{argv, TmuxControl};
 pub use format::{
-    host_prefix, list_panes_command, list_windows_command, parse_pane_line, parse_window_line,
+    list_panes_command, list_windows_command, parse_pane_line, parse_window_line, process_prefix,
     quote_arg, resize_pane_command, send_keys_literal, socket_args, PaneLine, WindowLine,
     LIST_PANES_FORMAT, LIST_WINDOWS_FORMAT,
 };

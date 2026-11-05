@@ -131,32 +131,19 @@ pub fn send_keys_literal(handle: &str, payload: &str) -> Result<String> {
     ))
 }
 
-/// 根据宿主机类型构造启动 tmux 所需的程序前缀。
+/// 为本地进程型 tmux 宿主构造启动命令前缀。
 ///
-/// 参数/输出：`host` 为输入；返回本地、SSH 或 WSL 的命令参数前缀。
-pub fn host_prefix(host: &TmuxHostConfig) -> Vec<String> {
+/// 参数/输出：`host` 为输入；本地或 WSL 返回程序参数前缀，SSH 返回 `None`，
+/// 因为 SSH tmux 由 russh channel 直接承载。
+pub fn process_prefix(host: &TmuxHostConfig) -> Option<Vec<String>> {
     match host {
-        TmuxHostConfig::Local => Vec::new(),
-        TmuxHostConfig::Ssh {
-            destination,
-            args,
-            password,
-            ..
-        } => {
-            let mut argv: Vec<String> = vec!["ssh".into()];
-            if password.is_none() {
-                argv.extend(["-o".into(), "BatchMode=yes".into()]);
-            }
-            argv.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
-            argv.extend(args.iter().cloned());
-            argv.push(destination.clone());
-            argv
-        }
+        TmuxHostConfig::Local => Some(Vec::new()),
+        TmuxHostConfig::Ssh { .. } => None,
         TmuxHostConfig::Wsl { args } => {
             let mut argv = vec!["wsl.exe".to_string()];
             argv.extend(args.iter().cloned());
             argv.push("--exec".to_string());
-            argv
+            Some(argv)
         }
     }
 }
@@ -241,36 +228,30 @@ mod tests {
     }
 
     #[test]
-    fn host_prefix_wsl_execs_tmux() {
+    fn process_prefix_wsl_execs_tmux() {
         let host = TmuxHostConfig::Wsl {
             args: vec!["--distribution".into(), "Ubuntu".into()],
         };
         assert_eq!(
-            host_prefix(&host),
-            ["wsl.exe", "--distribution", "Ubuntu", "--exec"]
+            process_prefix(&host),
+            Some(vec![
+                "wsl.exe".into(),
+                "--distribution".into(),
+                "Ubuntu".into(),
+                "--exec".into()
+            ])
         );
     }
 
     #[test]
-    fn host_prefix_ssh_accepts_new_host_keys() {
+    fn process_prefix_rejects_ssh_tmux() {
         let host = TmuxHostConfig::Ssh {
-            destination: "dev@box".into(),
-            args: vec!["-p".into(), "2222".into()],
+            user: "dev".into(),
+            host: "box".into(),
+            port: 2222,
+            identity: None,
             password: None,
-            askpass: None,
         };
-        assert_eq!(
-            host_prefix(&host),
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-p",
-                "2222",
-                "dev@box"
-            ]
-        );
+        assert_eq!(process_prefix(&host), None);
     }
 }

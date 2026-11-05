@@ -152,7 +152,7 @@ kill，以及前端 tmux 路径。每次运行会在 `test-results/<UTC 时间>/
 |---|---|
 | Linux / WSL（在 WSL 内运行） | 本地 shell、本地 tmux、远端 tmux over ssh |
 | Windows 原生 | 本地 ConPTY shell、WSL shell、WSL tmux；不支持本地 tmux |
-| 远端 SSH | shell 会话（russh，密钥或密码）、tmux（系统 ssh） |
+| 远端 SSH | shell 会话与 tmux（均为 russh，密钥或密码） |
 
 ## 已知限制
 

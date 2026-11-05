@@ -13,7 +13,7 @@
   per-pane TerminalCore 泵任务
   └─ 子进程：
      本地 Shell / wsl.exe（ConPTY）
-     ssh（tmux 控制客户端，管道）
+   tmux-over-SSH 直接使用进程内 russh channel
 ```
 
 ## 2. 线程模型
@@ -21,8 +21,8 @@
 - `LocalPty`：reader / writer 两个 OS 线程，异步侧经无界 channel。
 - `SshConnection`：单任务持有 SSH channel，通过命令队列串行处理 read/write/resize/
   close，避免超时取消读取导致后续消息丢失。
-- `TmuxControl`：writer 线程写 stdin，reader 线程解析 stdout；SSH 场景用管道，
-  Local/WSL 场景用 ConPTY。
+- `TmuxControl`：通过 `TmuxTransport` 写入和关闭连接；Local/WSL 使用
+  PTY reader/writer 任务，SSH 使用 russh exec channel 的异步读写任务。
 
 ## 3. 数据流
 
@@ -41,8 +41,8 @@ REPL → PaneHandle.send_input → Domain 封装 → PTY/SSH/send-keys
 ### tmux 控制
 
 ```text
-send(command) → writer 线程 → 子进程 stdin
-reader 线程 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N 路由
+send(command) → TmuxTransport → PTY stdin / SSH channel
+reader 任务 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N 路由
 ```
 
 ## 4. 并发与同步

@@ -2,7 +2,7 @@
 
 use crate::domain::{PaneHandle, PaneId, PaneKind};
 use crate::platform::tmux::{
-    host_prefix, list_panes_command, list_windows_command, parse_pane_line, parse_window_line,
+    list_panes_command, list_windows_command, parse_pane_line, parse_window_line,
     resize_pane_command, send_keys_literal, TmuxControl, TmuxHostConfig, TmuxSocket,
 };
 use crate::platform::Size;
@@ -103,23 +103,15 @@ impl TmuxDomain {
         socket: &TmuxSocket,
         session: &str,
     ) -> Result<Vec<Arc<TmuxPane>>> {
-        let prefix = host_prefix(host);
         let host_desc = match host {
             TmuxHostConfig::Local => "local".to_string(),
-            TmuxHostConfig::Ssh { destination, .. } => format!("ssh:{destination}"),
+            TmuxHostConfig::Ssh {
+                user, host, port, ..
+            } => format!("ssh:{user}@{host}:{port}"),
             TmuxHostConfig::Wsl { .. } => "wsl".to_string(),
         };
         tracing::debug!(session, ?socket, host = %host_desc, "tmux attach");
-        let (password, askpass) = match host {
-            TmuxHostConfig::Ssh {
-                password, askpass, ..
-            } => (password.as_deref(), askpass.as_deref()),
-            _ => (None, None),
-        };
-        let use_pty = !matches!(host, TmuxHostConfig::Ssh { .. });
-        let control = Arc::new(TmuxControl::spawn(
-            &prefix, socket, session, password, askpass, use_pty,
-        )?);
+        let control = Arc::new(TmuxControl::spawn(host, socket, session).await?);
 
         let windows = enumerate(&control, session).await?;
         let mut panes = Vec::new();

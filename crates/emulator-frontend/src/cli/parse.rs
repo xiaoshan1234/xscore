@@ -92,20 +92,12 @@ pub fn build_tmx_config(args: &TmxAttachArgs) -> Result<(TmuxSocket, TmuxHostCon
                 return Err(anyhow!("--ssh requires an ssh:// URL"));
             };
             let (user, hostname, port) = parse_ssh_target(&target)?;
-            let mut ssh_args = Vec::new();
-            if let Some(identity) = identity {
-                ssh_args.push("-i".to_string());
-                ssh_args.push(identity);
-            }
-            if port != 22 {
-                ssh_args.push("-p".to_string());
-                ssh_args.push(port.to_string());
-            }
             TmuxHostConfig::Ssh {
-                destination: format!("{user}@{hostname}"),
-                args: ssh_args,
+                user,
+                host: hostname,
+                port,
+                identity,
                 password,
-                askpass: None,
             }
         }
         (None, Some(wsl_url)) => {
@@ -610,15 +602,11 @@ mod tests {
         assert_eq!(
             host,
             TmuxHostConfig::Ssh {
-                destination: "dev@box".into(),
-                args: vec![
-                    "-i".into(),
-                    "~/.ssh/id_ed25519".into(),
-                    "-p".into(),
-                    "2222".into()
-                ],
+                user: "dev".into(),
+                host: "box".into(),
+                port: 2222,
+                identity: Some("~/.ssh/id_ed25519".into()),
                 password: None,
-                askpass: None,
             }
         );
     }

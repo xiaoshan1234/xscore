@@ -6,16 +6,18 @@ pub enum TmuxHostConfig {
     /// 直接在当前主机启动 tmux。
     #[default]
     Local,
-    /// 通过系统 SSH 连接远端主机。
+    /// 通过 russh 连接远端主机并执行 tmux 控制客户端。
     Ssh {
-        /// SSH 目标，例如 `user@host`。
-        destination: String,
-        /// 追加给 `ssh` 的参数。
-        args: Vec<String>,
+        /// 远端登录用户名。
+        user: String,
+        /// 远端主机名或 IP 地址。
+        host: String,
+        /// SSH 端口。
+        port: u16,
+        /// 可选的私钥路径；提供时优先于密码。
+        identity: Option<String>,
         /// 可选的登录密码。
         password: Option<String>,
-        /// 可选的 askpass helper 可执行文件路径。
-        askpass: Option<String>,
     },
     /// 通过 `wsl.exe` 在 WSL 中启动 tmux。
     Wsl {

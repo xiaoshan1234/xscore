@@ -159,19 +159,15 @@ async fn ssh_tmux_attach_split_kill_sync() {
         ],
     );
 
+    let (user, remote_host) = host
+        .split_once('@')
+        .expect("test.config ssh_host must be user@host");
     let host_config = TmuxHostConfig::Ssh {
-        destination: host.to_owned(),
-        args: vec![
-            "-o".to_string(),
-            format!(
-                "UserKnownHostsFile={}",
-                if cfg!(windows) { "NUL" } else { "/dev/null" }
-            ),
-            "-p".to_string(),
-            port.to_string(),
-        ],
+        user: user.to_string(),
+        host: remote_host.to_string(),
+        port,
+        identity: None,
         password: Some(password.to_owned()),
-        askpass: Some(askpass.clone()),
     };
     let domain = TmuxDomain::new();
     let panes = domain

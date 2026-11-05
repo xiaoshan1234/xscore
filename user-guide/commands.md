@@ -234,10 +234,10 @@ xs daemon stop     # 让 daemon 退出
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
-| `XSCORE_ASKPASS_FILE` | 内部：askpass helper 读取一次性密码文件 |
+| `XSCORE_ASKPASS_FILE` | 内部兼容：被外部 SSH 作为 askpass helper 调用时读取密码文件 |
 
 ## 平台限制
 
 - Windows 原生不支持本地 tmux；本地 tmux 需在 Linux/WSL 内运行。
 - WSL tmux 需要 WSL 内安装 tmux。
-- 远端 tmux 密码认证需要 OpenSSH 8.4+（`SSH_ASKPASS_REQUIRE`）。
+- 远端 tmux 使用应用内 russh，不读取 `~/.ssh/config`、ssh-agent 或 ProxyJump。

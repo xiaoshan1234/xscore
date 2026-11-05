@@ -117,10 +117,19 @@ async fn tmux_ssh_io_resize_split_kill() {
     let session = RemoteSession::create(config.clone(), askpass.clone());
 
     let host = TmuxHostConfig::Ssh {
-        destination: config.ssh_destination.clone(),
-        args: ssh_options(&config),
+        user: config
+            .ssh_destination
+            .split_once('@')
+            .map(|(user, _)| user.to_string())
+            .expect("ssh_destination must be user@host"),
+        host: config
+            .ssh_destination
+            .split_once('@')
+            .map(|(_, host)| host.to_string())
+            .expect("ssh_destination must be user@host"),
+        port: config.ssh_port,
+        identity: None,
         password: Some(config.ssh_password.clone()),
-        askpass: Some(askpass.display().to_string()),
     };
     let domain = TmuxDomain::new();
     let panes = domain

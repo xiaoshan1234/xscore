@@ -9,7 +9,7 @@
 |---|---|---|
 | `emulator-frontend` | 用户主机 | REPL 运行期间 |
 | 本地 Shell / wsl.exe | 用户主机 | 随 pane |
-| `ssh`（tmux 控制） | 用户主机 → 远端 | 随 session |
+| russh SSH channel（tmux 控制） | 用户主机 → 远端 | 随 session |
 | tmux server | 本地/WSL/远端 | 独立于本程序 |
 
 ## 2. tmux 三种部署
@@ -29,16 +29,16 @@ emulator-frontend → ConPTY → wsl.exe --exec tmux -C attach -t <session>
 ### 远端 tmux（SSH）
 
 ```text
-emulator-frontend → 管道 → ssh -o StrictHostKeyChecking=accept-new <dest> tmux -C attach -t <session>
+emulator-frontend → russh channel → exec tmux -C attach -t <session>
 ```
 
-密码由 `SSH_ASKPASS` 交给系统 ssh，helper 从连接级临时文件读取；密钥则复用
-`~/.ssh/config` 与 agent。
+连接在进程内由 russh 建立，密码或私钥直接参与 SSH 认证，不启动系统 ssh，
+也不使用 askpass。
 
 ## 3. SSH 认证
 
 - SSH shell：russh，密钥（identity 路径）或密码（交互无回显提示）。
-- tmux-over-ssh：系统 ssh；`--password` 用 askpass，前端二进制兼任 askpass。
+- tmux-over-ssh：russh exec channel；密钥（identity 路径）或密码直接认证。
 
 ## 4. 环境变量与文件
 
@@ -46,10 +46,10 @@ emulator-frontend → 管道 → ssh -o StrictHostKeyChecking=accept-new <dest> 
 |---|---|
 | `XSCORE_LOG` | 日志文件路径（默认 `emulator.log`） |
 | `RUST_LOG` | 日志级别 |
-| `XSCORE_ASKPASS_FILE` | 内部：askpass helper 读取一次性密码文件 |
+| `XSCORE_ASKPASS_FILE` | 内部兼容：被外部 SSH 作为 askpass helper 调用时读取密码文件 |
 
 ## 5. 平台限制
 
 - Windows 原生不支持本地 tmux；本地 tmux 需在 Linux/WSL 内运行。
 - WSL tmux 需要 WSL 内安装 tmux。
-- 远端 tmux 密码认证需要 OpenSSH 8.4+（`SSH_ASKPASS_REQUIRE`）。
+- 远端 tmux 使用应用内 russh，不读取 `~/.ssh/config`、ssh-agent 或 ProxyJump。

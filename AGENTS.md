@@ -87,9 +87,8 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 - **tmux 用 `-C`，不是 `-CC`**：`-CC` 会 `tcgetattr`，在管道/部分 tty 场景下卡死。
 - **tmux `-F` 分隔符用 `|`**：tab 会被展开成 `ESC[NC`，控制字符会被转义成 `\ooo`，
   可打印的 `|` 才能原样输出。
-- **tmux 控制客户端两种 spawn**：
-  - SSH：普通管道进程 + `SSH_ASKPASS`（前端二进制自己兼任 askpass，见
-    `XSCORE_ASKPASS_FILE`；密码只存在于连接生命周期内的受限临时文件）。
+- **tmux 控制客户端通过 `TmuxTransport` 统一传输**：
+  - SSH：russh exec channel 直接运行 `tmux -C attach`，密钥或密码直接认证。
   - Local / WSL：portable-pty 的 ConPTY（`wsl.exe` 需要独立控制台，避免抢宿主输入）。
 - **Windows ConPTY 输入回车用 `\r\n`**，Unix 用 `\n`。本地 shell 的 `write` 按
   `PaneKind::Local` 区分；SSH/tmux 仍是 `\n`（Unix 语义）。
@@ -104,8 +103,8 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 ## SSH 认证
 
 - SSH shell（russh）：密钥（`identity` 路径）或密码（无回显交互提示）。
-- tmux-over-ssh（系统 `ssh`）：`--password` 用 askpass，密钥则复用
-  `~/.ssh/config` 与 agent。
+- tmux-over-ssh（russh）：密钥（`identity` 路径）或密码直接认证，不读取
+  `~/.ssh/config`、ssh-agent 或 ProxyJump。
 
 ## 环境变量与文件
 
@@ -113,10 +112,10 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
 | `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
-| `XSCORE_ASKPASS_FILE` | 内部：askpass helper 读取一次性密码文件 |
+| `XSCORE_ASKPASS_FILE` | 内部兼容：被外部 SSH 作为 askpass helper 调用时读取密码文件 |
 
 ## 平台限制
 
 - Windows 原生不支持本地 tmux；本地 tmux 需在 Linux/WSL 内运行。
 - WSL tmux 需要 WSL 内安装 tmux。
-- 远端 tmux 密码认证需要 OpenSSH 8.4+（`SSH_ASKPASS_REQUIRE`）。
+- 远端 tmux 使用应用内 russh，不读取系统 OpenSSH 配置或 agent。

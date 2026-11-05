@@ -23,8 +23,8 @@ crates/emulator/src/
       mod.rs
       model.rs            TmuxHostConfig / TmuxSocket
       protocol.rs         控制模式协议解析（纯函数）
-      format.rs           -F 输出解析、send-keys、host_prefix
-      control.rs          TmuxControl 进程 + reader/writer 线程
+      format.rs           -F 输出解析、send-keys、本地/WSL 进程前缀
+      control.rs          TmuxControl + TmuxTransport（PTY 或 russh channel）
   domain/
     mod.rs                Domain / PaneHandle / PaneId / PaneConfig
     local.rs              LocalDomain / LocalPane
@@ -78,8 +78,8 @@ cargo fmt --all -- --check
 | emulator unit | tmux 协议/格式、VT 核心、argv |
 | `local_domain` | 本地 PTY 端到端 roundtrip |
 | `ssh_shell`（`#[ignore]`） | 真实 SSH shell：PTY 输入输出与 resize |
-| `tmux_ssh` emulator（`#[ignore]`） | 真实 SSH tmux：I/O、resize、split、kill |
-| `tmux_ssh` frontend（`#[ignore]`） | 前端 askpass 与远端 tmux 路径 |
+| `tmux_ssh` emulator（`#[ignore]`） | russh tmux：I/O、resize、split、kill |
+| `tmux_ssh` frontend（`#[ignore]`） | 前端远端 tmux 路径 |
 | layout unit | 布局树拆分、删除、镜像焦点 |
 
 集成测试统一通过 `python scripts/run_integration_tests.py` 运行，结果写入
