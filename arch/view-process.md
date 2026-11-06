@@ -11,6 +11,7 @@
 宿主进程
   REPL（阻塞读 stdin）
   per-pane TerminalCore 泵任务
+  per-logger 文件写入任务
   └─ 子进程：
      本地 Shell / wsl.exe（ConPTY）
    tmux-over-SSH 直接使用进程内 russh channel
@@ -23,6 +24,8 @@
   close，避免超时取消读取导致后续消息丢失。
 - `TmuxControl`：通过 `TmuxTransport` 写入和关闭连接；Local/WSL 使用
   PTY reader/writer 任务，SSH 使用 russh exec channel 的异步读写任务。
+- `LoggerRegistry`：每个 logger 独立订阅 `PaneHandle` 输出，raw 写原始字节，
+  char 过滤 ANSI/控制序列后按带时间戳的文本行写入本地文件。
 
 ## 3. 数据流
 

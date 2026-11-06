@@ -3,7 +3,9 @@
 //! `Cmd` 的 serde 派生就是 daemon 的 IPC 线协议，重构时不得重命名任何变体
 //! 或字段，否则会与已在运行的 daemon 不兼容。
 
-use clap::{Args, Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 /// `xs` 的顶层 clap 命令。
@@ -88,6 +90,8 @@ pub enum TmlCmd {
         #[arg(long, value_name = "N")]
         line: Option<usize>,
     },
+    /// record a pane's output to a local file
+    Log(TmlLogArgs),
 }
 
 /// `tml add` 的参数。
@@ -111,6 +115,32 @@ pub struct TmlAddArgs {
     /// resolved client-side; never parsed from argv
     #[arg(skip)]
     pub password: Option<String>,
+}
+
+/// `tml log --format` 的格式参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormatArg {
+    /// 原样记录终端二进制字节。
+    Raw,
+    /// 过滤 ANSI/控制序列，按行写入带时间戳的文本。
+    Char,
+}
+
+/// `tml log` 的参数。
+#[derive(Debug, Clone, Args, Serialize, Deserialize)]
+pub struct TmlLogArgs {
+    /// 目标 pane ID。
+    pub pane: String,
+    /// 日志格式。
+    #[arg(long, value_enum)]
+    pub format: LogFormatArg,
+    /// 最大记录量；raw 按字节计，char 按行数计。
+    #[arg(long, value_name = "N")]
+    pub max_size: usize,
+    /// 输出文件；省略时在当前目录生成带时间戳的文件。
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
 }
 
 /// `tmx` 子命令。

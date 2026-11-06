@@ -39,6 +39,7 @@ crates/emulator/src/
 
 crates/emulator-frontend/src/
   main.rs                 REPL、命令解析、日志初始化
+  ui/logger.rs            Pane 输出 raw/char 本地文件 logger
   layout.rs               Node / TmuxContainer / Layout
 ```
 

@@ -6,7 +6,9 @@ use emulator::domain::{PaneId, PaneKind};
 use emulator::platform::Size;
 use emulator::term::TerminalCore;
 
+use crate::cli::{LogFormatArg, TmlLogArgs};
 use crate::ui::app::App;
+use crate::ui::logger::{default_path, LoggerFormat};
 use crate::ui::render::{snapshot_text, Output};
 
 /// 向指定 pane 写入以空格拼接的文本并补平台换行。
@@ -105,6 +107,44 @@ pub async fn pane_fetch(app: &App, pane: String, line: Option<usize>) -> Result<
     for line in &lines {
         out.line(line.trim_end());
     }
+    Ok(out)
+}
+
+/// 为指定 pane 创建本地输出 logger。
+///
+/// 参数/输出：`app` 为输入输出，`args` 为输入；返回 logger 文件和容量信息。
+pub fn pane_log(app: &mut App, args: TmlLogArgs) -> Result<Output> {
+    let id = parse_pane(app, &args.pane)?;
+    let format = match args.format {
+        LogFormatArg::Raw => LoggerFormat::Raw,
+        LogFormatArg::Char => LoggerFormat::Char,
+    };
+    let path = match args.path {
+        Some(path) => path,
+        None => default_path(id, format)?,
+    };
+    let handle = app
+        .pane_entry(id)
+        .ok_or_else(|| anyhow!("pane not found: {id}"))?
+        .handle
+        .clone();
+    let info = app.loggers.start(handle, format, args.max_size, path)?;
+
+    let mut out = Output::new();
+    out.line(format!(
+        "logger: pane={} format={}",
+        info.pane_id, info.format
+    ));
+    out.line(format!(
+        "limit: {} {}",
+        info.max_size,
+        if info.format == LoggerFormat::Raw {
+            "bytes"
+        } else {
+            "lines"
+        }
+    ));
+    out.line(format!("file: {}", info.path.display()));
     Ok(out)
 }
 

@@ -30,6 +30,7 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: Cmd) -> Result<Output> {
             TmlCmd::Resize { pane, cols, rows } => pane::resize(&guard, pane, cols, rows).await?,
             TmlCmd::Focus { pane } => pane::focus(&mut guard, pane)?,
             TmlCmd::Fetch { pane, line } => pane::pane_fetch(&guard, pane, line).await?,
+            TmlCmd::Log(args) => pane::pane_log(&mut guard, args)?,
         },
         Cmd::Tmx(tmx_cmd) => match tmx_cmd {
             TmxCmd::Attach(attach) => tmx::attach(&mut guard, &attach, app.clone()).await?,
@@ -59,6 +60,7 @@ pub fn help() -> Output {
     out.line("  tml resize <pane-id> <c> <r>   resize the pane");
     out.line("  tml focus <pane-id>        move focus");
     out.line("  tml fetch <pane-id> [--line <N>]   fetch tmux pane scrollback (all, or last N)");
+    out.line("  tml log <pane-id> --format <raw|char> --max-size <N> [--path <file>]   record pane output");
     out.line(
         "  tmx attach --url <url> [--ssh <ssh-url> | --wsl <wsl-url>]   attach to a tmux session by URL",
     );

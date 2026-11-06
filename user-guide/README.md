@@ -67,6 +67,7 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 | `tml resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
 | `tml focus <pane-id>` | 切换焦点（tmux pane 走容器内焦点） |
 | `tml fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
+| `tml log <pane-id> --format <raw\|char> --max-size <N>` | 将 pane 输出记录到本地文件 |
 | `ls pane` / `ls window [<group>]` / `ls group` | 列出 pane / window / group |
 | `daemon serve \| status \| stop` | 运行 / 查看 / 停止常驻 daemon |
 | `tmx sync <group-id>` | 按 tmux 服务端现状同步指定 group：删除已消失的 pane/window，纳入新增的 pane/window |

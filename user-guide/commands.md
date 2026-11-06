@@ -26,6 +26,7 @@ xs <command> [args...]     # 执行一条一次性命令
 | `tml resize <pane-id> <cols> <rows>` | 调整 pane 尺寸 |
 | `tml focus <pane-id>` | 切换焦点 |
 | `tml fetch <pane-id> [--line <N>]` | 拉取 tmux pane 历史 |
+| `tml log <pane-id> --format <raw\|char> --max-size <N> [--path <file>]` | 记录 pane 输出 |
 | `tmx attach --url <URL> [--ssh <ssh-url> \| --wsl <wsl-url>]` | 用 URL 接入 tmux 会话 |
 | `tmx sync <group-id>` | 按 tmux 服务端现状同步指定 group 的本地结构 |
 | `layout [<window-id>]` | 打印布局树或指定 window 的布局 |
@@ -137,6 +138,20 @@ xs tml fetch <pane-id> [--line <N>]
 
 拉取 tmux pane 的滚动历史（`capture-pane`）：不带 `--line` 拉全部，`--line <N>` 拉最近 N 行。
 仅对 tmux pane 有效。
+
+### tml log
+
+```text
+xs tml log <pane-id> --format <raw|char> --max-size <N> [--path <file>]
+```
+
+为 pane 创建独立 logger，从创建时起订阅后续输出并写入本地文件：
+
+- `raw`：原样写入终端二进制字节，`--max-size` 单位为字节。
+- `char`：过滤 ANSI 转义序列和控制字符，按行写入，每行以时间戳开头；
+  `--max-size` 单位为最大记录行数。
+- 达到上限后停止记录，已写入文件保持不变。
+- 省略 `--path` 时在 daemon 当前目录生成带 pane ID、时间戳和格式名称的文件。
 
 ## tmx
 

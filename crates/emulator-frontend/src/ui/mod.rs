@@ -3,6 +3,7 @@
 pub mod app;
 pub mod commands;
 pub mod layout;
+pub mod logger;
 pub mod pane;
 pub mod render;
 pub mod tmux;

@@ -58,6 +58,7 @@ crates/emulator-frontend/   L3–L5 CLI 前端
   src/ui/                   应用核心（GUI 可复用）
     app.rs                  App 状态：pane 注册表、布局、window group、tmux 会话
     pane.rs                 PaneRegistry：PaneHandle ↔ TerminalCore 绑定 + 字节泵
+    logger.rs               Pane 输出 raw/char 本地文件 logger
     layout.rs               L3 布局树（Node / TmuxContainer / PaneRect）
     render.rs               L4 文本渲染（快照 / 表格 / 布局树 / 状态）
     window_group.rs         WindowGroup + GroupId（默认组 / tmux session 组）
@@ -97,6 +98,8 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
   reconcile 自动跟随。
 - **`%output` 不回放历史**：attach 只接收订阅之后的新字节；历史用
   `tml fetch <id> [--line N]`（`capture-pane`）按需查询。
+- **Pane logger 独立订阅**：`tml log` 为每个 logger 建立独立 broadcast receiver；
+  raw 按字节封顶，char 过滤 ANSI/控制序列后按带时间戳的行数封顶。
 - **结构事件**：`%output %N` 和 `%exit` 已被消费；`%window-add`/`%window-close`/
   `%layout-change` 等走 `classify_tmux_event` → reconcile。
 

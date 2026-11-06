@@ -275,7 +275,7 @@ fn parse_args_param(params: &HashMap<String, String>) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::cmd::{LsCmd, TmlCmd, TmxCmd};
+    use super::super::cmd::{LogFormatArg, LsCmd, TmlCmd, TmxCmd};
     use super::*;
 
     #[test]
@@ -509,6 +509,28 @@ mod tests {
                 line: Some(50),
             }) if pane == "3"
         ));
+
+        let Cmd::Tml(TmlCmd::Log(args)) = parse(&[
+            "tml",
+            "log",
+            "3",
+            "--format",
+            "raw",
+            "--max-size",
+            "2000",
+            "--path",
+            "logs/pane3.raw",
+        ])
+        .unwrap() else {
+            panic!("expected tml log command");
+        };
+        assert_eq!(args.pane, "3");
+        assert_eq!(args.format, LogFormatArg::Raw);
+        assert_eq!(args.max_size, 2000);
+        assert_eq!(
+            args.path.as_deref(),
+            Some(std::path::Path::new("logs/pane3.raw"))
+        );
     }
 
     #[test]

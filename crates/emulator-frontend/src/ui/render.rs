@@ -167,7 +167,11 @@ pub fn layout_text(app: &App) -> Output {
 /// 参数/输出：`app` 为输入；返回 pane 与 tmux session 摘要。
 pub fn status_text(app: &App) -> Output {
     let mut out = Output::new();
-    out.line(format!("daemon: {} pane(s)", app.panes.len()));
+    out.line(format!(
+        "daemon: {} pane(s), {} logger(s)",
+        app.panes.len(),
+        app.loggers.len()
+    ));
     let mut sessions: Vec<String> = app
         .tmux
         .values()

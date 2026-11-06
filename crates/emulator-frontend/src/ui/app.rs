@@ -7,6 +7,7 @@ use emulator::domain::{PaneHandle, PaneId};
 use emulator::platform::tmux::TmuxControl;
 
 use crate::ui::layout::Layout;
+use crate::ui::logger::LoggerRegistry;
 use crate::ui::pane::{PaneEntry, PaneRegistry};
 use crate::ui::tmux::session::TmuxMeta;
 use crate::ui::window_group::{GroupId, GroupKind, WindowGroup, WindowId};
@@ -33,6 +34,8 @@ pub struct App {
     pub next_manual_window: HashMap<GroupId, u64>,
     /// 默认 group ID。
     pub default_group: GroupId,
+    /// daemon 中运行的 pane 输出 logger。
+    pub loggers: LoggerRegistry,
 }
 
 impl App {
@@ -54,6 +57,7 @@ impl App {
             pane_windows: HashMap::new(),
             next_manual_window: HashMap::new(),
             default_group: default_group.id,
+            loggers: LoggerRegistry::new(),
         }
     }
 
@@ -226,6 +230,7 @@ impl App {
         }
         self.pane_groups.remove(&id);
         self.pane_windows.remove(&id);
+        self.loggers.remove_pane(id);
     }
 }
 
