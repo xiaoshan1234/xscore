@@ -347,12 +347,60 @@ impl CharFilter {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+    use std::path::{Path, PathBuf};
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::task::{Context, Poll};
+    use std::time::Duration;
 
+    use async_trait::async_trait;
+    use emulator::domain::{PaneHandle, PaneId, PaneKind};
+    use emulator::platform::Size;
     use tokio::io::AsyncWrite;
+    use tokio::sync::broadcast;
+    use tokio::time::{sleep, timeout, Instant};
 
-    use super::{write_char, write_raw, CharFilter};
+    use super::{write_char, write_raw, CharFilter, LoggerFormat, LoggerRegistry};
+
+    static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+
+    struct FakePane {
+        id: PaneId,
+        output: broadcast::Sender<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl PaneHandle for FakePane {
+        fn id(&self) -> PaneId {
+            self.id
+        }
+
+        fn kind(&self) -> PaneKind {
+            PaneKind::Local
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn send_input(&self, data: &[u8]) -> emulator::Result<usize> {
+            Ok(data.len())
+        }
+
+        async fn resize(&self, _size: Size) -> emulator::Result<()> {
+            Ok(())
+        }
+
+        fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
+            self.output.subscribe()
+        }
+
+        async fn close(&self) -> emulator::Result<()> {
+            Ok(())
+        }
+    }
 
     #[derive(Default)]
     struct BufferWriter(Vec<u8>);
@@ -427,5 +475,97 @@ mod tests {
         write_char(&mut writer, &mut receiver, 2000).await.unwrap();
 
         assert_eq!(writer.0.iter().filter(|byte| **byte == b'\n').count(), 2000);
+    }
+
+    #[tokio::test]
+    async fn registry_raw_logger_ignores_output_after_byte_limit() {
+        let (pane, sender, path) = fake_pane("raw-overflow");
+        let mut loggers = LoggerRegistry::new();
+        loggers
+            .start(pane, LoggerFormat::Raw, 2000, path.clone())
+            .unwrap();
+
+        sender.send(vec![b'a'; 1500]).unwrap();
+        sender.send(vec![b'b'; 1000]).unwrap();
+        wait_for_bytes(&path, 2000).await;
+
+        let _ = sender.send(vec![b'c'; 500]);
+        sleep(Duration::from_millis(50)).await;
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len(), 2000);
+        assert_eq!(bytes.iter().filter(|byte| **byte == b'a').count(), 1500);
+        assert_eq!(bytes.iter().filter(|byte| **byte == b'b').count(), 500);
+        assert!(!bytes.contains(&b'c'));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn registry_char_logger_ignores_output_after_line_limit() {
+        let (pane, sender, path) = fake_pane("char-overflow");
+        let mut loggers = LoggerRegistry::new();
+        loggers
+            .start(pane, LoggerFormat::Char, 3, path.clone())
+            .unwrap();
+
+        sender.send(b"one\ntwo\nthree\nfour\n".to_vec()).unwrap();
+        wait_for_lines(&path, 3).await;
+
+        let _ = sender.send(b"five\nsix\n".to_vec());
+        sleep(Duration::from_millis(50)).await;
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].ends_with("] one"));
+        assert!(lines[1].ends_with("] two"));
+        assert!(lines[2].ends_with("] three"));
+        assert!(!text.contains("four"));
+        assert!(!text.contains("five"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn fake_pane(label: &str) -> (Arc<dyn PaneHandle>, broadcast::Sender<Vec<u8>>, PathBuf) {
+        let (sender, _) = broadcast::channel(16);
+        let pane = Arc::new(FakePane {
+            id: PaneId::new(NEXT_FILE.fetch_add(1, Ordering::Relaxed) + 1),
+            output: sender.clone(),
+        });
+        let path = std::env::temp_dir().join(format!(
+            "xscore-{label}-{}-{}.log",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        (pane, sender, path)
+    }
+
+    async fn wait_for_bytes(path: &Path, expected: u64) {
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if std::fs::metadata(path)
+                    .map(|metadata| metadata.len() == expected)
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("logger did not reach byte limit");
+    }
+
+    async fn wait_for_lines(path: &Path, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if std::fs::read_to_string(path)
+                .map(|text| text.lines().count() == expected)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "logger did not reach line limit");
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 }
