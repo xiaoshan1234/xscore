@@ -5,11 +5,14 @@
 
 ## 1. 运行单元
 
-单个宿主进程（CLI 前端）内运行后端库与若干子进程：
+用户命令由轻量 client 进程发送给常驻 daemon；daemon 内运行后端库与若干子进程：
 
 ```text
-宿主进程
-  REPL（阻塞读 stdin）
+xs client
+  clap 命令解析
+  TCP 请求/响应
+
+xs-daemon
   per-pane TerminalCore 泵任务
   per-logger 文件写入任务
   └─ 子进程：
@@ -38,7 +41,7 @@ PTY/SSH/tmux → Domain 路由 → PaneHandle 输出流 → TerminalCore.feed �
 ### 输入
 
 ```text
-REPL → PaneHandle.send_input → Domain 封装 → PTY/SSH/send-keys
+xs client → xs-daemon → PaneHandle.send_input → Domain 封装 → PTY/SSH/send-keys
 ```
 
 ### tmux 控制
@@ -61,7 +64,7 @@ reader 任务 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N �
 
 - 默认写 `emulator.log`（`XSCORE_LOG` 改路径），追加写入。
 - 控制台仅 WARN 以上；debug/trace 进文件。
-- 级别默认 `emulator=debug,emulator_frontend=debug`，`RUST_LOG` 覆盖。
+- 级别默认 `emulator=debug,xscore_server=debug`，`RUST_LOG` 覆盖。
 
 ## 6. 故障与恢复
 

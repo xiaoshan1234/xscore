@@ -7,7 +7,8 @@
 
 | 单元 | 位置 | 生命周期 |
 |---|---|---|
-| `emulator-frontend` | 用户主机 | REPL 运行期间 |
+| `xs` | 用户主机 | 单条命令期间 |
+| `xs-daemon` | 用户主机 | 常驻，直到 `xs daemon stop` |
 | 本地 Shell / wsl.exe | 用户主机 | 随 pane |
 | russh SSH channel（tmux 控制） | 用户主机 → 远端 | 随 session |
 | tmux server | 本地/WSL/远端 | 独立于本程序 |
@@ -17,19 +18,19 @@
 ### 本地（Linux / WSL 内）
 
 ```text
-emulator-frontend → ConPTY/PTY → tmux -C attach -t <session>
+xs → xs-daemon → ConPTY/PTY → tmux -C attach -t <session>
 ```
 
 ### WSL tmux（Windows 原生程序）
 
 ```text
-emulator-frontend → ConPTY → wsl.exe --exec tmux -C attach -t <session>
+xs → xs-daemon → ConPTY → wsl.exe --exec tmux -C attach -t <session>
 ```
 
 ### 远端 tmux（SSH）
 
 ```text
-emulator-frontend → russh channel → exec tmux -C attach -t <session>
+xs → xs-daemon → russh channel → exec tmux -C attach -t <session>
 ```
 
 连接在进程内由 russh 建立，密码或私钥直接参与 SSH 认证，不启动系统 ssh，
@@ -46,6 +47,7 @@ emulator-frontend → russh channel → exec tmux -C attach -t <session>
 |---|---|
 | `XSCORE_LOG` | 日志文件路径（默认 `emulator.log`） |
 | `RUST_LOG` | 日志级别 |
+| `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 路径覆盖 |
 
 ## 5. 平台限制
 

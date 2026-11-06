@@ -13,8 +13,9 @@
 
 | 参与者 | 作用 |
 |---|---|
-| 用户 | 通过 CLI REPL 操作窗格、读取屏幕 |
-| 前端（L3–L5，CLI 模拟） | 布局树、焦点、命令分发、结构同步 |
+| 用户 | 通过 `xs` 一次性命令操作窗格、读取屏幕 |
+| `xs` client | clap 解析、密码边缘处理、daemon 生命周期与 IPC |
+| `xs-daemon`（L3–L5，CLI 模拟） | 布局树、焦点、命令分发、结构同步 |
 | 后端（L0–L2） | 平台 I/O、Domain 路由、VT 状态机 |
 | PTY 子进程 | 本地 Shell、`tmux -C attach`、`wsl.exe` |
 | SSH server | RemoteSshDomain 与远端 tmux 的通道 |
@@ -85,7 +86,7 @@ PTY / SSH channel / tmux 控制流
 ### 输入路径
 
 ```text
-REPL 命令
+xs 命令
   → 目标 pane 的 PaneHandle.send_input
   → L1 封装（PTY 直写 / SSH channel / send-keys -t %N）
   → L0 传输

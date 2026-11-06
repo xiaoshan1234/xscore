@@ -8,8 +8,9 @@
 ```text
 crates/
   emulator/              后端库（L0–L2）
-  emulator-frontend/     CLI 前端（L3–L5 模拟）
-  xscore/                前身 CLI/daemon，已过时，保留待清理
+  xscore-protocol/       client/server 共享协议
+  xscore-client/         `xs` 命令客户端
+  xscore-server/         `xs-daemon` 服务端（L3–L5 模拟）
 ```
 
 ## 2. 源码结构
@@ -37,23 +38,34 @@ crates/emulator/src/
   error.rs
   lib.rs
 
-crates/emulator-frontend/src/
-  main.rs                 REPL、命令解析、日志初始化
-  ui/logger.rs            Pane 输出 raw/char 本地文件 logger
-  layout.rs               Node / TmuxContainer / Layout
+crates/xscore-protocol/src/
+  lib.rs                  Request/Response、命令 DTO、IPC 编解码、端口
+crates/xscore-client/src/
+  main.rs                 `xs` 入口
+  cli/                    clap 定义、参数解析、密码边缘处理
+  daemon.rs               daemon 自动拉起、协议协商、RPC
+crates/xscore-server/src/
+  main.rs                 `xs-daemon` 入口与日志初始化
+  server.rs               TCP accept 与请求分发
+  app.rs / pane.rs        常驻状态与 PaneRegistry
+  commands/               命令处理器
+  layout.rs / render.rs   布局与文本渲染
+  tmux/                   tmux 会话协调
 ```
 
 ## 3. 模块依赖
 
 ```text
-emulator-frontend → emulator
+xscore-client → xscore-protocol
+xscore-server → xscore-protocol
+xscore-server → emulator
 emulator: platform ← domain ← term
 ```
 
 - `platform` 只依赖 OS 原语与 tmux 协议，不依赖 domain/term。
 - `domain` 依赖 `platform`；tmux 协议细节封装在 `platform/tmux`。
 - `term` 是纯逻辑层，不依赖 platform/domain。
-- 前端依赖 `emulator`，组合 Domain、TerminalCore 与布局树。
+- server 依赖 `emulator`，组合 Domain、TerminalCore 与布局树；client 不依赖二者。
 
 ## 4. 关键接口
 
@@ -67,8 +79,8 @@ emulator: platform ← domain ← term
 
 ```bash
 cargo build --workspace
-cargo test -p emulator -p emulator-frontend
-cargo clippy -p emulator -p emulator-frontend --all-targets -- -D warnings
+cargo test -p emulator -p xscore-protocol -p xscore-client -p xscore-server
+cargo clippy -p emulator -p xscore-protocol -p xscore-client -p xscore-server --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -80,7 +92,7 @@ cargo fmt --all -- --check
 | `local_domain` | 本地 PTY 端到端 roundtrip |
 | `ssh_shell`（`#[ignore]`） | 真实 SSH shell：PTY 输入输出与 resize |
 | `tmux_ssh` emulator（`#[ignore]`） | russh tmux：I/O、resize、split、kill |
-| `tmux_ssh` frontend（`#[ignore]`） | 前端远端 tmux 路径 |
+| `tmux_ssh` server（`#[ignore]`） | 服务端远端 tmux 路径 |
 | layout unit | 布局树拆分、删除、镜像焦点 |
 
 集成测试统一通过 `python scripts/run_integration_tests.py` 运行，结果写入
@@ -91,4 +103,4 @@ cargo fmt --all -- --check
 - 新 Domain：实现 `Domain`/`PaneHandle`，在 `domain/` 增加模块。
 - 新传输后端：在 `platform/` 增加适配器。
 - 新渲染：替换 CLI 前端的文本快照，消费 `TerminalCore::snapshot` 与布局树。
-- 真前端：保留 `emulator` 不变，替换 `emulator-frontend`。
+- GUI 前端：保留 `emulator` 与 `xscore-server` 不变，将协议响应扩展为结构化视图 DTO。

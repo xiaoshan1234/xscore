@@ -234,8 +234,8 @@ def main() -> int:
                 ["cargo", "test", "-p", "emulator", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
             ),
             Suite(
-                "tmux-frontend",
-                ["cargo", "test", "-p", "emulator-frontend", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
+                "tmux-server",
+                ["cargo", "test", "-p", "xscore-server", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
             ),
         ]
         for suite in planned:

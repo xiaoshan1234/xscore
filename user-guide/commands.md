@@ -13,7 +13,15 @@ xs help                    # 打印简洁命令清单
 xs <command> [args...]     # 执行一条一次性命令
 ```
 
-安装：`cargo install --path crates/emulator-frontend`，得到 `~/.cargo/bin/xs`。
+安装：
+
+```text
+cargo install --path crates/xscore-server
+cargo install --path crates/xscore-client
+```
+
+得到 `~/.cargo/bin/xs` 与 `~/.cargo/bin/xs-daemon`。client 自动在自身目录查找 daemon；
+也可用 `XSCORE_DAEMON_EXE` 指定 daemon 路径。
 
 ## 命令总览
 
@@ -238,7 +246,7 @@ xs help
 ## daemon
 
 ```text
-xs daemon serve    # 前台运行 daemon（一次性命令会自动拉起）
+xs daemon serve    # 前台运行 xs-daemon（一次性命令会自动拉起）
 xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
 xs daemon stop     # 让 daemon 退出
 ```
@@ -248,7 +256,8 @@ xs daemon stop     # 让 daemon 退出
 | 变量 | 用途 |
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
-| `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
+| `RUST_LOG` | 日志级别，默认 `emulator=debug,xscore_server=debug` |
+| `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 可执行文件路径覆盖 |
 
 ## 平台限制
 

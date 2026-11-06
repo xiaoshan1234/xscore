@@ -14,12 +14,14 @@ xscore 是一个终端模拟器。当前交付的是后端（L0–L2：平台抽
 ## 安装
 
 ```bash
-cargo install --path crates/emulator-frontend
+cargo install --path crates/xscore-server
+cargo install --path crates/xscore-client
 ```
 
-安装后二进制名称为 `xs`，放在 `~/.cargo/bin`（确保它在 `PATH` 里）。也可以不安装，
-直接用 `cargo run -p emulator-frontend -- <命令>` 或
-`./target/debug/xs[.exe] <命令>`。
+安装后得到两个二进制：`xs`（命令客户端）和 `xs-daemon`（常驻服务端），都放在
+`~/.cargo/bin`（确保目录在 `PATH` 里）。也可以不安装，先运行
+`cargo build --workspace`，再直接使用 `./target/debug/xs[.exe] <命令>`；client 会在
+同目录寻找 `xs-daemon[.exe]`。
 
 ## 构建与运行
 
@@ -41,13 +43,13 @@ xs
 
 ### 常驻 daemon
 
-一次性命令不直接持有连接：命令通过本地回环 TCP 发给一个常驻 daemon，由它持有所有
-live 连接与 pane 状态。这样 `xs tml add --url shell://powershell` 退出后，pane
-仍在 daemon 里，下一条 `xs ls pane` 还能看到。daemon 在第一条命令时自动拉起，也可以
-手动管理：
+一次性命令不直接持有连接：`xs` 通过本地回环 TCP 把命令发给独立的 `xs-daemon`，
+由它持有所有 live 连接与 pane 状态。这样 `xs tml add --url shell://powershell`
+退出后，pane 仍在 daemon 里，下一条 `xs ls pane` 还能看到。daemon 在第一条命令时
+自动拉起，也可以手动管理：
 
 ```text
-xs daemon serve    # 前台运行 daemon（自动拉起的也是这个）
+xs daemon serve    # 前台运行 xs-daemon（自动拉起的也是这个）
 xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
 xs daemon stop     # 让 daemon 退出
 ```
@@ -128,7 +130,7 @@ xs layout
 
 ## 真实环境测试
 
-仓库带有 SSH shell、远端 tmux 和前端 tmux 集成测试。测试从工作区根目录的
+仓库带有 SSH shell、远端 tmux 和服务端 tmux 集成测试。测试从工作区根目录的
 `test.config` 读取 SSH 连接信息，格式见
 [`test-example.config`](../test-example.config)：
 
@@ -143,7 +145,7 @@ python scripts/run_integration_tests.py
 ```
 
 脚本会运行本地 PTY、SSH shell 往返/resize、tmux attach/输入/输出/resize/split/
-kill，以及前端 tmux 路径。每次运行会在 `test-results/<UTC 时间>/` 生成
+kill，以及服务端 tmux 路径。每次运行会在 `test-results/<UTC 时间>/` 生成
 `summary.md`、`results.json`、`junit.xml` 和逐套件日志；日志中的 SSH 密码会被
 脱敏。
 

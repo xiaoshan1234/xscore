@@ -1,0 +1,24 @@
+[package]
+name = "xscore-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+autobins = false
+
+[[bin]]
+name = "xs-daemon"
+path = "src/main.rs"
+
+[dependencies]
+emulator = { path = "../emulator" }
+xscore-protocol = { path = "../xscore-protocol" }
+anyhow.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+russh.workspace = true
+russh-keys.workspace = true

@@ -15,15 +15,16 @@ xscore 是一个终端模拟器：原生支持 `tmux -CC` 控制模式、普通 
 
 ```bash
 cargo build --workspace
-cargo test -p emulator -p emulator-frontend
-cargo clippy -p emulator -p emulator-frontend --all-targets -- -D warnings
+cargo test -p emulator -p xscore-protocol -p xscore-client -p xscore-server
+cargo clippy -p emulator -p xscore-protocol -p xscore-client -p xscore-server --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
 运行 CLI 前端：
 
 ```bash
-cargo install --path crates/emulator-frontend   # 安装 xs 到 ~/.cargo/bin
+cargo install --path crates/xscore-server       # 安装 xs-daemon 到 ~/.cargo/bin
+cargo install --path crates/xscore-client       # 安装 xs 到 ~/.cargo/bin
 xs ls pane                                       # 列出当前 pane
 ```
 
@@ -44,7 +45,7 @@ Markdown、JSON、JUnit XML 和逐套件日志。
 
 ## 架构与模块
 
-依赖单向：前端 → 后端库 → 平台。
+依赖单向：client/server → 共享协议；server → 后端库 → 平台。client 不依赖后端库。
 
 ```text
 crates/emulator/            L0–L2 后端库
@@ -52,22 +53,16 @@ crates/emulator/            L0–L2 后端库
   domain/                   L1：Domain / PaneHandle、Local/Ssh/Tmux 三种域
   term/                     L2：VT 状态机 + 网格（Grid/VtTerm）
 
-crates/emulator-frontend/   L3–L5 CLI 前端
-  src/main.rs               入口：日志、模式路由（一次性 / daemon）
-  src/cli/                  clap 命令定义（cmd）+ 参数/URL 解析（parse）+ 密码边缘解析（secrets）
-  src/ui/                   应用核心（GUI 可复用）
-    app.rs                  App 状态：pane 注册表、布局、window group、tmux 会话
-    pane.rs                 PaneRegistry：PaneHandle ↔ TerminalCore 绑定 + 字节泵
-    logger.rs               Pane 输出 raw/char 本地文件 logger
-    layout.rs               L3 布局树（Node / TmuxContainer / PaneRect）
-    render.rs               L4 文本渲染（快照 / 表格 / 布局树 / 状态）
-    window_group.rs         WindowGroup + GroupId（默认组 / tmux session 组）
-    commands/               L5 命令分发与各命令处理器
-    tmux/                   tmux 会话协调（events 差集 / session reconcile）
-  src/daemon/               常驻 daemon：ipc / protocol / client / server
-  src/logging.rs            日志初始化（文件 + stderr WARN）
+crates/xscore-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
+crates/xscore-client/        `xs` 命令客户端：clap、密码边缘解析、自动拉起 daemon、RPC
+crates/xscore-server/        `xs-daemon` 常驻服务端：App、pane、layout、logger、tmux、命令处理器
+  src/main.rs                daemon 入口
+  src/server.rs              TCP accept、协议握手与请求分发
+  src/app.rs                 App 状态：pane 注册表、布局、window group、tmux 会话
+  src/pane.rs                PaneRegistry：PaneHandle ↔ TerminalCore 绑定 + 字节泵
+  src/commands/              服务端命令处理器
+  src/tmux/                  tmux 会话协调（events 差集 / session reconcile）
 
-crates/xscore/              前身 CLI/daemon，已废弃，待清理
 ```
 
 命名规范见 [rules/rust-name-rules.md](rules/rust-name-rules.md)：函数/变量
@@ -82,8 +77,8 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 
 ## 必须知道的技术坑
 
-- **一次性 CLI 走常驻 daemon**：`xs <command>` 通过本地回环 TCP 把命令发给
-  `xs daemon serve`，live 连接与 pane 状态才不随 CLI 进程退出而丢失。daemon 按需
+- **一次性 CLI 走常驻 daemon**：`xs <command>` 通过本地回环 TCP 把命令发给独立的
+  `xs-daemon`，live 连接与 pane 状态才不随 CLI 进程退出而丢失。daemon 按需
   自动拉起；密码在客户端解析后随命令传入。
 - **tmux 用 `-C`，不是 `-CC`**：`-CC` 会 `tcgetattr`，在管道/部分 tty 场景下卡死。
 - **tmux `-F` 分隔符用 `|`**：tab 会被展开成 `ESC[NC`，控制字符会被转义成 `\ooo`，
@@ -114,7 +109,8 @@ crates/xscore/              前身 CLI/daemon，已废弃，待清理
 | 名称 | 用途 |
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
-| `RUST_LOG` | 日志级别，默认 `emulator=debug,emulator_frontend=debug` |
+| `RUST_LOG` | 日志级别，默认 `emulator=debug,xscore_server=debug` |
+| `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 可执行文件路径覆盖 |
 
 ## 平台限制
 
