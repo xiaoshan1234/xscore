@@ -25,6 +25,8 @@ xscore = { path = "../xscore/crates/xscore" }
 ```
 
 路径必须指向包含 `xscore` 的 `Cargo.toml` 的目录，而不是仓库根目录。
+该 crate 的 `Cargo.toml` 不依赖根 workspace 的版本或依赖继承，因此也可以直接将
+`crates/xscore` 复制或作为子模块放入其他项目。
 
 也可以让 Cargo 修改依赖清单：
 

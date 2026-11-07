@@ -1,8 +1,8 @@
 [package]
 name = "xscore"
-edition.workspace = true
-version.workspace = true
-license.workspace = true
+edition = "2021"
+version = "0.6.0"
+license = "MIT"
 description = "Reusable local PTY/ConPTY, SSH, and tmux terminal transport library"
 readme = "README.md"
 keywords = ["terminal", "pty", "ssh", "tmux", "conpty"]
@@ -13,12 +13,12 @@ homepage = "https://github.com/xiaoshan1234/xscore"
 
 [dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
-thiserror.workspace = true
-async-trait.workspace = true
-portable-pty.workspace = true
-tracing.workspace = true
-russh.workspace = true
-russh-keys.workspace = true
+thiserror = "1"
+async-trait = "0.1"
+portable-pty = "0.8"
+tracing = "0.1"
+russh = "0.43"
+russh-keys = "0.43"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "time"] }
