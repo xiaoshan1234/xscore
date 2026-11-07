@@ -62,9 +62,9 @@ reader 任务 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N �
 
 ## 5. 日志
 
-- 默认写 `emulator.log`（`XSCORE_LOG` 改路径），追加写入。
+- 默认写 `xscore.log`（`XSCORE_LOG` 改路径），追加写入。
 - 控制台仅 WARN 以上；debug/trace 进文件。
-- 级别默认 `emulator=debug,xscore_server=debug`，`RUST_LOG` 覆盖。
+- 级别默认 `xscore=debug,xsc_server=debug`，`RUST_LOG` 覆盖。
 
 ## 6. 故障与恢复
 

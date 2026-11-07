@@ -1,0 +1,24 @@
+[package]
+name = "xsc-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+autobins = false
+
+[[bin]]
+name = "xs-daemon"
+path = "src/main.rs"
+
+[dependencies]
+xscore = { path = "../xscore" }
+xsc-protocol = { path = "../xsc-protocol" }
+anyhow.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+russh.workspace = true
+russh-keys.workspace = true

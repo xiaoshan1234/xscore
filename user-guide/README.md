@@ -14,8 +14,8 @@ xscore 是一个终端模拟器。当前交付的是后端（L0–L2：平台抽
 ## 安装
 
 ```bash
-cargo install --path crates/xscore-server
-cargo install --path crates/xscore-client
+cargo install --path crates/xsc-server
+cargo install --path crates/xsc-client
 ```
 
 安装后得到两个二进制：`xs`（命令客户端）和 `xs-daemon`（常驻服务端），都放在

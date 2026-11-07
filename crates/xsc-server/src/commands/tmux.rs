@@ -1,0 +1,129 @@
+//! tmux 命令：attach / sync / status。
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use tokio::sync::Mutex;
+
+use xscore::domain::TmuxDomain;
+use xscore::platform::tmux::{TmuxHostConfig, TmuxSocket};
+
+use crate::app::App;
+use crate::layout::{PaneRect, TmuxContainer};
+use crate::render::Output;
+use crate::tmux::session::{handle_event, reconcile_session, TmuxMeta};
+
+/// 接入 tmux session，注册 pane 并启动结构事件监听。
+///
+/// 参数/输出：`app` 为输入输出；`host`、`socket`、`session`、`app_arc` 为输入；
+/// 返回 attach 摘要。
+pub(crate) async fn attach_session(
+    app: &mut App,
+    host: &TmuxHostConfig,
+    socket: &TmuxSocket,
+    session: &str,
+    app_arc: Arc<Mutex<App>>,
+) -> Result<Output> {
+    let domain = TmuxDomain::new();
+    let panes = domain.attach(host, socket, session).await?;
+    let control = panes.first().map(|pane| pane.control().clone());
+
+    let mut out = Output::new();
+    let mut groups: Vec<(String, u16, u16, bool, Vec<PaneRect>)> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for pane in panes {
+        let (cols, rows) = (pane.cols(), pane.rows());
+        let (x, y) = (pane.x(), pane.y());
+        let window = pane.window().to_string();
+        let (window_cols, window_rows) = (pane.window_cols(), pane.window_rows());
+        let window_active = pane.window_active();
+        let handle = pane.tmux_handle().to_string();
+        let id = app.register_tmux_pane(pane, cols, rows, session, &window);
+        let rect = PaneRect {
+            id,
+            x,
+            y,
+            cols,
+            rows,
+        };
+        app.tmux.insert(
+            id,
+            TmuxMeta {
+                session: session.to_string(),
+                window: window.clone(),
+                handle,
+                window_active,
+                rect,
+                window_cols,
+                window_rows,
+            },
+        );
+        let group = *index.entry(window.clone()).or_insert_with(|| {
+            groups.push((window, window_cols, window_rows, window_active, Vec::new()));
+            groups.len() - 1
+        });
+        groups[group].4.push(rect);
+    }
+    for (window, window_cols, window_rows, window_active, pane_rects) in groups {
+        if window_active {
+            let active = pane_rects.first().map(|rect| rect.id);
+            let container = TmuxContainer {
+                window: window.clone(),
+                cols: window_cols,
+                rows: window_rows,
+                panes: pane_rects.clone(),
+                active,
+            };
+            app.layout.add_mirror(container);
+            out.line(format!(
+                "tmux window {window} (active): {} pane(s)",
+                pane_rects.len()
+            ));
+        } else {
+            out.line(format!(
+                "tmux window {window}: {} pane(s)",
+                pane_rects.len()
+            ));
+        }
+    }
+
+    if let Some(control) = control {
+        app.tmux_controls
+            .insert(session.to_string(), control.clone());
+        let mut events = control.subscribe();
+        let event_app = app_arc.clone();
+        let event_session = session.to_string();
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                let should_stop = handle_event(&event_app, &event_session, &control, event).await;
+                if should_stop {
+                    break;
+                }
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// 将指定 tmux group 与服务端结构双向同步。
+///
+/// 参数/输出：`app` 为输入输出；`group_id` 为输入；返回增删数量摘要。
+pub async fn sync(app: &mut App, group_id: String) -> Result<Output> {
+    let group = app
+        .resolve_group(&group_id)
+        .ok_or_else(|| anyhow!("group not found: {group_id}"))?;
+    let session = app
+        .group_session(group)
+        .ok_or_else(|| anyhow!("group {group_id} is not a tmux session group"))?
+        .to_string();
+    let control = app
+        .tmux_control(&session)
+        .ok_or_else(|| anyhow!("tmux session control unavailable: {session}"))?;
+    let (removed, added) = reconcile_session(app, &session, &control).await?;
+    let mut out = Output::new();
+    out.line(format!(
+        "sync group {group_id} ({session}): removed {removed} pane(s), added {added} pane(s)"
+    ));
+    Ok(out)
+}

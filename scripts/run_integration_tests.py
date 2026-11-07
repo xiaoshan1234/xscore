@@ -223,19 +223,19 @@ def main() -> int:
         planned = [
             Suite(
                 "local-domain",
-                ["cargo", "test", "-p", "emulator", "--test", "local_domain", "--", "--nocapture"],
+                ["cargo", "test", "-p", "xscore", "--test", "local_domain", "--", "--nocapture"],
             ),
             Suite(
                 "ssh-shell",
-                ["cargo", "test", "-p", "emulator", "--test", "ssh_shell", "--", "--ignored", "--nocapture"],
+                ["cargo", "test", "-p", "xscore", "--test", "ssh_shell", "--", "--ignored", "--nocapture"],
             ),
             Suite(
-                "tmux-emulator",
-                ["cargo", "test", "-p", "emulator", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
+                "tmux-xscore",
+                ["cargo", "test", "-p", "xscore", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
             ),
             Suite(
                 "tmux-server",
-                ["cargo", "test", "-p", "xscore-server", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
+                ["cargo", "test", "-p", "xsc-server", "--test", "tmux_ssh", "--", "--ignored", "--nocapture"],
             ),
         ]
         for suite in planned:

@@ -532,19 +532,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "emulator"
-version = "0.6.0"
-dependencies = [
- "async-trait",
- "portable-pty",
- "russh",
- "russh-keys",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2089,18 +2076,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "xscore-client"
+name = "xsc-client"
 version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
  "rpassword",
  "tokio",
- "xscore-protocol",
+ "xsc-protocol",
 ]
 
 [[package]]
-name = "xscore-protocol"
+name = "xsc-protocol"
 version = "0.6.0"
 dependencies = [
  "anyhow",
@@ -2110,19 +2097,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "xscore-server"
+name = "xsc-server"
 version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "emulator",
  "russh",
  "russh-keys",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "xscore-protocol",
+ "xsc-protocol",
+ "xscore",
+]
+
+[[package]]
+name = "xscore"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "portable-pty",
+ "russh",
+ "russh-keys",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

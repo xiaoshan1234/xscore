@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/emulator",
-    "crates/xscore-protocol",
-    "crates/xscore-client",
-    "crates/xscore-server",
+    "crates/xscore",
+    "crates/xsc-protocol",
+    "crates/xsc-client",
+    "crates/xsc-server",
 ]
 
 [workspace.package]

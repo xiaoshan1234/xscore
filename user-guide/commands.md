@@ -16,8 +16,8 @@ xs <command> [args...]     # 执行一条一次性命令
 安装：
 
 ```text
-cargo install --path crates/xscore-server
-cargo install --path crates/xscore-client
+cargo install --path crates/xsc-server
+cargo install --path crates/xsc-client
 ```
 
 得到 `~/.cargo/bin/xs` 与 `~/.cargo/bin/xs-daemon`。client 自动在自身目录查找 daemon；
@@ -255,8 +255,8 @@ xs daemon stop     # 让 daemon 退出
 
 | 变量 | 用途 |
 |---|---|
-| `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
-| `RUST_LOG` | 日志级别，默认 `emulator=debug,xscore_server=debug` |
+| `XSCORE_LOG` | 日志文件路径，默认 `xscore.log` |
+| `RUST_LOG` | 日志级别，默认 `xscore=debug,xsc_server=debug` |
 | `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 可执行文件路径覆盖 |
 
 ## 平台限制

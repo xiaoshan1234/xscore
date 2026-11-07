@@ -267,7 +267,7 @@ resize。
 
 ## 7. L5 应用 / 协调层
 
-当前实现中，L5 属于 `xscore-server`（`xs-daemon`）。`xscore-client`（`xs`）只负责
+当前实现中，L5 属于 `xsc-server`（`xs-daemon`）。`xsc-client`（`xs`）只负责
 把命令解析为共享协议请求并打印响应，不持有布局、`TerminalCore` 或任何 live 连接。
 
 **职责**

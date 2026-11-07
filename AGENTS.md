@@ -15,16 +15,16 @@ xscore 是一个终端模拟器：原生支持 `tmux -CC` 控制模式、普通 
 
 ```bash
 cargo build --workspace
-cargo test -p emulator -p xscore-protocol -p xscore-client -p xscore-server
-cargo clippy -p emulator -p xscore-protocol -p xscore-client -p xscore-server --all-targets -- -D warnings
+cargo test -p xscore -p xsc-protocol -p xsc-client -p xsc-server
+cargo clippy -p xscore -p xsc-protocol -p xsc-client -p xsc-server --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
 运行 CLI 前端：
 
 ```bash
-cargo install --path crates/xscore-server       # 安装 xs-daemon 到 ~/.cargo/bin
-cargo install --path crates/xscore-client       # 安装 xs 到 ~/.cargo/bin
+cargo install --path crates/xsc-server       # 安装 xs-daemon 到 ~/.cargo/bin
+cargo install --path crates/xsc-client       # 安装 xs 到 ~/.cargo/bin
 xs ls pane                                       # 列出当前 pane
 ```
 
@@ -48,14 +48,14 @@ Markdown、JSON、JUnit XML 和逐套件日志。
 依赖单向：client/server → 共享协议；server → 后端库 → 平台。client 不依赖后端库。
 
 ```text
-crates/emulator/            L0–L2 后端库
+crates/xscore/            L0–L2 后端库
   platform/                 L0：PTY/ConPTY、SSH（russh）、tmux 控制客户端
   domain/                   L1：Domain / PaneHandle、Local/Ssh/Tmux 三种域
   term/                     L2：VT 状态机 + 网格（Grid/VtTerm）
 
-crates/xscore-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
-crates/xscore-client/        `xs` 命令客户端：clap、密码边缘解析、自动拉起 daemon、RPC
-crates/xscore-server/        `xs-daemon` 常驻服务端：App、pane、layout、logger、tmux、命令处理器
+crates/xsc-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
+crates/xsc-client/        `xs` 命令客户端：clap、密码边缘解析、自动拉起 daemon、RPC
+crates/xsc-server/        `xs-daemon` 常驻服务端：App、pane、layout、logger、tmux、命令处理器
   src/main.rs                daemon 入口
   src/server.rs              TCP accept、协议握手与请求分发
   src/app.rs                 App 状态：pane 注册表、布局、window group、tmux 会话
@@ -73,7 +73,7 @@ crates/xscore-server/        `xs-daemon` 常驻服务端：App、pane、layout�
 - 跨文件可见的 `pub` / `pub(crate)` 类型、字段、枚举变体、常量和函数必须有
   `///` 注释。
 - 函数和方法注释必须写明作用、参数方向（输入、输出或输入输出）和返回值/异步输出。
-- `emulator` 库启用 `missing_docs`；新增 crate 外公共接口缺失注释会触发编译警告。
+- `xscore` 库启用 `missing_docs`；新增 crate 外公共接口缺失注释会触发编译警告。
 
 ## 必须知道的技术坑
 
@@ -108,8 +108,8 @@ crates/xscore-server/        `xs-daemon` 常驻服务端：App、pane、layout�
 
 | 名称 | 用途 |
 |---|---|
-| `XSCORE_LOG` | 日志文件路径，默认 `emulator.log` |
-| `RUST_LOG` | 日志级别，默认 `emulator=debug,xscore_server=debug` |
+| `XSCORE_LOG` | 日志文件路径，默认 `xscore.log` |
+| `RUST_LOG` | 日志级别，默认 `xscore=debug,xsc_server=debug` |
 | `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 可执行文件路径覆盖 |
 
 ## 平台限制

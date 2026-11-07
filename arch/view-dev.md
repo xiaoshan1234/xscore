@@ -7,16 +7,16 @@
 
 ```text
 crates/
-  emulator/              后端库（L0–L2）
-  xscore-protocol/       client/server 共享协议
-  xscore-client/         `xs` 命令客户端
-  xscore-server/         `xs-daemon` 服务端（L3–L5 模拟）
+  xscore/              后端库（L0–L2）
+  xsc-protocol/       client/server 共享协议
+  xsc-client/         `xs` 命令客户端
+  xsc-server/         `xs-daemon` 服务端（L3–L5 模拟）
 ```
 
 ## 2. 源码结构
 
 ```text
-crates/emulator/src/
+crates/xscore/src/
   platform/
     mod.rs                LocalPty（portable-pty）
     ssh.rs                SshConnection（russh）
@@ -38,13 +38,13 @@ crates/emulator/src/
   error.rs
   lib.rs
 
-crates/xscore-protocol/src/
+crates/xsc-protocol/src/
   lib.rs                  Request/Response、命令 DTO、IPC 编解码、端口
-crates/xscore-client/src/
+crates/xsc-client/src/
   main.rs                 `xs` 入口
   cli/                    clap 定义、参数解析、密码边缘处理
   daemon.rs               daemon 自动拉起、协议协商、RPC
-crates/xscore-server/src/
+crates/xsc-server/src/
   main.rs                 `xs-daemon` 入口与日志初始化
   server.rs               TCP accept 与请求分发
   app.rs / pane.rs        常驻状态与 PaneRegistry
@@ -56,16 +56,16 @@ crates/xscore-server/src/
 ## 3. 模块依赖
 
 ```text
-xscore-client → xscore-protocol
-xscore-server → xscore-protocol
-xscore-server → emulator
-emulator: platform ← domain ← term
+xsc-client → xsc-protocol
+xsc-server → xsc-protocol
+xsc-server → xscore
+xscore: platform ← domain ← term
 ```
 
 - `platform` 只依赖 OS 原语与 tmux 协议，不依赖 domain/term。
 - `domain` 依赖 `platform`；tmux 协议细节封装在 `platform/tmux`。
 - `term` 是纯逻辑层，不依赖 platform/domain。
-- server 依赖 `emulator`，组合 Domain、TerminalCore 与布局树；client 不依赖二者。
+- server 依赖 `xscore`，组合 Domain、TerminalCore 与布局树；client 不依赖二者。
 
 ## 4. 关键接口
 
@@ -79,8 +79,8 @@ emulator: platform ← domain ← term
 
 ```bash
 cargo build --workspace
-cargo test -p emulator -p xscore-protocol -p xscore-client -p xscore-server
-cargo clippy -p emulator -p xscore-protocol -p xscore-client -p xscore-server --all-targets -- -D warnings
+cargo test -p xscore -p xsc-protocol -p xsc-client -p xsc-server
+cargo clippy -p xscore -p xsc-protocol -p xsc-client -p xsc-server --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -88,10 +88,10 @@ cargo fmt --all -- --check
 
 | 测试 | 目的 |
 |---|---|
-| emulator unit | tmux 协议/格式、VT 核心、argv |
+| xscore unit | tmux 协议/格式、VT 核心、argv |
 | `local_domain` | 本地 PTY 端到端 roundtrip |
 | `ssh_shell`（`#[ignore]`） | 真实 SSH shell：PTY 输入输出与 resize |
-| `tmux_ssh` emulator（`#[ignore]`） | russh tmux：I/O、resize、split、kill |
+| `tmux_ssh` xscore（`#[ignore]`） | russh tmux：I/O、resize、split、kill |
 | `tmux_ssh` server（`#[ignore]`） | 服务端远端 tmux 路径 |
 | layout unit | 布局树拆分、删除、镜像焦点 |
 
@@ -103,4 +103,4 @@ cargo fmt --all -- --check
 - 新 Domain：实现 `Domain`/`PaneHandle`，在 `domain/` 增加模块。
 - 新传输后端：在 `platform/` 增加适配器。
 - 新渲染：替换 CLI 前端的文本快照，消费 `TerminalCore::snapshot` 与布局树。
-- GUI 前端：保留 `emulator` 与 `xscore-server` 不变，将协议响应扩展为结构化视图 DTO。
+- GUI 前端：保留 `xscore` 与 `xsc-server` 不变，将协议响应扩展为结构化视图 DTO。

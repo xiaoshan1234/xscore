@@ -17,20 +17,20 @@
 ## 目录
 
 ```text
-crates/emulator/            后端库（L0–L2）
+crates/xscore/            后端库（L0–L2）
   platform/                 L0 平台抽象
   domain/                   L1 域/连接抽象
   term/                     L2 终端核心
-crates/xscore-protocol/    client/server 共享线协议
-crates/xscore-client/      xs 命令客户端
-crates/xscore-server/      xs-daemon 与 L3–L5 应用核心
+crates/xsc-protocol/    client/server 共享线协议
+crates/xsc-client/      xs 命令客户端
+crates/xsc-server/      xs-daemon 与 L3–L5 应用核心
 ```
 
 ## 构建与测试
 
 ```bash
 cargo build --workspace
-cargo test -p emulator -p xscore-protocol -p xscore-client -p xscore-server
-cargo run -p xscore-server
-cargo run -p xscore-client -- ls pane
+cargo test -p xscore -p xsc-protocol -p xsc-client -p xsc-server
+cargo run -p xsc-server
+cargo run -p xsc-client -- ls pane
 ```

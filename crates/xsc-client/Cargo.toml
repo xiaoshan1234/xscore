@@ -1,0 +1,17 @@
+[package]
+name = "xsc-client"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+autobins = false
+
+[[bin]]
+name = "xs"
+path = "src/main.rs"
+
+[dependencies]
+xsc-protocol = { path = "../xsc-protocol" }
+anyhow.workspace = true
+clap.workspace = true
+rpassword.workspace = true
+tokio.workspace = true

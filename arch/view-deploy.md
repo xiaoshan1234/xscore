@@ -45,7 +45,7 @@ xs → xs-daemon → russh channel → exec tmux -C attach -t <session>
 
 | 名称 | 用途 |
 |---|---|
-| `XSCORE_LOG` | 日志文件路径（默认 `emulator.log`） |
+| `XSCORE_LOG` | 日志文件路径（默认 `xscore.log`） |
 | `RUST_LOG` | 日志级别 |
 | `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 路径覆盖 |
 
