@@ -8,11 +8,11 @@
 用户命令由轻量 client 进程发送给常驻 daemon；daemon 内运行后端库与若干子进程：
 
 ```text
-xs client
+xsc client
   转发原始 argv
   边缘密码提示 / 显示输出
 
-xs-daemon
+xss
   argv 解析与命令分发
   per-pane TerminalCore 泵任务
   per-logger 文件写入任务
@@ -42,7 +42,7 @@ PTY/SSH/tmux → Domain 路由 → TerminalHandle 输出流 → TerminalCore.fee
 ### 输入
 
 ```text
-xs client → xs-daemon → TerminalHandle.send_input → Domain 封装 → PTY/SSH/send-keys
+xsc client → xss → TerminalHandle.send_input → Domain 封装 → PTY/SSH/send-keys
 ```
 
 ### tmux 控制
@@ -75,4 +75,4 @@ reader 任务 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N �
 | SSH 断开 | 不再产生新输出；pane 仍留在注册表，需显式删除 |
 | tmux `%exit` | reader 标记 closed，控制连接结束 |
 | tmux server 删除 pane/window | 用 `tmx sync <group-id>` 按需重枚举指定 group 并收敛 |
-| 密码错误 | ssh 认证失败，错误经 IPC 返回，由 `xs` client 打印 |
+| 密码错误 | ssh 认证失败，错误经 IPC 返回，由 `xsc` client 打印 |

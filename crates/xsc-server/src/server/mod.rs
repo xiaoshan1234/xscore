@@ -32,7 +32,7 @@ pub async fn run() -> Result<()> {
         }
     };
     tracing::info!(%port, "daemon listening");
-    eprintln!("xs daemon listening on 127.0.0.1:{port} (stop with `xs daemon stop`)");
+    eprintln!("xsc daemon listening on 127.0.0.1:{port} (stop with `xsc daemon stop`)");
 
     let app = Arc::new(Mutex::new(App::new()));
     let shutdown = Arc::new(Notify::new());

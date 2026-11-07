@@ -1,4 +1,4 @@
-//! `xs` client: forward raw argv to the resident daemon and print its output.
+//! `xsc` client: forward raw argv to the resident daemon and print its output.
 
 mod daemon;
 mod secrets;

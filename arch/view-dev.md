@@ -9,8 +9,8 @@
 crates/
   xscore/              连接/传输后端库（L0–L1）
   xsc-protocol/       client/server 共享协议
-  xsc-client/         `xs` 命令客户端
-  xsc-server/         `xs-daemon` 服务端（L3–L5 模拟）
+  xsc-client/         `xsc` 命令客户端
+  xsc-server/         `xss` 服务端（L2–L5 模拟）
 ```
 
 ## 2. 源码结构
@@ -37,11 +37,11 @@ crates/xscore/src/
 crates/xsc-protocol/src/
   lib.rs                  Request/Response、IPC 编解码、端口
 crates/xsc-client/src/
-  main.rs                 `xs` 入口：转发 argv、打印输出
+  main.rs                 `xsc` 入口：转发 argv、打印输出
   secrets.rs              边缘密码提示（daemon 脱离终端无法自行 prompt）
   daemon.rs               daemon 自动拉起、协议协商、RPC
 crates/xsc-server/src/
-  main.rs                 `xs-daemon` 入口与日志初始化
+  main.rs                 `xss` 入口与日志初始化
   server/                 回环 TCP：accept、握手、请求分发
   cli/                    命令输入：args（clap）/ model / url / map
   app/                    应用状态：App / TerminalRegistry / window/group

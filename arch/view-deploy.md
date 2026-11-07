@@ -7,8 +7,8 @@
 
 | 单元 | 位置 | 生命周期 |
 |---|---|---|
-| `xs` | 用户主机 | 单条命令期间 |
-| `xs-daemon` | 用户主机 | 常驻，直到 `xs daemon stop` |
+| `xsc` | 用户主机 | 单条命令期间 |
+| `xss` | 用户主机 | 常驻，直到 `xsc daemon stop` |
 | 本地 Shell / wsl.exe | 用户主机 | 随 pane |
 | russh SSH channel（tmux 控制） | 用户主机 → 远端 | 随 session |
 | tmux server | 本地/WSL/远端 | 独立于本程序 |
@@ -18,19 +18,19 @@
 ### 本地（Linux / WSL 内）
 
 ```text
-xs → xs-daemon → ConPTY/PTY → tmux -C attach -t <session>
+xsc → xss → ConPTY/PTY → tmux -C attach -t <session>
 ```
 
 ### WSL tmux（Windows 原生程序）
 
 ```text
-xs → xs-daemon → ConPTY → wsl.exe --exec tmux -C attach -t <session>
+xsc → xss → ConPTY → wsl.exe --exec tmux -C attach -t <session>
 ```
 
 ### 远端 tmux（SSH）
 
 ```text
-xs → xs-daemon → russh channel → exec tmux -C attach -t <session>
+xsc → xss → russh channel → exec tmux -C attach -t <session>
 ```
 
 连接在进程内由 russh 建立，密码或私钥直接参与 SSH 认证，不启动系统 ssh，
@@ -47,7 +47,7 @@ xs → xs-daemon → russh channel → exec tmux -C attach -t <session>
 |---|---|
 | `XSCORE_LOG` | 日志文件路径（默认 `xscore.log`） |
 | `RUST_LOG` | 日志级别 |
-| `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 路径覆盖 |
+| `XSCORE_DAEMON_EXE` | 可选的 `xss` 路径覆盖 |
 
 ## 5. 平台限制
 
@@ -76,8 +76,8 @@ cargo fmt --all -- --check
 ### 安装
 
 ```bash
-cargo install --path crates/xsc-server   # 安装 `xs-daemon`
-cargo install --path crates/xsc-client   # 安装 `xs`
+cargo install --path crates/xsc-server   # 安装 `xss`
+cargo install --path crates/xsc-client   # 安装 `xsc`
 ```
 
 两个可执行文件装到 cargo 的 bin 目录（Linux/macOS 为 `~/.cargo/bin`，Windows 为
@@ -85,26 +85,26 @@ cargo install --path crates/xsc-client   # 安装 `xs`
 
 ### 运行
 
-`xs` 是一次性 CLI，命令通过本地回环 TCP 发给常驻的 `xs-daemon`；daemon 不存在时
-会自动拉起。不带参数运行 `xs` 可查看帮助。
+`xsc` 是一次性 CLI，命令通过本地回环 TCP 发给常驻的 `xss`；daemon 不存在时
+会自动拉起。不带参数运行 `xsc` 可查看帮助。
 
 ```bash
-xs ls pane                    # 列出当前 pane
-xs ls window [<group>]        # 列出窗口，可限定 group
-xs ls group                   # 列出窗口组
-xs tml add --url shell://powershell
-xs tml read <pane-id>         # 读 pane 渲染快照
-xs tml write <pane-id> text   # 向 pane 发送文本
-xs tmx attach --url tmux://<socket>/<session>
-xs layout [<window-id>]       # 打印布局树
+xsc ls pane                    # 列出当前 pane
+xsc ls window [<group>]        # 列出窗口，可限定 group
+xsc ls group                   # 列出窗口组
+xsc tml add --url shell://powershell
+xsc tml read <pane-id>         # 读 pane 渲染快照
+xsc tml write <pane-id> text   # 向 pane 发送文本
+xsc tmx attach --url tmux://<socket>/<session>
+xsc layout [<window-id>]       # 打印布局树
 ```
 
 daemon 生命周期：
 
 ```bash
-xs daemon serve               # 前台运行 daemon
-xs daemon status              # 查看 daemon 当前状态
-xs daemon stop                # 停止 daemon
+xsc daemon serve               # 前台运行 daemon
+xsc daemon status              # 查看 daemon 当前状态
+xsc daemon stop                # 停止 daemon
 ```
 
 ### 集成测试

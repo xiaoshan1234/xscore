@@ -1,4 +1,4 @@
-//! Shared transport contract between the `xs` client and the resident daemon.
+//! Shared transport contract between the `xsc` client and the resident daemon.
 //!
 //! The client forwards the raw command argv over a framed loopback TCP
 //! connection; all command interpretation lives in the daemon (`xsc-server`).

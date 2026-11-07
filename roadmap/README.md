@@ -1,7 +1,7 @@
 # 终端模拟器后端实现计划
 
 权威架构见 [terminal-emulator.md](../arch/terminal-emulator.md) 与 4 个视图。范围：
-后端 L0–L2 为实施对象，前端 L3–L5 以 CLI 模式模拟（操作 + 数据读取）。
+后端 L0–L1 为实施对象，前端 L2–L5 以 CLI 模式模拟（操作 + 数据读取）。
 
 ## 里程碑
 
@@ -17,13 +17,12 @@
 ## 目录
 
 ```text
-crates/xscore/            后端库（L0–L2）
+crates/xscore/            后端库（L0–L1）
   platform/                 L0 平台抽象
   domain/                   L1 域/连接抽象
-  term/                     L2 终端核心
 crates/xsc-protocol/    client/server 共享线协议
-crates/xsc-client/      xs 命令客户端
-crates/xsc-server/      xs-daemon 与 L3–L5 应用核心
+crates/xsc-client/      xsc 命令客户端
+crates/xsc-server/      xss 与 L2–L5 应用核心（含 term）
 ```
 
 ## 构建与测试

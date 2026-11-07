@@ -1,4 +1,4 @@
-//! clap 命令面：把 `xs` 的 argv 解析为 `Cmd`。
+//! clap 命令面：把 `xsc` 的 argv 解析为 `Cmd`。
 //!
 //! 命令解析由 daemon 完成，客户端只转发原始 argv。
 
@@ -6,10 +6,10 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-/// `xs` 的顶层 clap 命令。
+/// `xsc` 的顶层 clap 命令。
 #[derive(Debug, Parser)]
 #[command(
-    name = "xs",
+    name = "xsc",
     about = "terminal emulator CLI",
     disable_help_subcommand = true
 )]
@@ -181,7 +181,7 @@ pub enum LsCmd {
 ///
 /// 参数/输出：`args` 为输入；成功返回 [`Cmd`]，解析失败返回 clap 错误。
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::Error> {
-    Command::try_parse_from(std::iter::once("xs".to_string()).chain(args))
+    Command::try_parse_from(std::iter::once("xsc".to_string()).chain(args))
         .map(|command| command.command)
 }
 

@@ -1,7 +1,7 @@
 # xscore 使用说明
 
-xscore 是一个终端模拟器。当前交付的是后端（L0–L2：平台抽象、域/连接、VT 核心）
-加一个 CLI 模式的模拟前端（L3–L5：布局树、渲染、协调），用于在图形界面完成之前
+xscore 是一个终端模拟器。当前交付的是后端（L0–L1：平台抽象、域/连接）
+加一个 CLI 模式的模拟前端（L2–L5：VT 核心、布局树、渲染、协调），用于在图形界面完成之前
 驱动和验证后端。
 
 目标能力：原生支持 `tmux -CC` 控制模式、普通 SSH、本地/远端 Shell，以及多 pane
@@ -18,10 +18,10 @@ cargo install --path crates/xsc-server
 cargo install --path crates/xsc-client
 ```
 
-安装后得到两个二进制：`xs`（命令客户端）和 `xs-daemon`（常驻服务端），都放在
+安装后得到两个二进制：`xsc`（命令客户端）和 `xss`（常驻服务端），都放在
 `~/.cargo/bin`（确保目录在 `PATH` 里）。也可以不安装，先运行
-`cargo build --workspace`，再直接使用 `./target/debug/xs[.exe] <命令>`；client 会在
-同目录寻找 `xs-daemon[.exe]`。
+`cargo build --workspace`，再直接使用 `./target/debug/xsc[.exe] <命令>`；client 会在
+同目录寻找 `xss[.exe]`。
 
 ## 构建与运行
 
@@ -32,26 +32,26 @@ cargo build --workspace
 不带参数时打印帮助（已无交互式 REPL）：
 
 ```bash
-./target/debug/xs tml add --url shell://powershell
-.\target\debug\xs.exe tml add --url shell://powershell   # Windows
-xs ls pane
-xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
-xs
+./target/debug/xsc tml add --url shell://powershell
+.\target\debug\xsc.exe tml add --url shell://powershell   # Windows
+xsc ls pane
+xsc tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
+xsc
 ```
 
-`xs --help` 列出全部子命令；每条命令执行一次后即退出，适合脚本化驱动。
+`xsc --help` 列出全部子命令；每条命令执行一次后即退出，适合脚本化驱动。
 
 ### 常驻 daemon
 
-一次性命令不直接持有连接：`xs` 通过本地回环 TCP 把命令发给独立的 `xs-daemon`，
-由它持有所有 live 连接与 pane 状态。这样 `xs tml add --url shell://powershell`
-退出后，pane 仍在 daemon 里，下一条 `xs ls pane` 还能看到。daemon 在第一条命令时
+一次性命令不直接持有连接：`xsc` 通过本地回环 TCP 把命令发给独立的 `xss`，
+由它持有所有 live 连接与 pane 状态。这样 `xsc tml add --url shell://powershell`
+退出后，pane 仍在 daemon 里，下一条 `xsc ls pane` 还能看到。daemon 在第一条命令时
 自动拉起，也可以手动管理：
 
 ```text
-xs daemon serve    # 前台运行 xs-daemon（自动拉起的也是这个）
-xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
-xs daemon stop     # 让 daemon 退出
+xsc daemon serve    # 前台运行 xss（自动拉起的也是这个）
+xsc daemon status   # 查看 daemon 当前持有的 pane / tmux session
+xsc daemon stop     # 让 daemon 退出
 ```
 
 daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接；跨 daemon 重启的
@@ -80,12 +80,12 @@ daemon 持有的是进程内存态：`daemon stop` 会释放全部 live 连接�
 ### 本地 / SSH / WSL 对话
 
 ```text
-xs tml add --url 'shell://bash'
-xs tml add --url 'shell://powershell.exe?cwd=/home/me/src&cols=120&rows=40'
-xs tml add --url 'ssh://dev@example.com'
-xs tml add --url 'wsl://?args=--distribution,Ubuntu'
-xs tml write 1 echo hello
-xs tml read 1
+xsc tml add --url 'shell://bash'
+xsc tml add --url 'shell://powershell.exe?cwd=/home/me/src&cols=120&rows=40'
+xsc tml add --url 'ssh://dev@example.com'
+xsc tml add --url 'wsl://?args=--distribution,Ubuntu'
+xsc tml write 1 echo hello
+xsc tml read 1
 ```
 
 ### tmux
@@ -97,21 +97,21 @@ tmux new-session -d -s work
 ```
 
 ```text
-xs tmx attach --url tmux://work
-xs tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
-xs tmx attach --url tmux://work --ssh 'ssh://dev@example.com?identity=~/.ssh/id_ed25519'
-xs ls pane
-xs tmx sync work
-xs tml read <pane-id>
-xs tml write <pane-id> echo hi
+xsc tmx attach --url tmux://work
+xsc tmx attach --url tmux://work --wsl 'wsl://?args=--distribution,Ubuntu'
+xsc tmx attach --url tmux://work --ssh 'ssh://dev@example.com?identity=~/.ssh/id_ed25519'
+xsc ls pane
+xsc tmx sync work
+xsc tml read <pane-id>
+xsc tml write <pane-id> echo hi
 ```
 
 ### tmux 里的 window / pane
 
 ```text
-xs tml add --group work --new-window
-xs tml add --group work --sph 3
-xs ls window work
+xsc tml add --group work --new-window
+xsc tml add --group work --sph 3
+xsc ls window work
 ```
 
 window 标识统一编码为 `Gxx-Tyy` / `Gxx-Myy`：`xx` 是 group id，`yy` 是 group 内
@@ -120,9 +120,9 @@ window 序号，`T` 表示 tmux window，`M` 表示 shell/ssh/wsl window。
 ### 布局
 
 ```text
-xs tml add --url 'shell://bash'
-xs tml add --url 'shell://bash' --sph 1
-xs layout
+xsc tml add --url 'shell://bash'
+xsc tml add --url 'shell://bash' --sph 1
+xsc layout
 ```
 
 `tml add --sph/--spv` 在指定 pane 上拆出新 pane；在 tmux 镜像容器上拆分时，容器保持

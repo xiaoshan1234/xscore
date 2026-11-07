@@ -23,9 +23,9 @@ cargo fmt --all -- --check
 运行 CLI 前端：
 
 ```bash
-cargo install --path crates/xsc-server       # 安装 xs-daemon 到 ~/.cargo/bin
-cargo install --path crates/xsc-client       # 安装 xs 到 ~/.cargo/bin
-xs ls pane                                       # 列出当前 pane
+cargo install --path crates/xsc-server       # 安装 xss 到 ~/.cargo/bin
+cargo install --path crates/xsc-client       # 安装 xsc 到 ~/.cargo/bin
+xsc ls pane                                       # 列出当前 pane
 ```
 
 集成测试（本地 PTY、SSH shell、远端 tmux、前端 tmux）从根目录 `test.config`
@@ -53,8 +53,8 @@ crates/xscore/            L0–L1 连接/传输后端库
   domain/                   L1：Domain / TerminalHandle、Local/Ssh/Tmux 三种域
 
 crates/xsc-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
-crates/xsc-client/        `xs` 命令客户端：仅转发 argv、边缘密码提示、自动拉起 daemon、RPC
-crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分发、App、pane、layout、term、logger、tmux
+crates/xsc-client/        `xsc` 命令客户端：仅转发 argv、边缘密码提示、自动拉起 daemon、RPC
+crates/xsc-server/        `xss` 常驻服务端：clap 解析、命令分发、App、pane、layout、term、logger、tmux
   src/main.rs                daemon 入口
   src/server/                回环 TCP：accept、协议握手与请求分发
   src/cli/                   命令输入：clap 解析、命令模型、URL 解析、命令映射
@@ -80,8 +80,8 @@ crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分�
 
 ## 必须知道的技术坑
 
-- **一次性 CLI 走常驻 daemon**：`xs <command>` 通过本地回环 TCP 把命令发给独立的
-  `xs-daemon`，live 连接与 pane 状态才不随 CLI 进程退出而丢失。daemon 按需
+- **一次性 CLI 走常驻 daemon**：`xsc <command>` 通过本地回环 TCP 把命令发给独立的
+  `xss`，live 连接与 pane 状态才不随 CLI 进程退出而丢失。daemon 按需
   自动拉起；客户端只做边缘密码提示，命令解析与分发都在 daemon 内完成。
 - **tmux 用 `-C`，不是 `-CC`**：`-CC` 会 `tcgetattr`，在管道/部分 tty 场景下卡死。
 - **tmux `-F` 分隔符用 `|`**：tab 会被展开成 `ESC[NC`，控制字符会被转义成 `\ooo`，
@@ -113,7 +113,7 @@ crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分�
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `xscore.log` |
 | `RUST_LOG` | 日志级别，默认 `xscore=debug,xsc_server=debug` |
-| `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 可执行文件路径覆盖 |
+| `XSCORE_DAEMON_EXE` | 可选的 `xss` 可执行文件路径覆盖 |
 
 ## 平台限制
 

@@ -2,7 +2,7 @@
 
 > 状态：设计提案（待评审）。
 >
-> 实现范围：本项目先实现后端层 L0–L2；前端层 L3–L5 由常驻 `xs-daemon`
+> 实现范围：本项目先实现后端层 L0–L1；前端层 L2–L5 由常驻 `xss`
 > 以模拟方式运行，用于验证后端。非目标不在本文档讨论范围内。
 
 ## 0. 设计目标与硬约束
@@ -42,11 +42,13 @@
 | L4 | 渲染层 | 网格与布局 → 像素 | 高 |
 | L5 | 应用 / 协调层 | 窗口管理、焦点、快捷键、配置、全局调度 | 无 |
 
+当前实现：L0–L1 位于 `xscore` 后端库，L2–L5 位于 `xsc-server` 前端。
+
 **横切设施**：事件总线（Domain → 树 → 渲染的单向通知）、焦点管理器、生命周
 期管理器。它们由 L5 持有并注入，不构成独立层。
 
 **核心原则**：L3 只认识 `TerminalHandle`，不认识“SSH”或“tmux”；L1 只负责 I/O
-与协议，不负责布局；L2 每窗格独立实例，互不共享状态。
+与协议，不负责布局；L2 每终端独立实例，互不共享状态。
 
 ---
 
@@ -83,7 +85,7 @@ trait SshTransport {
 
 ## 3. L1 域 / 连接抽象层
 
-这是整个架构的枢纽。它把“连接”与“窗格”拆成两个概念，并用统一接口屏蔽三种
+这是整个架构的枢纽。它把“连接”与“终端”拆成两个概念，并用统一接口屏蔽三种
 差异极大的后端。
 
 ### 3.1 两个核心概念
@@ -91,7 +93,7 @@ trait SshTransport {
 | 概念 | 含义 | 基数 |
 |---|---|---|
 | **Connection** | 实际 I/O 通道（PTY、SSH channel 或 tmux 控制传输） | 每个 Domain 实例至少 1 个 |
-| **TerminalHandle** | 逻辑窗格句柄：绑定一个模拟核心 + 输入路由 + 输出事件流 | SSH/本地域为 1；tmux 域为 N |
+| **TerminalHandle** | 终端句柄：绑定一个模拟核心 + 输入路由 + 输出事件流 | SSH/本地域为 1；tmux 域为 N |
 
 `Domain` 的职责定义为：**TerminalHandle 的工厂 + 本域内所有 TerminalHandle 的注册表 +
 输出路由器**。
@@ -167,7 +169,7 @@ L5 持有一个 `DomainRegistry`，按 `domain_id` 索引 Domain 实例。L3 的
 - 不感知连接类型：无论字节来自 SSH、本地 PTY 还是 tmux 的 `%output`，处理完
   全相同。
 
-**为什么必须每窗格独立**
+**为什么必须每终端独立**
 
 - 两个独立连接的光标、滚动区、字符集状态互不干扰，共享状态机必然串扰。
 - tmux 的每个 pane 在 tmux 服务器侧本就是独立终端，其 `%output` 是独立字节流。
@@ -267,8 +269,9 @@ resize。
 
 ## 7. L5 应用 / 协调层
 
-当前实现中，L5 属于 `xsc-server`（`xs-daemon`）。`xsc-client`（`xs`）只负责
-把原始 argv 转发给 daemon 并打印响应，不解析命令，也不持有布局、`TerminalCore` 或任何 live 连接。
+当前实现中，L2–L5 属于 `xsc-server`（`xss`），L0–L1 属于 `xscore` 后端库。
+`xsc-client`（`xsc`）只负责把原始 argv 转发给 daemon 并打印响应，不解析命令，
+也不持有布局、`TerminalCore` 或任何 live 连接。
 
 **职责**
 
@@ -291,7 +294,7 @@ resize。
 SSH channel / PTY / tmux 控制 PTY
   → L1 域路由（tmux 域按 %pane-id 查表；其余直通）
   → 对应 TerminalHandle.output_stream
-  → L2 该窗格独立 TerminalCore.feed
+  → L2 该终端独立 TerminalCore.feed
   → 网格脏区事件
   → L4 按 L3 矩形重绘
 ```
@@ -330,7 +333,7 @@ tmux 内操作     → %layout-change → L1 解析 → L3 更新容器 layout_t
 | 两套分隔条不越界 | 布局计算分外层/内层，几何边界为容器矩形 |
 | tmux 1:N 与 SSH 1:1 对上层无差异 | 上层只消费 `TerminalHandle` 与 `on_closed`，基数差异封装在 L1 路由表 |
 | tmux 字节保真 | `%output` 解码后直送 L2，不经任何字符渲染 |
-| 每窗格状态隔离 | L2 每 TerminalHandle 独立 TerminalCore 实例 |
+| 每终端状态隔离 | L2 每 TerminalHandle 独立 TerminalCore 实例 |
 
 ---
 

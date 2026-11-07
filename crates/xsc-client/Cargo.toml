@@ -6,7 +6,7 @@ license.workspace = true
 autobins = false
 
 [[bin]]
-name = "xs"
+name = "xsc"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,16 +1,16 @@
-# xs 命令手册
+# xsc 命令手册
 
-`xs` 是 xscore 终端模拟器的命令行前端。当前交付的是「一次性命令 + 常驻 daemon」模式：
+`xsc` 是 xscore 终端模拟器的命令行前端。当前交付的是「一次性命令 + 常驻 daemon」模式：
 每条命令执行一次后进程即退出，但 pane 与 live 连接由后台 daemon 持有，不会随 CLI 进程退出
 而丢失。没有交互式 REPL。
 
 ## 基本用法
 
 ```text
-xs                         # 不带参数：打印 clap 帮助
-xs --help                  # 列出全部子命令（clap 帮助）
-xs help                    # 打印简洁命令清单
-xs <command> [args...]     # 执行一条一次性命令
+xsc                         # 不带参数：打印 clap 帮助
+xsc --help                  # 列出全部子命令（clap 帮助）
+xsc help                    # 打印简洁命令清单
+xsc <command> [args...]     # 执行一条一次性命令
 ```
 
 安装：
@@ -20,7 +20,7 @@ cargo install --path crates/xsc-server
 cargo install --path crates/xsc-client
 ```
 
-得到 `~/.cargo/bin/xs` 与 `~/.cargo/bin/xs-daemon`。client 自动在自身目录查找 daemon；
+得到 `~/.cargo/bin/xsc` 与 `~/.cargo/bin/xss`。client 自动在自身目录查找 daemon；
 也可用 `XSCORE_DAEMON_EXE` 指定 daemon 路径。
 
 ## 命令总览
@@ -53,7 +53,7 @@ cargo install --path crates/xsc-client
 `tml` 是 `terminal` 的简写。`add` 按目标 group 分两种行为：
 
 ```text
-xs tml add [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
+xsc tml add [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
 ```
 
 - `--group <GROUP>`：目标 window group（group 名或数字 GroupId），缺省为默认 group。
@@ -86,31 +86,31 @@ URL scheme：
 示例：
 
 ```text
-xs tml add --url 'shell://powershell?cwd=/home/me/src&cols=120&rows=40' --new-window
-xs tml add --url 'shell://bash?cols=100&rows=30' --spv 3
-xs tml add --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
-xs tml add --url 'ssh://dev@box?password=secret'
-xs tml add --url 'wsl://?args=--distribution,Ubuntu'
-xs tml add --group work --new-window
-xs tml add --group work --sph 3
+xsc tml add --url 'shell://powershell?cwd=/home/me/src&cols=120&rows=40' --new-window
+xsc tml add --url 'shell://bash?cols=100&rows=30' --spv 3
+xsc tml add --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
+xsc tml add --url 'ssh://dev@box?password=secret'
+xsc tml add --url 'wsl://?args=--distribution,Ubuntu'
+xsc tml add --group work --new-window
+xsc tml add --group work --sph 3
 ```
 
 ### tml del
 
 ```text
-xs tml del <pane-id>
+xsc tml del <pane-id>
 ```
 
 删除指定 pane（tmux pane 走 `kill-pane`；本地/SSH pane 关闭连接）。
 
 ```text
-xs tml del 3
+xsc tml del 3
 ```
 
 ### tml write
 
 ```text
-xs tml write <pane-id> <text>...
+xsc tml write <pane-id> <text>...
 ```
 
 把 `text` 用空格拼接后，补一个换行发给 pane。Windows 本地 shell 使用 `\r\n`，SSH/tmux 使用
@@ -119,7 +119,7 @@ xs tml write <pane-id> <text>...
 ### tml read
 
 ```text
-xs tml read <pane-id>
+xsc tml read <pane-id>
 ```
 
 打印该 pane 当前渲染出的屏幕内容。脚本化输入下有一个 60ms 静默窗口，极端时序可能读到旧屏。
@@ -127,13 +127,13 @@ xs tml read <pane-id>
 ### tml resize
 
 ```text
-xs tml resize <pane-id> <cols> <rows>
+xsc tml resize <pane-id> <cols> <rows>
 ```
 
 ### tml focus
 
 ```text
-xs tml focus <pane-id>
+xsc tml focus <pane-id>
 ```
 
 本地 pane 切换焦点；tmux pane 走容器内焦点。
@@ -141,7 +141,7 @@ xs tml focus <pane-id>
 ### tml fetch
 
 ```text
-xs tml fetch <pane-id> [--line <N>]
+xsc tml fetch <pane-id> [--line <N>]
 ```
 
 拉取 tmux pane 的滚动历史（`capture-pane`）：不带 `--line` 拉全部，`--line <N>` 拉最近 N 行。
@@ -150,7 +150,7 @@ xs tml fetch <pane-id> [--line <N>]
 ### tml log
 
 ```text
-xs tml log <pane-id> --format <raw|char> --max-size <N> [--path <file>]
+xsc tml log <pane-id> --format <raw|char> --max-size <N> [--path <file>]
 ```
 
 为 pane 创建独立 logger，从创建时起订阅后续输出并写入本地文件：
@@ -170,7 +170,7 @@ xs tml log <pane-id> --format <raw|char> --max-size <N> [--path <file>]
 用 URL 统一描述 tmux 目标与远端主机：
 
 ```text
-xs tmx attach --url <tmux-url> [--ssh <ssh-url> | --wsl <wsl-url>]
+xsc tmx attach --url <tmux-url> [--ssh <ssh-url> | --wsl <wsl-url>]
 ```
 
 - `--url tmux://<socket>/<session>`：
@@ -184,16 +184,16 @@ xs tmx attach --url <tmux-url> [--ssh <ssh-url> | --wsl <wsl-url>]
 示例：
 
 ```text
-xs tmx attach --url tmux://SOCKET/work --ssh ssh://dev@box?identity=~/.ssh/id_ed25519
-xs tmx attach --url tmux://work
-xs tmx attach --url tmux://x/work --wsl 'wsl://?args=--distribution,Ubuntu'
-xs tmx attach --url tmux:///tmp/tmux-0/default/work
+xsc tmx attach --url tmux://SOCKET/work --ssh ssh://dev@box?identity=~/.ssh/id_ed25519
+xsc tmx attach --url tmux://work
+xsc tmx attach --url tmux://x/work --wsl 'wsl://?args=--distribution,Ubuntu'
+xsc tmx attach --url tmux:///tmp/tmux-0/default/work
 ```
 
 ### tmx sync
 
 ```text
-xs tmx sync <group-id>
+xsc tmx sync <group-id>
 ```
 
 按 tmux 服务端现状 reconcile 指定 group 的本地结构：删除服务端已消失的 pane/window，
@@ -203,7 +203,7 @@ xs tmx sync <group-id>
 ## layout
 
 ```text
-xs layout [<window-id>]
+xsc layout [<window-id>]
 ```
 
 不带参数打印全局布局树与当前焦点；带 `<window-id>`（如 `G2-T1`、`G1-M0`）打印该
@@ -214,7 +214,7 @@ window 内的 pane 布局。
 ### ls pane
 
 ```text
-xs ls pane
+xsc ls pane
 ```
 
 列出所有 pane。
@@ -222,7 +222,7 @@ xs ls pane
 ### ls window
 
 ```text
-xs ls window [<group>]
+xsc ls window [<group>]
 ```
 
 列出 tmux window；指定 `<group>` 时只列出该 group。
@@ -230,7 +230,7 @@ xs ls window [<group>]
 ### ls group
 
 ```text
-xs ls group
+xsc ls group
 ```
 
 列出所有 window group。
@@ -238,17 +238,17 @@ xs ls group
 ## help
 
 ```text
-xs help
+xsc help
 ```
 
-打印简洁命令清单（与 `xs --help` 的 clap 帮助不同）。
+打印简洁命令清单（与 `xsc --help` 的 clap 帮助不同）。
 
 ## daemon
 
 ```text
-xs daemon serve    # 前台运行 xs-daemon（一次性命令会自动拉起）
-xs daemon status   # 查看 daemon 当前持有的 pane / tmux session
-xs daemon stop     # 让 daemon 退出
+xsc daemon serve    # 前台运行 xss（一次性命令会自动拉起）
+xsc daemon status   # 查看 daemon 当前持有的 pane / tmux session
+xsc daemon stop     # 让 daemon 退出
 ```
 
 ## 环境变量
@@ -257,7 +257,7 @@ xs daemon stop     # 让 daemon 退出
 |---|---|
 | `XSCORE_LOG` | 日志文件路径，默认 `xscore.log` |
 | `RUST_LOG` | 日志级别，默认 `xscore=debug,xsc_server=debug` |
-| `XSCORE_DAEMON_EXE` | 可选的 `xs-daemon` 可执行文件路径覆盖 |
+| `XSCORE_DAEMON_EXE` | 可选的 `xss` 可执行文件路径覆盖 |
 
 ## 平台限制
 

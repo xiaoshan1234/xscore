@@ -61,16 +61,12 @@ fn daemon_executable() -> Result<PathBuf> {
     let candidate = current
         .parent()
         .ok_or_else(|| anyhow!("client executable has no parent directory"))?
-        .join(if cfg!(windows) {
-            "xs-daemon.exe"
-        } else {
-            "xs-daemon"
-        });
+        .join(if cfg!(windows) { "xss.exe" } else { "xss" });
     if candidate.is_file() {
         Ok(candidate)
     } else {
         Err(anyhow!(
-            "daemon executable not found at {} (install `xsc-server` beside `xs` or set XSCORE_DAEMON_EXE)",
+            "daemon executable not found at {} (install `xsc-server` beside `xsc` or set XSCORE_DAEMON_EXE)",
             candidate.display()
         ))
     }
