@@ -9,10 +9,11 @@
 
 ```text
 xs client
-  clap 命令解析
-  TCP 请求/响应
+  转发原始 argv
+  边缘密码提示 / 显示输出
 
 xs-daemon
+  argv 解析与命令分发
   per-pane TerminalCore 泵任务
   per-logger 文件写入任务
   └─ 子进程：
@@ -23,8 +24,8 @@ xs-daemon
 ## 2. 线程模型
 
 - `LocalPty`：reader / writer 两个 OS 线程，异步侧经无界 channel。
-- `SshConnection`：单任务持有 SSH channel，通过命令队列串行处理 read/write/resize/
-  close，避免超时取消读取导致后续消息丢失。
+- `SshConnection`：单任务持有 SSH channel；read 直接在该任务内消费，write/resize/
+  close 经命令队列串行处理，避免超时取消读取导致后续消息丢失。
 - `TmuxControl`：通过 `TmuxTransport` 写入和关闭连接；Local/WSL 使用
   PTY reader/writer 任务，SSH 使用 russh exec channel 的异步读写任务。
 - `LoggerRegistry`：每个 logger 独立订阅 `PaneHandle` 输出，raw 写原始字节，
@@ -56,22 +57,22 @@ reader 任务 → ProtocolParser → %begin/%end 关联回复 / %output 按 %N �
 | 同步点 | 保护对象 |
 |---|---|
 | `TmuxControl.shared` | waiter 队列、事件订阅、`%N` 输出订阅、closed |
-| `SshConnection.commands` | 单 channel 任务串行处理 read/write/resize/close |
+| `SshConnection.commands` | write/resize/close 命令队列（read 由同一任务直接消费） |
 | `App.panes` | pane 句柄与 TerminalCore |
 | `App.layout` | 本地布局树与焦点 |
 
 ## 5. 日志
 
 - 默认写 `xscore.log`（`XSCORE_LOG` 改路径），追加写入。
-- 控制台仅 WARN 以上；debug/trace 进文件。
+- 控制台仅 WARN 以上；文件层按 `RUST_LOG` 过滤（默认 debug）。
 - 级别默认 `xscore=debug,xsc_server=debug`，`RUST_LOG` 覆盖。
 
 ## 6. 故障与恢复
 
 | 故障 | 行为 |
 |---|---|
-| 本地 Shell 退出 | PaneHandle 输出流关闭，网格历史保留 |
-| SSH 断开 | `SshConnection` 报错，pane 标记断开 |
+| 本地 Shell 退出 | 不再产生新输出，网格历史保留；pane 仍留在注册表，需显式删除 |
+| SSH 断开 | 不再产生新输出；pane 仍留在注册表，需显式删除 |
 | tmux `%exit` | reader 标记 closed，控制连接结束 |
 | tmux server 删除 pane/window | 用 `tmx sync <group-id>` 按需重枚举指定 group 并收敛 |
-| 密码错误 | ssh 认证失败报错（stderr 继承到控制台） |
+| 密码错误 | ssh 认证失败，错误经 IPC 返回，由 `xs` client 打印 |

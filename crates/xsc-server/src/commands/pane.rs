@@ -6,7 +6,7 @@ use xscore::domain::{PaneId, PaneKind};
 use xscore::platform::Size;
 use xscore::term::TerminalCore;
 
-use xsc_protocol::{LogFormat, TmlLogRequest};
+use crate::command::{LogFormat, TmlLogRequest};
 
 use crate::app::App;
 use crate::logger::{default_path, LoggerFormat};

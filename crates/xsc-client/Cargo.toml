@@ -12,6 +12,5 @@ path = "src/main.rs"
 [dependencies]
 xsc-protocol = { path = "../xsc-protocol" }
 anyhow.workspace = true
-clap.workspace = true
 rpassword.workspace = true
 tokio.workspace = true

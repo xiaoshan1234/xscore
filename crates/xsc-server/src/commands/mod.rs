@@ -9,9 +9,9 @@ mod window;
 
 use std::sync::Arc;
 
+use crate::command::{CommandRequest, LsCommand, TmlCommand, TmxCommand};
 use anyhow::Result;
 use tokio::sync::Mutex;
-use xsc_protocol::{CommandRequest, LsCommand, TmlCommand, TmxCommand};
 
 use crate::app::App;
 use crate::render::{self, Output};

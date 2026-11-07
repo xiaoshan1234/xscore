@@ -1,5 +1,9 @@
 //! Reusable terminal emulator server state, command handling, and daemon runtime.
 
+mod cli;
+mod command;
+mod wire;
+
 /// Persistent application state and pane/group/layout registries.
 pub mod app;
 /// Server-side command handlers and dispatch.

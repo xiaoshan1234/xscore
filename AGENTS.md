@@ -54,8 +54,8 @@ crates/xscore/            L0–L2 后端库
   term/                     L2：VT 状态机 + 网格（Grid/VtTerm）
 
 crates/xsc-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
-crates/xsc-client/        `xs` 命令客户端：clap、密码边缘解析、自动拉起 daemon、RPC
-crates/xsc-server/        `xs-daemon` 常驻服务端：App、pane、layout、logger、tmux、命令处理器
+crates/xsc-client/        `xs` 命令客户端：仅转发 argv、边缘密码提示、自动拉起 daemon、RPC
+crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分发、App、pane、layout、logger、tmux
   src/main.rs                daemon 入口
   src/server.rs              TCP accept、协议握手与请求分发
   src/app.rs                 App 状态：pane 注册表、布局、window group、tmux 会话
@@ -79,7 +79,7 @@ crates/xsc-server/        `xs-daemon` 常驻服务端：App、pane、layout、lo
 
 - **一次性 CLI 走常驻 daemon**：`xs <command>` 通过本地回环 TCP 把命令发给独立的
   `xs-daemon`，live 连接与 pane 状态才不随 CLI 进程退出而丢失。daemon 按需
-  自动拉起；密码在客户端解析后随命令传入。
+  自动拉起；客户端只做边缘密码提示，命令解析与分发都在 daemon 内完成。
 - **tmux 用 `-C`，不是 `-CC`**：`-CC` 会 `tcgetattr`，在管道/部分 tty 场景下卡死。
 - **tmux `-F` 分隔符用 `|`**：tab 会被展开成 `ESC[NC`，控制字符会被转义成 `\ooo`，
   可打印的 `|` 才能原样输出。

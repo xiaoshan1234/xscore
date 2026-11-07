@@ -2080,7 +2080,6 @@ name = "xsc-client"
 version = "0.6.0"
 dependencies = [
  "anyhow",
- "clap",
  "rpassword",
  "tokio",
  "xsc-protocol",
@@ -2103,6 +2102,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "clap",
  "russh",
  "russh-keys",
  "tokio",

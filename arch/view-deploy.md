@@ -54,3 +54,66 @@ xs → xs-daemon → russh channel → exec tmux -C attach -t <session>
 - Windows 原生不支持本地 tmux；本地 tmux 需在 Linux/WSL 内运行。
 - WSL tmux 需要 WSL 内安装 tmux。
 - 远端 tmux 使用应用内 russh，不读取 `~/.ssh/config`、ssh-agent 或 ProxyJump。
+
+## 6. 构建、安装与运行
+
+前置条件：Rust 工具链（`cargo`）；集成测试额外需要 Python 3。
+
+### 构建
+
+```bash
+cargo build --workspace
+```
+
+### 测试与检查
+
+```bash
+cargo test -p xscore -p xsc-protocol -p xsc-client -p xsc-server
+cargo clippy -p xscore -p xsc-protocol -p xsc-client -p xsc-server --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+### 安装
+
+```bash
+cargo install --path crates/xsc-server   # 安装 `xs-daemon`
+cargo install --path crates/xsc-client   # 安装 `xs`
+```
+
+两个可执行文件装到 cargo 的 bin 目录（Linux/macOS 为 `~/.cargo/bin`，Windows 为
+`%USERPROFILE%\.cargo\bin`），需确保该目录在 `PATH` 中。
+
+### 运行
+
+`xs` 是一次性 CLI，命令通过本地回环 TCP 发给常驻的 `xs-daemon`；daemon 不存在时
+会自动拉起。不带参数运行 `xs` 可查看帮助。
+
+```bash
+xs ls pane                    # 列出当前 pane
+xs ls window [<group>]        # 列出窗口，可限定 group
+xs ls group                   # 列出窗口组
+xs tml add --url shell://powershell
+xs tml read <pane-id>         # 读 pane 渲染快照
+xs tml write <pane-id> text   # 向 pane 发送文本
+xs tmx attach --url tmux://<socket>/<session>
+xs layout [<window-id>]       # 打印布局树
+```
+
+daemon 生命周期：
+
+```bash
+xs daemon serve               # 前台运行 daemon
+xs daemon status              # 查看 daemon 当前状态
+xs daemon stop                # 停止 daemon
+```
+
+### 集成测试
+
+需要真实 SSH 主机时，从根目录 `test.config` 读取连接配置（格式见
+`test-example.config`）：
+
+```powershell
+python scripts/run_integration_tests.py
+```
+
+结果写入 `test-results/`。

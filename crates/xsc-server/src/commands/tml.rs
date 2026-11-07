@@ -5,7 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use xscore::domain::{Domain, LocalDomain, PaneConfig, PaneId, RemoteSshDomain};
 use xscore::platform::tmux::quote_arg;
 
-use xsc_protocol::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddRequest};
+use crate::command::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddRequest};
 
 use crate::app::App;
 use crate::layout::Direction;

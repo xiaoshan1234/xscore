@@ -96,9 +96,27 @@ async fn handle(app: &Arc<Mutex<App>>, request: Request) -> Response {
             Response::ok(status_text(&guard).into_string())
         }
         Request::Stop => Response::ok(String::new()),
-        Request::Command { command } => match dispatch(app, command).await {
-            Ok(output) => Response::ok(output.into_string()),
-            Err(error) => Response::fail(format!("{error:#}")),
+        Request::Command { argv } => handle_command(app, argv).await,
+    }
+}
+
+async fn handle_command(app: &Arc<Mutex<App>>, argv: Vec<String>) -> Response {
+    let command = match crate::cli::parse_args(argv) {
+        Ok(cmd) => match crate::wire::command_request(cmd) {
+            Ok(command) => command,
+            Err(error) => return Response::fail(format!("{error:#}")),
         },
+        Err(error) => {
+            if error.kind() == clap::error::ErrorKind::DisplayHelp
+                || error.kind() == clap::error::ErrorKind::DisplayVersion
+            {
+                return Response::ok(error.to_string());
+            }
+            return Response::fail(format!("{error}"));
+        }
+    };
+    match dispatch(app, command).await {
+        Ok(output) => Response::ok(output.into_string()),
+        Err(error) => Response::fail(format!("{error:#}")),
     }
 }

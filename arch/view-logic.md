@@ -14,7 +14,7 @@
 | 参与者 | 作用 |
 |---|---|
 | 用户 | 通过 `xs` 一次性命令操作窗格、读取屏幕 |
-| `xs` client | clap 解析、密码边缘处理、daemon 生命周期与 IPC |
+| `xs` client | argv 转发、边缘密码提示、daemon 生命周期与 IPC |
 | `xs-daemon`（L3–L5，CLI 模拟） | 布局树、焦点、命令分发、结构同步 |
 | 后端（L0–L2） | 平台 I/O、Domain 路由、VT 状态机 |
 | PTY 子进程 | 本地 Shell、`tmux -C attach`、`wsl.exe` |

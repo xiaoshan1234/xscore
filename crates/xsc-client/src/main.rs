@@ -1,32 +1,25 @@
-//! `xs` client: parse one command and dispatch it to the resident daemon.
+//! `xs` client: forward raw argv to the resident daemon and print its output.
 
-mod cli;
 mod daemon;
-mod wire;
+mod secrets;
 
 use std::io::Write as _;
 
 use anyhow::Result;
 
-use cli::Cmd;
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        cli::print_help()?;
-        return Ok(());
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.is_empty() {
+        argv.push("--help".to_string());
     }
 
-    let cmd = match cli::parse_args(args) {
-        Ok(cmd) => cmd,
-        Err(error) => error.exit(),
-    };
-    if let Cmd::Daemon(daemon_cmd) = &cmd {
-        return daemon::run_bootstrap(daemon_cmd).await;
+    if argv.first().map(String::as_str) == Some("daemon") {
+        return daemon::run_bootstrap(&argv).await;
     }
 
-    match daemon::run_command(cmd).await {
+    secrets::resolve_secrets(&mut argv)?;
+    match daemon::run_command(argv).await {
         Ok(output) => {
             print!("{output}");
             std::io::stdout().flush()?;

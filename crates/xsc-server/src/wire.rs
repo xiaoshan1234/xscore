@@ -1,14 +1,14 @@
-//! Conversion from clap command types to the shared wire protocol.
+//! Conversion from clap command types to the daemon command model.
 
-use anyhow::{bail, Result};
-use xsc_protocol::{
+use anyhow::Result;
+
+use crate::cli::{Cmd, LogFormatArg, LsCmd, TmlAddArgs, TmlCmd, TmlLogArgs, TmxAttachArgs, TmxCmd};
+use crate::command::{
     CommandRequest, LogFormat, LsCommand, TmlAddRequest, TmlCommand, TmlLogRequest,
     TmxAttachRequest, TmxCommand,
 };
 
-use crate::cli::{Cmd, LogFormatArg, LsCmd, TmlAddArgs, TmlCmd, TmlLogArgs, TmxAttachArgs, TmxCmd};
-
-/// Convert one locally parsed command into its serializable protocol form.
+/// Convert one locally parsed command into its dispatch form.
 pub fn command_request(cmd: Cmd) -> Result<CommandRequest> {
     let command = match cmd {
         Cmd::Tml(cmd) => CommandRequest::Tml(tml_command(cmd)),
@@ -16,7 +16,6 @@ pub fn command_request(cmd: Cmd) -> Result<CommandRequest> {
         Cmd::Layout { window } => CommandRequest::Layout { window },
         Cmd::Ls(cmd) => CommandRequest::Ls(ls_command(cmd)),
         Cmd::Help => CommandRequest::Help,
-        Cmd::Daemon(_) => bail!("daemon subcommands are handled by the client entry point"),
     };
     Ok(command)
 }
@@ -113,12 +112,5 @@ mod tests {
         assert_eq!(add.spv.as_deref(), Some("7"));
         assert!(add.sph.is_none());
         assert!(add.new_window);
-    }
-
-    #[test]
-    fn daemon_command_is_not_sent_over_ipc() {
-        let cmd = parse_args(["daemon", "status"].into_iter().map(str::to_string))
-            .expect("parse daemon command");
-        assert!(command_request(cmd).is_err());
     }
 }

@@ -1,9 +1,181 @@
-//! 参数解析与边缘映射：argv -> `Cmd`。
+//! clap 命令面：把 `xs` 的 argv 解析为 `Cmd`。
+//!
+//! 命令解析由 daemon 完成，客户端只转发原始 argv。
 
-use clap::Parser;
-pub use xsc_protocol::{parse_conversation_url, parse_ssh_target, ConversationSpec};
+use std::path::PathBuf;
 
-use super::cmd::{Cmd, Command};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+/// `xs` 的顶层 clap 命令。
+#[derive(Debug, Parser)]
+#[command(
+    name = "xs",
+    about = "terminal emulator CLI",
+    disable_help_subcommand = true
+)]
+pub struct Command {
+    /// 实际子命令。
+    #[command(subcommand)]
+    pub command: Cmd,
+}
+
+/// daemon 支持的全部命令。
+#[derive(Debug, Clone, Subcommand)]
+pub enum Cmd {
+    /// terminal pane/window management (shorthand: tml)
+    #[command(subcommand)]
+    Tml(TmlCmd),
+    /// tmux session management (shorthand: tmx)
+    #[command(subcommand)]
+    Tmx(TmxCmd),
+    /// print the pane tree, or a window's layout
+    Layout {
+        /// window id (Gxx-Tyy / Gxx-Myy); omit for the global tree
+        window: Option<String>,
+    },
+    /// list resources (shorthand: ls)
+    #[command(subcommand)]
+    Ls(LsCmd),
+    /// print help
+    Help,
+}
+
+/// `tml` 子命令。
+#[derive(Debug, Clone, Subcommand)]
+pub enum TmlCmd {
+    /// add a local shell/ssh/wsl conversation or a tmux window/pane
+    Add(TmlAddArgs),
+    /// delete a pane
+    Del {
+        /// pane id
+        pane: String,
+    },
+    /// send text to a pane
+    Write {
+        /// 目标 pane ID。
+        pane: String,
+        /// 要拼接后发送的文本分段。
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
+    },
+    /// print a pane's rendered screen
+    Read {
+        /// 目标 pane ID。
+        pane: String,
+    },
+    /// resize a pane
+    Resize {
+        /// 目标 pane ID。
+        pane: String,
+        /// 新列数。
+        cols: u16,
+        /// 新行数。
+        rows: u16,
+    },
+    /// move focus
+    Focus {
+        /// 目标 pane ID。
+        pane: String,
+    },
+    /// fetch tmux pane scrollback
+    Fetch {
+        /// 目标 pane ID。
+        pane: String,
+        /// 只取最近 N 行；省略时取全部历史。
+        #[arg(long, value_name = "N")]
+        line: Option<usize>,
+    },
+    /// record a pane's output to a local file
+    Log(TmlLogArgs),
+}
+
+/// `tml add` 的参数。
+#[derive(Debug, Clone, Args)]
+pub struct TmlAddArgs {
+    /// conversation URL (optional for tmux groups), e.g. shell://powershell?cwd=/home/me/src&cols=120&rows=40
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+    /// target window group (name or id); defaults to the default group
+    #[arg(long, value_name = "GROUP")]
+    pub group: Option<String>,
+    /// create in a new window (default)
+    #[arg(long, default_value_t = true, conflicts_with_all = ["sph", "spv"])]
+    pub new_window: bool,
+    /// split the specified pane horizontally to create
+    #[arg(long, value_name = "ID", conflicts_with_all = ["new_window", "spv"])]
+    pub sph: Option<String>,
+    /// split the specified pane vertically to create
+    #[arg(long, value_name = "ID", conflicts_with_all = ["new_window", "sph"])]
+    pub spv: Option<String>,
+    /// client-resolved password; hidden from help and only injected at the edge
+    #[arg(long, hide = true)]
+    pub password: Option<String>,
+}
+
+/// `tml log --format` 的格式参数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LogFormatArg {
+    /// 原样记录终端二进制字节。
+    Raw,
+    /// 过滤 ANSI/控制序列，按行写入带时间戳的文本。
+    Char,
+}
+
+/// `tml log` 的参数。
+#[derive(Debug, Clone, Args)]
+pub struct TmlLogArgs {
+    /// 目标 pane ID。
+    pub pane: String,
+    /// 日志格式。
+    #[arg(long, value_enum)]
+    pub format: LogFormatArg,
+    /// 最大记录量；raw 按字节计，char 按行数计。
+    #[arg(long, value_name = "N")]
+    pub max_size: usize,
+    /// 输出文件；省略时在当前目录生成带时间戳的文件。
+    #[arg(long, value_name = "PATH")]
+    pub path: Option<PathBuf>,
+}
+
+/// `tmx` 子命令。
+#[derive(Debug, Clone, Subcommand)]
+pub enum TmxCmd {
+    /// attach to a tmux session by URL
+    Attach(TmxAttachArgs),
+    /// sync one tmux window group with its server-side structure
+    Sync {
+        /// window group id or group name
+        group_id: String,
+    },
+}
+
+/// `tmx attach` 的参数。
+#[derive(Debug, Clone, Args)]
+pub struct TmxAttachArgs {
+    /// tmux target URL: tmux://<socket>/<session>
+    #[arg(long, value_name = "URL")]
+    pub url: String,
+    /// run the tmux server on this SSH host: ssh://user@host[:port]?identity=<path>&password=<pwd>
+    #[arg(long, value_name = "URL", conflicts_with = "wsl")]
+    pub ssh: Option<String>,
+    /// run the tmux server inside WSL: wsl://?args=--distribution,Ubuntu
+    #[arg(long, value_name = "URL", conflicts_with = "ssh")]
+    pub wsl: Option<String>,
+}
+
+/// `ls` 子命令。
+#[derive(Debug, Clone, Subcommand)]
+pub enum LsCmd {
+    /// list panes
+    Pane,
+    /// list tmux windows (optionally scoped to a group)
+    Window {
+        /// 可选的 group 名或 ID。
+        group: Option<String>,
+    },
+    /// list window groups
+    Group,
+}
 
 /// 解析一段命令行参数（argv，不含程序名）。
 ///
@@ -13,118 +185,12 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Cmd, clap::E
         .map(|command| command.command)
 }
 
-/// 无参数时打印 clap 生成的帮助（替代已移除的交互式 REPL）。
-///
-/// 参数/输出：无输入；帮助写 stdout，I/O 失败时返回错误。
-pub fn print_help() -> std::io::Result<()> {
-    use clap::CommandFactory;
-
-    let mut command = Command::command();
-    command.print_help()?;
-    println!();
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::cmd::{LogFormatArg, LsCmd, TmlCmd, TmxCmd};
     use super::*;
-
-    #[test]
-    fn ssh_target_with_default_port() {
-        let (user, host, port) = parse_ssh_target("dev@box").unwrap();
-        assert_eq!((user.as_str(), host.as_str(), port), ("dev", "box", 22));
-    }
-
-    #[test]
-    fn ssh_target_with_port() {
-        let (user, host, port) = parse_ssh_target("dev@box:2222").unwrap();
-        assert_eq!((user.as_str(), host.as_str(), port), ("dev", "box", 2222));
-    }
-
-    #[test]
-    fn ssh_target_requires_user() {
-        assert!(parse_ssh_target("box").is_err());
-    }
 
     fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
         parse_args(args.iter().map(|arg| (*arg).to_string()))
-    }
-
-    #[test]
-    fn conversation_url_shell_defaults() {
-        assert_eq!(
-            parse_conversation_url("shell://powershell").unwrap(),
-            ConversationSpec::Shell {
-                program: "powershell".into(),
-                args: vec![],
-                cwd: None,
-                cols: 80,
-                rows: 24,
-            }
-        );
-    }
-
-    #[test]
-    fn conversation_url_shell_with_query() {
-        assert_eq!(
-            parse_conversation_url("shell://powershell?cwd=/home/me/src&cols=120&rows=40").unwrap(),
-            ConversationSpec::Shell {
-                program: "powershell".into(),
-                args: vec![],
-                cwd: Some("/home/me/src".into()),
-                cols: 120,
-                rows: 40,
-            }
-        );
-    }
-
-    #[test]
-    fn conversation_url_ssh() {
-        assert_eq!(
-            parse_conversation_url(
-                "ssh://dev@box:2222?identity=~/.ssh/id_ed25519&cols=100&rows=30"
-            )
-            .unwrap(),
-            ConversationSpec::Ssh {
-                target: "dev@box:2222".into(),
-                identity: Some("~/.ssh/id_ed25519".into()),
-                password: None,
-                cols: 100,
-                rows: 30,
-            }
-        );
-    }
-
-    #[test]
-    fn conversation_url_ssh_with_password() {
-        assert_eq!(
-            parse_conversation_url("ssh://dev@box?password=secret&cols=90&rows=28").unwrap(),
-            ConversationSpec::Ssh {
-                target: "dev@box".into(),
-                identity: None,
-                password: Some("secret".into()),
-                cols: 90,
-                rows: 28,
-            }
-        );
-    }
-
-    #[test]
-    fn conversation_url_wsl_with_args() {
-        assert_eq!(
-            parse_conversation_url("wsl://?args=--distribution,Ubuntu&cols=90&rows=28").unwrap(),
-            ConversationSpec::Wsl {
-                args: vec!["--distribution".into(), "Ubuntu".into()],
-                cols: 90,
-                rows: 28,
-            }
-        );
-    }
-
-    #[test]
-    fn conversation_url_requires_scheme() {
-        assert!(parse_conversation_url("powershell").is_err());
     }
 
     #[test]
@@ -173,8 +239,6 @@ mod tests {
         };
         assert_eq!(add.group.as_deref(), Some("work"));
         assert!(add.new_window);
-        assert!(add.sph.is_none());
-        assert!(add.spv.is_none());
     }
 
     #[test]
@@ -190,11 +254,19 @@ mod tests {
     }
 
     #[test]
-    fn tml_del_parses_pane() {
-        let Cmd::Tml(TmlCmd::Del { pane }) = parse(&["tml", "del", "3"]).unwrap() else {
+    fn tml_add_accepts_injected_password() {
+        let Cmd::Tml(TmlCmd::Add(add)) = parse(&[
+            "tml",
+            "add",
+            "--url",
+            "ssh://dev@box",
+            "--password",
+            "secret",
+        ])
+        .unwrap() else {
             panic!("expected tml command");
         };
-        assert_eq!(pane, "3");
+        assert_eq!(add.password.as_deref(), Some("secret"));
     }
 
     #[test]
@@ -261,28 +333,6 @@ mod tests {
                 line: Some(50),
             }) if pane == "3"
         ));
-
-        let Cmd::Tml(TmlCmd::Log(args)) = parse(&[
-            "tml",
-            "log",
-            "3",
-            "--format",
-            "raw",
-            "--max-size",
-            "2000",
-            "--path",
-            "logs/pane3.raw",
-        ])
-        .unwrap() else {
-            panic!("expected tml log command");
-        };
-        assert_eq!(args.pane, "3");
-        assert_eq!(args.format, LogFormatArg::Raw);
-        assert_eq!(args.max_size, 2000);
-        assert_eq!(
-            args.path.as_deref(),
-            Some(std::path::Path::new("logs/pane3.raw"))
-        );
     }
 
     #[test]

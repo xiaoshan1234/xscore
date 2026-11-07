@@ -1,0 +1,4 @@
+2026-11-07T03:14:44.497328Z  INFO xsc_server::server: daemon listening port=50838
+2026-11-07T03:15:30.945866Z DEBUG xscore::platform::ssh: ssh connect host=shanclaw port=22 user=loner
+2026-11-07T03:15:42.184432Z DEBUG xscore::platform::ssh: ssh connect host=shanclaw port=22 user=loner
+2026-11-07T03:21:17.719683Z DEBUG xscore::platform::ssh: ssh connect host=shanclaw port=22 user=loner

@@ -39,14 +39,17 @@ crates/xscore/src/
   lib.rs
 
 crates/xsc-protocol/src/
-  lib.rs                  Request/Response、命令 DTO、IPC 编解码、端口
+  lib.rs                  Request/Response、IPC 编解码、端口
 crates/xsc-client/src/
-  main.rs                 `xs` 入口
-  cli/                    clap 定义、参数解析、密码边缘处理
+  main.rs                 `xs` 入口：转发 argv、打印输出
+  secrets.rs              边缘密码提示（daemon 脱离终端无法自行 prompt）
   daemon.rs               daemon 自动拉起、协议协商、RPC
 crates/xsc-server/src/
   main.rs                 `xs-daemon` 入口与日志初始化
   server.rs               TCP accept 与请求分发
+  cli.rs                  clap 命令面与 argv 解析
+  command.rs              命令模型与 URL/SSH 参数解析
+  wire.rs                 clap 命令 → 命令模型映射
   app.rs / pane.rs        常驻状态与 PaneRegistry
   commands/               命令处理器
   layout.rs / render.rs   布局与文本渲染

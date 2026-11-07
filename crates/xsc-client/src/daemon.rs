@@ -7,9 +7,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use xsc_protocol::{self as protocol, Request, Response, PROTOCOL_VERSION};
 
-use crate::cli::{Cmd, DaemonCmd};
-use crate::wire;
-
 /// 确保有一个 daemon 在运行；没有就拉起一个并等待其就绪。
 ///
 /// 参数/输出：无输入；成功时无返回值，启动或等待失败时返回错误。
@@ -126,14 +123,12 @@ fn unwrap(response: Response) -> Result<String> {
     }
 }
 
-/// 把一条命令交给 daemon 执行并返回输出文本。密码在发送前于本进程解析。
+/// 把原始 argv 交给 daemon 执行并返回输出文本。
 ///
-/// 参数/输出：`cmd` 为输入；返回 daemon 输出文本。
-pub async fn run_command(cmd: Cmd) -> Result<String> {
-    let cmd = crate::cli::resolve_secrets(cmd)?;
+/// 参数/输出：`argv` 为输入；返回 daemon 输出文本。
+pub async fn run_command(argv: Vec<String>) -> Result<String> {
     ensure_daemon().await?;
-    let command = wire::command_request(cmd)?;
-    unwrap(request(&Request::Command { command }).await?)
+    unwrap(request(&Request::Command { argv }).await?)
 }
 
 /// Start the server executable in the current terminal and wait for it to exit.
@@ -148,16 +143,19 @@ pub fn serve_foreground() -> Result<()> {
     }
 }
 
-/// Dispatch a daemon lifecycle subcommand.
-pub async fn run_bootstrap(cmd: &DaemonCmd) -> Result<()> {
-    match cmd {
-        DaemonCmd::Serve => serve_foreground(),
-        DaemonCmd::Status => {
+/// Dispatch a daemon lifecycle subcommand from raw argv.
+///
+/// 参数/输出：`argv` 为输入，首项为 `daemon`，次项为 `serve`、`status` 或
+/// `stop`；返回命令结果。
+pub async fn run_bootstrap(argv: &[String]) -> Result<()> {
+    match argv.get(1).map(String::as_str) {
+        Some("serve") => serve_foreground(),
+        Some("status") => {
             let output = daemon_status().await?;
             print!("{output}");
             Ok(())
         }
-        DaemonCmd::Stop => match daemon_stop().await? {
+        Some("stop") => match daemon_stop().await? {
             true => {
                 println!("daemon stopped");
                 Ok(())
@@ -167,6 +165,8 @@ pub async fn run_bootstrap(cmd: &DaemonCmd) -> Result<()> {
                 Ok(())
             }
         },
+        Some(other) => Err(anyhow!("unknown daemon subcommand: {other}")),
+        None => Err(anyhow!("daemon requires a subcommand: serve|status|stop")),
     }
 }
 

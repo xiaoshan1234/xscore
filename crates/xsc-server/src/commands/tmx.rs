@@ -2,9 +2,11 @@
 
 use std::sync::Arc;
 
+use crate::command::{
+    parse_conversation_url, parse_ssh_target, ConversationSpec, TmxAttachRequest,
+};
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
-use xsc_protocol::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmxAttachRequest};
 
 use xscore::platform::tmux::{TmuxHostConfig, TmuxSocket};
 
