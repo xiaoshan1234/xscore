@@ -49,12 +49,14 @@
 ### LocalDomain（1:1）
 
 一个 pane 对应一个本地 PTY/ConPTY 子进程；输入直写 PTY，输出即 PTY 读流，resize
-直调 PTY 尺寸。
+直调 PTY 尺寸。创建时提供的环境变量注入 PTY 子进程；WSL 并行通过 `WSLENV`
+将变量传播到 Linux 环境。
 
 ### RemoteSshDomain（1:1）
 
 一个 pane 对应一条 russh SSH channel；支持密钥或密码认证，`request_pty` +
-`request_shell`，resize 转 `window-change`。
+`request_shell`，resize 转 `window-change`。环境变量优先走 SSH environment request；
+服务端拒绝时在登录 shell 启动后以 POSIX `export` 设置。
 
 ### TmuxDomain（1:N）
 

@@ -84,9 +84,14 @@ xsc tml add --url 'shell://bash'
 xsc tml add --url 'shell://powershell.exe?cwd=/home/me/src&cols=120&rows=40'
 xsc tml add --url 'ssh://dev@example.com'
 xsc tml add --url 'wsl://?args=--distribution,Ubuntu'
+xsc tml add --url 'shell://bash?env=FOO%3Dbar' --env 'GREETING=hello world'
 xsc tml write 1 echo hello
 xsc tml read 1
 ```
+
+`--env NAME=VALUE` 可重复，也可在 URL 中使用重复的 `env=NAME=VALUE` 查询参数。环境变量
+适用于本地 shell、SSH 和 WSL 会话；SSH 服务端拒绝 environment request 时会回退到登录
+shell 中的 POSIX `export`。
 
 ### tmux
 

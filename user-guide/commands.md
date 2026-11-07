@@ -53,7 +53,7 @@ cargo install --path crates/xsc-client
 `tml` 是 `terminal` 的简写。`add` 按目标 group 分两种行为：
 
 ```text
-xsc tml add [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
+xsc tml add [--url <URL>] [--env <NAME=VALUE>]... [--group <GROUP>] [--new-window | --sph <ID> | --spv <ID>]
 ```
 
 - `--group <GROUP>`：目标 window group（group 名或数字 GroupId），缺省为默认 group。
@@ -61,6 +61,8 @@ xsc tml add [--url <URL>] [--group <GROUP>] [--new-window | --sph <ID> | --spv <
 默认 group（放本地 shell/ssh/wsl 会话）：
 
 - `--url <URL>` 必填，描述 shell/ssh/wsl 对话。
+- `--env <NAME=VALUE>`：为新建 shell/ssh/wsl 设置环境变量，可重复；同名时后出现的值覆盖先出现的值。
+- `--env` 仅适用于默认 group 中的 shell/ssh/wsl 会话，不接受 tmux session group。
 - `--new-window`：在新窗口创建（默认）。
 - `--sph <ID>` / `--spv <ID>`：拆分指定本地 pane 后创建。
 
@@ -74,11 +76,16 @@ URL scheme：
 
 | scheme | 形式 | 查询参数 |
 |---|---|---|
-| `shell` | `shell://<program>?cwd=<path>&cols=<n>&rows=<n>&args=a,b` | `cwd`、`cols`、`rows`、`args`（逗号分隔） |
-| `ssh` | `ssh://<user@host[:port]>?identity=<path>&password=<pwd>&cols=<n>&rows=<n>` | `identity`、`password`、`cols`、`rows` |
-| `wsl` | `wsl://?args=a,b&cols=<n>&rows=<n>` | `args`、`cols`、`rows` |
+| `shell` | `shell://<program>?cwd=<path>&cols=<n>&rows=<n>&args=a,b&env=NAME=VALUE` | `cwd`、`cols`、`rows`、`args`（逗号分隔）、`env`（可重复） |
+| `ssh` | `ssh://<user@host[:port]>?identity=<path>&password=<pwd>&cols=<n>&rows=<n>&env=NAME=VALUE` | `identity`、`password`、`cols`、`rows`、`env`（可重复） |
+| `wsl` | `wsl://?args=a,b&cols=<n>&rows=<n>&env=NAME=VALUE` | `args`、`cols`、`rows`、`env`（可重复） |
 
 - `cols` / `rows` 缺省 80x24；`args` 缺省为空；`cwd` 缺省为当前目录。
+- 查询参数中的 `=`、`&`、空格等保留字符需要 percent-encode；例如 `env=PATH%3D%2Fone%3A%2Ftwo`。
+- 环境变量会同时从 URL 的重复 `env` 参数和重复 `--env` 参数收集；CLI 参数覆盖 URL 中同名变量。
+- 本地 shell 直接注入 PTY 子进程；WSL 通过 `WSLENV` 把变量传入 Linux 环境。
+- SSH 先发送标准 environment request。服务器拒绝时，在登录 shell 启动后用 POSIX `export`
+  设置；非 POSIX 远端 shell 需要 SSH 服务端配置 `AcceptEnv`。
 - `ssh` 认证：优先用 URL 里的 `password`；其次用 `identity` 密钥；两者都没有时在客户端边缘提示密码。
 - 注意：`password` 写在 URL 里会出现在进程参数和 shell 历史中，生产环境建议使用
   交互提示。
@@ -91,6 +98,8 @@ xsc tml add --url 'shell://bash?cols=100&rows=30' --spv 3
 xsc tml add --url 'ssh://dev@box?identity=~/.ssh/id_ed25519'
 xsc tml add --url 'ssh://dev@box?password=secret'
 xsc tml add --url 'wsl://?args=--distribution,Ubuntu'
+xsc tml add --url 'shell://bash?env=FOO%3Dbar&env=LOG_LEVEL%3Ddebug'
+xsc tml add --url 'ssh://dev@box' --env FOO=bar --env 'GREETING=hello world'
 xsc tml add --group work --new-window
 xsc tml add --group work --sph 3
 ```

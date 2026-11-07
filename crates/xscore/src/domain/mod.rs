@@ -73,6 +73,8 @@ pub enum TerminalConfig {
         args: Vec<String>,
         /// 子进程工作目录；`None` 表示继承当前目录。
         cwd: Option<String>,
+        /// 启动子进程时覆盖或新增的环境变量。
+        env: Vec<(String, String)>,
         /// 初始终端列数。
         cols: u16,
         /// 初始终端行数。
@@ -90,6 +92,8 @@ pub enum TerminalConfig {
         identity: Option<String>,
         /// 登录密码；未提供私钥时使用。
         password: Option<String>,
+        /// 请求远端 shell 使用的环境变量。
+        env: Vec<(String, String)>,
         /// 初始终端列数。
         cols: u16,
         /// 初始终端行数。

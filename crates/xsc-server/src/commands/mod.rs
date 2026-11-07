@@ -54,7 +54,7 @@ pub async fn dispatch(app: &Arc<Mutex<App>>, cmd: CommandRequest) -> Result<Outp
 pub fn help() -> Output {
     let mut out = Output::new();
     out.line("commands:");
-    out.line("  tml add [--url <url>] [--group <group>] [--new-window | --sph <id> | --spv <id>]   add a local or tmux conversation");
+    out.line("  tml add [--url <url>] [--env <name=value>]... [--group <group>] [--new-window | --sph <id> | --spv <id>]   add a local or tmux conversation");
     out.line("  tml del <pane-id>          delete a pane");
     out.line("  tml write <pane-id> <text>  send text + newline to the pane");
     out.line("  tml read <pane-id>         print accumulated output");

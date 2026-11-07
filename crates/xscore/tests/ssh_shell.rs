@@ -22,6 +22,7 @@ async fn ssh_shell_roundtrip_and_resize() {
             user: config.ssh_user,
             identity: None,
             password: Some(config.ssh_password),
+            env: vec![("XSCORE_TEST_ENV".into(), "OK".into())],
             cols: 80,
             rows: 24,
         })
@@ -34,7 +35,7 @@ async fn ssh_shell_roundtrip_and_resize() {
         .expect("resize remote SSH PTY");
 
     let mut output = pane.subscribe();
-    pane.send_input(b"printf 'XSCORE_%s\\n' 'SSH_DOMAIN_OK'\n")
+    pane.send_input(b"printf 'XSCORE_%s_%s\\n' 'SSH_DOMAIN' \"$XSCORE_TEST_ENV\"\n")
         .await
         .expect("write command to remote SSH shell");
 

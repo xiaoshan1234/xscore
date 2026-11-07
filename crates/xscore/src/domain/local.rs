@@ -33,6 +33,7 @@ impl Domain for LocalDomain {
             command,
             args,
             cwd,
+            env,
             cols,
             rows,
         } = config
@@ -42,7 +43,12 @@ impl Domain for LocalDomain {
             ));
         };
         let id = TerminalId::next();
-        let pty = Arc::new(LocalPty::new(command.clone(), args.clone(), cwd.clone()));
+        let pty = Arc::new(LocalPty::new(
+            command.clone(),
+            args.clone(),
+            cwd.clone(),
+            env.clone(),
+        ));
         let mut rx = pty.spawn(Size::new(*cols, *rows))?;
 
         let (tx, _) = broadcast::channel::<Vec<u8>>(256);

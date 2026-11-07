@@ -6,9 +6,9 @@ use xscore::domain::{Domain, LocalDomain, TerminalConfig};
 #[tokio::test]
 async fn local_pane_roundtrip() {
     let (program, args): (&str, Vec<&str>) = if cfg!(windows) {
-        ("cmd.exe", vec!["/c", "echo EMULATOR_PTY_OK"])
+        ("cmd.exe", vec!["/c", "echo %XSCORE_PTY_ENV%"])
     } else {
-        ("sh", vec!["-c", "echo EMULATOR_PTY_OK"])
+        ("sh", vec!["-c", "printf '%s\\n' \"$XSCORE_PTY_ENV\""])
     };
 
     let domain = LocalDomain::new();
@@ -17,6 +17,7 @@ async fn local_pane_roundtrip() {
             command: program.to_string(),
             args: args.into_iter().map(str::to_string).collect(),
             cwd: None,
+            env: vec![("XSCORE_PTY_ENV".into(), "XSCORE_PTY_ENV_OK".into())],
             cols: 80,
             rows: 24,
         })
@@ -25,7 +26,7 @@ async fn local_pane_roundtrip() {
 
     let mut rx = handle.subscribe();
     let mut seen: Vec<u8> = Vec::new();
-    let needle = b"EMULATOR_PTY_OK";
+    let needle = b"XSCORE_PTY_ENV_OK";
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         match timeout(Duration::from_millis(200), rx.recv()).await {
@@ -42,7 +43,7 @@ async fn local_pane_roundtrip() {
 
     let text = String::from_utf8_lossy(&seen);
     assert!(
-        text.contains("EMULATOR_PTY_OK"),
+        text.contains("XSCORE_PTY_ENV_OK"),
         "expected marker in output, got: {text:?}"
     );
 }

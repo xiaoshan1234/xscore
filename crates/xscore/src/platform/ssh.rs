@@ -36,6 +36,7 @@ pub struct SshConnection {
     port: u16,
     identity: Option<String>,
     password: Option<String>,
+    env: Vec<(String, String)>,
     handle: Arc<Mutex<Option<client::Handle<SshHandler>>>>,
     commands: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<SshCommand>>>>,
 }
@@ -52,6 +53,10 @@ impl std::fmt::Debug for SshConnection {
             .field("user", &self.user)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field(
+                "env_names",
+                &self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -110,14 +115,15 @@ pub(crate) async fn connect_authenticated(
 impl SshConnection {
     /// 创建 SSH 连接配置，但暂不建立网络连接。
     ///
-    /// 参数/输出：`user`、`host`、`port`、`identity` 和 `password` 为输入；
-    /// 返回尚未连接的 [`SshConnection`]。
+    /// 参数/输出：`user`、`host`、`port`、`identity`、`password` 和 `env`
+    /// 为输入；返回尚未连接的 [`SshConnection`]。
     pub fn new(
         user: String,
         host: String,
         port: u16,
         identity: Option<String>,
         password: Option<String>,
+        env: Vec<(String, String)>,
     ) -> Self {
         Self {
             user,
@@ -125,6 +131,7 @@ impl SshConnection {
             port,
             identity,
             password,
+            env,
             handle: Arc::new(Mutex::new(None)),
             commands: Arc::new(Mutex::new(None)),
         }
@@ -135,6 +142,19 @@ impl SshConnection {
     /// 参数/输出：`self` 为输入输出，会保存连接和命令通道；`size` 为输入初始
     /// 终端尺寸；返回远程输出接收端。
     pub async fn connect(&self, size: Size) -> Result<UnboundedReceiver<Vec<u8>>> {
+        for (name, value) in &self.env {
+            if !is_valid_environment_name(name) {
+                return Err(Error::Invalid(format!(
+                    "invalid SSH environment variable name: {name:?}"
+                )));
+            }
+            if value.contains('\0') {
+                return Err(Error::Invalid(format!(
+                    "SSH environment variable {name:?} must not contain a NUL byte"
+                )));
+            }
+        }
+
         tracing::debug!(
             host = %self.host,
             port = self.port,
@@ -150,10 +170,35 @@ impl SshConnection {
         )
         .await?;
 
-        let channel = handle
+        let mut channel = handle
             .channel_open_session()
             .await
             .map_err(|e| Error::Transport(format!("ssh channel_open_session: {e}")))?;
+
+        let mut rejected_env = Vec::new();
+        for (name, value) in &self.env {
+            channel
+                .set_env(true, name.as_str(), value.as_str())
+                .await
+                .map_err(|e| Error::Transport(format!("ssh set_env {name}: {e}")))?;
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => {}
+                Some(ChannelMsg::Failure) => rejected_env.push((name.clone(), value.clone())),
+                Some(ChannelMsg::Eof | ChannelMsg::Close) | None => {
+                    return Err(Error::Transport(
+                        "ssh channel closed while setting environment".into(),
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        if !rejected_env.is_empty() {
+            tracing::debug!(
+                env_names = ?rejected_env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+                "ssh server rejected environment requests; using shell fallback"
+            );
+        }
+
         channel
             .request_pty(
                 true,
@@ -178,6 +223,11 @@ impl SshConnection {
         tokio::spawn(async move {
             run_channel(channel, command_rx, out_tx).await;
         });
+
+        if !rejected_env.is_empty() {
+            let command = environment_export_command(&rejected_env);
+            self.write(command.as_bytes()).await?;
+        }
 
         Ok(out_rx)
     }
@@ -238,6 +288,38 @@ impl SshConnection {
     }
 }
 
+fn is_valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn quote_shell_value(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str(r"'\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn environment_export_command(env: &[(String, String)]) -> String {
+    let mut command = String::from("export");
+    for (name, value) in env {
+        command.push(' ');
+        command.push_str(name);
+        command.push('=');
+        command.push_str(&quote_shell_value(value));
+    }
+    command.push('\n');
+    command
+}
+
 async fn run_channel(
     mut channel: Channel<client::Msg>,
     mut commands: UnboundedReceiver<SshCommand>,
@@ -289,5 +371,31 @@ async fn run_channel(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{environment_export_command, is_valid_environment_name};
+
+    #[test]
+    fn environment_name_validation_accepts_shell_identifiers() {
+        assert!(is_valid_environment_name("PATH"));
+        assert!(is_valid_environment_name("_private1"));
+        assert!(!is_valid_environment_name(""));
+        assert!(!is_valid_environment_name("1PATH"));
+        assert!(!is_valid_environment_name("BAD-NAME"));
+        assert!(!is_valid_environment_name("A=B"));
+    }
+
+    #[test]
+    fn export_command_quotes_values_and_exports_children() {
+        assert_eq!(
+            environment_export_command(&[
+                ("PLAIN".into(), "value".into()),
+                ("QUOTED".into(), "a'b c".into()),
+            ]),
+            "export PLAIN='value' QUOTED='a'\\''b c'\n"
+        );
     }
 }

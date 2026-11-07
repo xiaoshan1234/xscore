@@ -9,6 +9,7 @@ pub use args::{
 };
 pub use map::command_request;
 pub use model::{
-    parse_conversation_url, parse_ssh_target, CommandRequest, ConversationSpec, LogFormat,
-    LsCommand, TmlAddRequest, TmlCommand, TmlLogRequest, TmxAttachRequest, TmxCommand,
+    parse_conversation_url, parse_environment_assignment, parse_ssh_target, CommandRequest,
+    ConversationSpec, LogFormat, LsCommand, TmlAddRequest, TmlCommand, TmlLogRequest,
+    TmxAttachRequest, TmxCommand,
 };

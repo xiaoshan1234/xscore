@@ -41,6 +41,7 @@ fn tml_add(args: TmlAddArgs) -> TmlAddRequest {
         sph: args.sph,
         spv: args.spv,
         password: args.password,
+        env: args.env,
     }
 }
 
@@ -112,5 +113,31 @@ mod tests {
         assert_eq!(add.spv.as_deref(), Some("7"));
         assert!(add.sph.is_none());
         assert!(add.new_window);
+    }
+
+    #[test]
+    fn tml_add_maps_environment_variables() {
+        let cmd = parse_args(
+            [
+                "tml",
+                "add",
+                "--url",
+                "shell://bash",
+                "--env",
+                "FOO=bar",
+                "--env",
+                "SPACED=a b",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("parse command");
+
+        let CommandRequest::Tml(TmlCommand::Add(add)) =
+            command_request(cmd).expect("convert command")
+        else {
+            panic!("expected tml add");
+        };
+        assert_eq!(add.env, ["FOO=bar", "SPACED=a b"]);
     }
 }

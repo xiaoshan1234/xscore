@@ -65,7 +65,7 @@
 
 ```rust
 trait PtyTransport {
-    fn spawn(program, args, env, size) -> PtyHandle
+    fn spawn(program, args, cwd, env, size) -> PtyHandle
     fn read() -> AsyncStream<Bytes>
     fn write(Bytes)
     fn resize(cols, rows)
@@ -73,7 +73,7 @@ trait PtyTransport {
 }
 
 trait SshTransport {
-    fn connect(host, auth, size) -> SshChannel
+    fn connect(host, auth, env, size) -> SshChannel
     // SshChannel 提供与 PtyHandle 同形的 read/write/resize/exit
 }
 ```
@@ -120,13 +120,16 @@ trait TerminalHandle {
 
 **LocalDomain**
 
-- `spawn_terminal` 调 L0 的 `PtyTransport::spawn` 启动 Shell，返回唯一 TerminalHandle。
+- `spawn_terminal` 调 L0 的 `PtyTransport::spawn` 启动 Shell，并把配置中的环境变量
+  注入子进程，返回唯一 TerminalHandle。
 - `send_input` 直写 PTY；`output_stream` 即 PTY 读流；`resize` 直调 PTY 尺寸。
 - 生命周期由本地驱动。
 
 **RemoteSshDomain**
 
 - `spawn_terminal` 建立 SSH 连接并申请 PTY channel，返回唯一 TerminalHandle。
+- 环境变量通过 SSH environment request 设置；服务端拒绝时回退到登录 shell 的
+  POSIX `export`。
 - 输入输出直通 SSH channel；`resize` 转成 `window-change` 请求。
 - 生命周期由本地驱动（连接断开或本地关闭）。
 

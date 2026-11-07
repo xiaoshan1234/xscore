@@ -1,6 +1,5 @@
 //! daemon 命令模型与输入解析：可分发命令以及 URL/SSH 参数解析。
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -85,6 +84,8 @@ pub struct TmlAddRequest {
     pub spv: Option<String>,
     /// Client-resolved password.
     pub password: Option<String>,
+    /// Additional `NAME=VALUE` environment variables.
+    pub env: Vec<String>,
 }
 
 /// Output logger format.
@@ -157,6 +158,8 @@ pub enum ConversationSpec {
         args: Vec<String>,
         /// Optional working directory.
         cwd: Option<String>,
+        /// Environment variables added to the child process.
+        env: Vec<(String, String)>,
         /// Initial column count.
         cols: u16,
         /// Initial row count.
@@ -170,6 +173,8 @@ pub enum ConversationSpec {
         identity: Option<String>,
         /// Optional password.
         password: Option<String>,
+        /// Environment variables requested for the remote shell.
+        env: Vec<(String, String)>,
         /// Initial column count.
         cols: u16,
         /// Initial row count.
@@ -179,6 +184,8 @@ pub enum ConversationSpec {
     Wsl {
         /// Arguments passed to `wsl.exe`.
         args: Vec<String>,
+        /// Environment variables passed into the WSL process.
+        env: Vec<(String, String)>,
         /// Initial column count.
         cols: u16,
         /// Initial row count.
@@ -209,6 +216,15 @@ impl ConversationSpec {
             Self::Shell { rows, .. } | Self::Ssh { rows, .. } | Self::Wsl { rows, .. } => *rows,
         }
     }
+
+    /// Return environment variables parsed from the conversation URL.
+    ///
+    /// Parameters/output: `self` is input; returns the URL's environment assignments.
+    pub fn environment(&self) -> &[(String, String)] {
+        match self {
+            Self::Shell { env, .. } | Self::Ssh { env, .. } | Self::Wsl { env, .. } => env,
+        }
+    }
 }
 
 /// Parse `scheme://path?key=value&...`.
@@ -228,10 +244,12 @@ pub fn parse_conversation_url(url: &str) -> Result<ConversationSpec> {
                 return Err(anyhow!("shell URL requires a program: shell://<program>"));
             }
             let (cols, rows) = parse_size(&params)?;
+            let env = parse_env_params(&params)?;
             Ok(ConversationSpec::Shell {
                 program: path.to_string(),
                 args: parse_args_param(&params)?,
-                cwd: params.get("cwd").cloned(),
+                cwd: param(&params, "cwd").map(str::to_string),
+                env,
                 cols,
                 rows,
             })
@@ -241,18 +259,22 @@ pub fn parse_conversation_url(url: &str) -> Result<ConversationSpec> {
                 return Err(anyhow!("ssh URL requires user@host[:port]"));
             }
             let (cols, rows) = parse_size(&params)?;
+            let env = parse_env_params(&params)?;
             Ok(ConversationSpec::Ssh {
                 target: path.to_string(),
-                identity: params.get("identity").cloned(),
-                password: params.get("password").cloned(),
+                identity: param(&params, "identity").map(str::to_string),
+                password: param(&params, "password").map(str::to_string),
+                env,
                 cols,
                 rows,
             })
         }
         "wsl" => {
             let (cols, rows) = parse_size(&params)?;
+            let env = parse_env_params(&params)?;
             Ok(ConversationSpec::Wsl {
                 args: parse_args_param(&params)?,
+                env,
                 cols,
                 rows,
             })
@@ -279,24 +301,61 @@ pub fn parse_ssh_target(target: &str) -> Result<(String, String, u16)> {
     Ok((user.to_string(), host, port))
 }
 
-fn parse_query(query: &str) -> HashMap<String, String> {
-    let mut params = HashMap::new();
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        if let Some((key, value)) = pair.split_once('=') {
-            params.insert(key.to_string(), value.to_string());
-        }
+/// Parse one `NAME=VALUE` environment variable assignment.
+///
+/// Parameters/output: `assignment` is input; returns the validated name and value.
+pub fn parse_environment_assignment(assignment: &str) -> Result<(String, String)> {
+    let (name, value) = assignment
+        .split_once('=')
+        .ok_or_else(|| anyhow!("environment variable must use NAME=VALUE"))?;
+    if !is_valid_environment_name(name) {
+        return Err(anyhow!("invalid environment variable name: {name:?}"));
     }
-    params
+    if value.contains('\0') {
+        return Err(anyhow!(
+            "environment variable {name:?} must not contain a NUL byte"
+        ));
+    }
+    Ok((name.to_string(), value.to_string()))
 }
 
-fn parse_size(params: &HashMap<String, String>) -> Result<(u16, u16)> {
-    let cols = match params.get("cols") {
+fn is_valid_environment_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(ch) if ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_query(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(key, value)| (decode_query_component(key), decode_query_component(value)))
+        .collect()
+}
+
+fn decode_query_component(value: &str) -> String {
+    let plus_decoded = value.replace('+', " ");
+    percent_encoding::percent_decode_str(&plus_decoded)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+fn param<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    params
+        .iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
+}
+
+fn parse_size(params: &[(String, String)]) -> Result<(u16, u16)> {
+    let cols = match param(params, "cols") {
         Some(value) => value
             .parse::<u16>()
             .map_err(|_| anyhow!("invalid cols: {value}"))?,
         None => 80,
     };
-    let rows = match params.get("rows") {
+    let rows = match param(params, "rows") {
         Some(value) => value
             .parse::<u16>()
             .map_err(|_| anyhow!("invalid rows: {value}"))?,
@@ -305,12 +364,20 @@ fn parse_size(params: &HashMap<String, String>) -> Result<(u16, u16)> {
     Ok((cols, rows))
 }
 
-fn parse_args_param(params: &HashMap<String, String>) -> Result<Vec<String>> {
-    match params.get("args") {
-        Some(value) if value.is_empty() => Ok(Vec::new()),
+fn parse_args_param(params: &[(String, String)]) -> Result<Vec<String>> {
+    match param(params, "args") {
+        Some("") => Ok(Vec::new()),
         Some(value) => Ok(value.split(',').map(str::to_string).collect()),
         None => Ok(Vec::new()),
     }
+}
+
+fn parse_env_params(params: &[(String, String)]) -> Result<Vec<(String, String)>> {
+    params
+        .iter()
+        .filter(|(key, _)| key == "env")
+        .map(|(_, value)| parse_environment_assignment(value))
+        .collect()
 }
 
 #[cfg(test)]
@@ -325,6 +392,7 @@ mod tests {
                 program: "powershell".into(),
                 args: vec![],
                 cwd: None,
+                env: vec![],
                 cols: 80,
                 rows: 24,
             }
@@ -339,9 +407,37 @@ mod tests {
                 target: "dev@box".into(),
                 identity: None,
                 password: Some("secret".into()),
+                env: vec![],
                 cols: 90,
                 rows: 28,
             }
         );
+    }
+
+    #[test]
+    fn conversation_url_parses_repeated_environment_variables() {
+        assert_eq!(
+            parse_conversation_url(
+                "shell://bash?env=FOO%3Dbar&env=PATH%3D%2Fone%3A%2Ftwo&cwd=%2Fwork%20space"
+            )
+            .unwrap(),
+            ConversationSpec::Shell {
+                program: "bash".into(),
+                args: vec![],
+                cwd: Some("/work space".into()),
+                env: vec![
+                    ("FOO".into(), "bar".into()),
+                    ("PATH".into(), "/one:/two".into()),
+                ],
+                cols: 80,
+                rows: 24,
+            }
+        );
+    }
+
+    #[test]
+    fn conversation_url_rejects_invalid_environment_name() {
+        assert!(parse_conversation_url("wsl://?env=BAD-NAME%3Dvalue").is_err());
+        assert!(parse_conversation_url("wsl://?env=NO_EQUALS").is_err());
     }
 }

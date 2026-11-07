@@ -110,6 +110,9 @@ pub struct TmlAddArgs {
     /// client-resolved password; hidden from help and only injected at the edge
     #[arg(long, hide = true)]
     pub password: Option<String>,
+    /// set an environment variable for the new shell, SSH, or WSL process; repeatable
+    #[arg(long, value_name = "NAME=VALUE")]
+    pub env: Vec<String>,
 }
 
 /// `tml log --format` 的格式参数。
@@ -267,6 +270,24 @@ mod tests {
             panic!("expected tml command");
         };
         assert_eq!(add.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn tml_add_accepts_repeated_environment_variables() {
+        let Cmd::Tml(TmlCmd::Add(add)) = parse(&[
+            "tml",
+            "add",
+            "--url",
+            "shell://bash",
+            "--env",
+            "FOO=bar",
+            "--env",
+            "SPACED=a b",
+        ])
+        .unwrap() else {
+            panic!("expected tml command");
+        };
+        assert_eq!(add.env, ["FOO=bar", "SPACED=a b"]);
     }
 
     #[test]

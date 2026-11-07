@@ -5,7 +5,10 @@ use anyhow::{anyhow, Context, Result};
 use xscore::domain::{Domain, LocalDomain, RemoteSshDomain, TerminalConfig, TerminalId};
 use xscore::platform::tmux::quote_arg;
 
-use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddRequest};
+use crate::cli::{
+    parse_conversation_url, parse_environment_assignment, parse_ssh_target, ConversationSpec,
+    TmlAddRequest,
+};
 
 use crate::app::App;
 use crate::app::{GroupId, GroupKind, WindowId, WindowKind};
@@ -29,6 +32,11 @@ pub async fn add(app: &mut App, args: TmlAddRequest) -> Result<Output> {
         .map(|g| g.kind == GroupKind::Tmux)
         .unwrap_or(false);
     if is_tmux {
+        if !args.env.is_empty() {
+            return Err(anyhow!(
+                "--env is only supported when creating shell, SSH, or WSL conversations"
+            ));
+        }
         add_in_tmux(app, &args, group).await
     } else {
         add_local(app, args, group).await
@@ -41,6 +49,7 @@ async fn add_local(app: &mut App, args: TmlAddRequest, group: GroupId) -> Result
         .clone()
         .ok_or_else(|| anyhow!("--url is required for the default group"))?;
     let spec = parse_conversation_url(&url)?;
+    let environment = merged_environment(&spec, &args.env)?;
     let split = split_target(&args)?;
     if let Some((_, target)) = &split {
         if !app.layout.contains(*target) {
@@ -53,7 +62,15 @@ async fn add_local(app: &mut App, args: TmlAddRequest, group: GroupId) -> Result
             .filter(|window| window.kind == WindowKind::Manual),
         None => None,
     };
-    let id = spawn(app, &spec, args.password, group, target_window).await?;
+    let id = spawn(
+        app,
+        &spec,
+        &environment,
+        args.password,
+        group,
+        target_window,
+    )
+    .await?;
     match split {
         Some((direction, target)) => app.layout.split_pane(direction, target, id),
         None => app.layout.add(id),
@@ -127,6 +144,7 @@ fn split_target(args: &TmlAddRequest) -> Result<Option<(Direction, TerminalId)>>
 async fn spawn(
     app: &mut App,
     spec: &ConversationSpec,
+    environment: &[(String, String)],
     password: Option<String>,
     group: GroupId,
     window: Option<WindowId>,
@@ -136,6 +154,7 @@ async fn spawn(
             program,
             args,
             cwd,
+            env: _,
             cols,
             rows,
         } => {
@@ -145,6 +164,7 @@ async fn spawn(
                     command: program.clone(),
                     args: args.clone(),
                     cwd: cwd.clone(),
+                    env: environment.to_vec(),
                     cols: *cols,
                     rows: *rows,
                 })
@@ -158,6 +178,7 @@ async fn spawn(
             target,
             identity,
             password: url_password,
+            env: _,
             cols,
             rows,
         } => {
@@ -170,6 +191,7 @@ async fn spawn(
                     user,
                     identity: identity.clone(),
                     password: url_password.clone().or(password),
+                    env: environment.to_vec(),
                     cols: *cols,
                     rows: *rows,
                 })
@@ -179,13 +201,20 @@ async fn spawn(
                 None => app.register_terminal_in_group(handle, *cols, *rows, group),
             })
         }
-        ConversationSpec::Wsl { args, cols, rows } => {
+        ConversationSpec::Wsl {
+            args,
+            env: _,
+            cols,
+            rows,
+        } => {
             let domain = LocalDomain::new();
+            let wsl_env = wsl_environment(environment);
             let handle = domain
                 .spawn_terminal(&TerminalConfig::Local {
                     command: "wsl.exe".to_string(),
                     args: args.clone(),
                     cwd: None,
+                    env: wsl_env,
                     cols: *cols,
                     rows: *rows,
                 })
@@ -195,5 +224,110 @@ async fn spawn(
                 None => app.register_terminal_in_group(handle, *cols, *rows, group),
             })
         }
+    }
+}
+
+fn merged_environment(spec: &ConversationSpec, extra: &[String]) -> Result<Vec<(String, String)>> {
+    let mut environment = Vec::new();
+    for (name, value) in spec.environment() {
+        upsert_environment(&mut environment, name.clone(), value.clone());
+    }
+    for assignment in extra {
+        let (name, value) = parse_environment_assignment(assignment)?;
+        upsert_environment(&mut environment, name, value);
+    }
+    Ok(environment)
+}
+
+fn upsert_environment(environment: &mut Vec<(String, String)>, name: String, value: String) {
+    if let Some((_, existing)) = environment
+        .iter_mut()
+        .find(|(existing, _)| existing == &name)
+    {
+        *existing = value;
+    } else {
+        environment.push((name, value));
+    }
+}
+
+fn wsl_environment(environment: &[(String, String)]) -> Vec<(String, String)> {
+    let inherited = std::env::var("WSLENV").ok();
+    merge_wslenv(environment, inherited.as_deref())
+}
+
+fn merge_wslenv(
+    environment: &[(String, String)],
+    inherited: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut merged = environment.to_vec();
+    if environment.is_empty() {
+        return merged;
+    }
+
+    let explicit = environment
+        .iter()
+        .rev()
+        .find(|(name, _)| name.eq_ignore_ascii_case("WSLENV"))
+        .map(|(_, value)| value.as_str());
+    let mut entries: Vec<String> = explicit
+        .or(inherited)
+        .unwrap_or_default()
+        .split(':')
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    for (name, _) in environment {
+        if name.eq_ignore_ascii_case("WSLENV") {
+            continue;
+        }
+        if !entries
+            .iter()
+            .any(|entry| entry.split('/').next() == Some(name.as_str()))
+        {
+            entries.push(name.clone());
+        }
+    }
+    upsert_environment(&mut merged, "WSLENV".to_string(), entries.join(":"));
+    merged
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_wslenv, merged_environment, upsert_environment};
+    use crate::cli::parse_conversation_url;
+
+    #[test]
+    fn environment_merging_keeps_last_value() {
+        let mut environment = vec![("FOO".into(), "old".into())];
+        upsert_environment(&mut environment, "FOO".into(), "new".into());
+        assert_eq!(environment, [("FOO".into(), "new".into())]);
+
+        let spec = parse_conversation_url("shell://bash?env=FOO%3Durl&env=BAR%3Done").unwrap();
+        let merged = merged_environment(&spec, &["FOO=cli".into()]).unwrap();
+        assert_eq!(
+            merged,
+            [("FOO".into(), "cli".into()), ("BAR".into(), "one".into())]
+        );
+    }
+
+    #[test]
+    fn wsl_environment_propagates_explicit_and_inherited_names() {
+        let environment = vec![("FOO".into(), "bar".into())];
+        assert_eq!(
+            merge_wslenv(&environment, Some("EXISTING/p:FOO")),
+            [
+                ("FOO".into(), "bar".into()),
+                ("WSLENV".into(), "EXISTING/p:FOO".into())
+            ]
+        );
+
+        assert_eq!(
+            merge_wslenv(&environment, None),
+            [
+                ("FOO".into(), "bar".into()),
+                ("WSLENV".into(), "FOO".into())
+            ]
+        );
     }
 }

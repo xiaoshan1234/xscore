@@ -18,6 +18,7 @@ pub struct LocalPty {
     command: String,
     args: Vec<String>,
     cwd: Option<String>,
+    env: Vec<(String, String)>,
     master: StdMutex<Option<Box<dyn MasterPty + Send>>>,
     child: StdMutex<Option<Box<dyn Child + Send + Sync>>>,
     to_child: StdMutex<Option<UnboundedSender<Vec<u8>>>>,
@@ -29,6 +30,10 @@ impl std::fmt::Debug for LocalPty {
             .field("command", &self.command)
             .field("args", &self.args)
             .field("cwd", &self.cwd)
+            .field(
+                "env_names",
+                &self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -36,12 +41,19 @@ impl std::fmt::Debug for LocalPty {
 impl LocalPty {
     /// 创建本地 PTY 启动配置，但暂不启动子进程。
     ///
-    /// 参数/输出：`command`、`args` 和 `cwd` 为输入；返回尚未打开的 [`LocalPty`]。
-    pub fn new(command: impl Into<String>, args: Vec<String>, cwd: Option<String>) -> Self {
+    /// 参数/输出：`command`、`args`、`cwd` 和 `env` 为输入；返回尚未打开的
+    /// [`LocalPty`]。
+    pub fn new(
+        command: impl Into<String>,
+        args: Vec<String>,
+        cwd: Option<String>,
+        env: Vec<(String, String)>,
+    ) -> Self {
         Self {
             command: command.into(),
             args,
             cwd,
+            env,
             master: StdMutex::new(None),
             child: StdMutex::new(None),
             to_child: StdMutex::new(None),
@@ -56,6 +68,7 @@ impl LocalPty {
         tracing::debug!(
             command = %self.command,
             args = ?self.args,
+            env_names = ?self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
             cols = size.cols,
             rows = size.rows,
             "pty spawn"
@@ -76,6 +89,9 @@ impl LocalPty {
         let mut cmd = CommandBuilder::new(&self.command);
         for arg in &self.args {
             cmd.arg(arg);
+        }
+        for (name, value) in &self.env {
+            cmd.env(name, value);
         }
         if let Some(cwd) = &self.cwd {
             cmd.cwd(cwd);
