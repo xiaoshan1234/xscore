@@ -19,3 +19,4 @@ emulator.log
 # Generated integration-test results and logs
 /test-results/
 **/__pycache__
+**.log
