@@ -101,6 +101,99 @@ pub enum TerminalConfig {
     },
 }
 
+impl TerminalConfig {
+    /// 构造一个使用默认 `80x24` 尺寸的本地交互终端配置。
+    ///
+    /// 参数/输出：`command` 为输入的程序路径或名称；返回本地终端配置。
+    pub fn local(command: impl Into<String>) -> Self {
+        Self::Local {
+            command: command.into(),
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// 构造一个带命令行参数、使用默认 `80x24` 尺寸的本地终端配置。
+    ///
+    /// 参数/输出：`command` 和 `args` 为输入；返回本地终端配置。
+    pub fn local_command<I, S>(command: impl Into<String>, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::Local {
+            command: command.into(),
+            args: args.into_iter().map(Into::into).collect(),
+            cwd: None,
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// 构造一个使用默认 SSH 端口 `22` 和默认 `80x24` 尺寸的 SSH 终端配置。
+    ///
+    /// 参数/输出：`user` 和 `host` 为输入；返回尚未指定认证方式的 SSH 配置。
+    pub fn ssh(user: impl Into<String>, host: impl Into<String>) -> Self {
+        Self::Ssh {
+            host: host.into(),
+            port: 22,
+            user: user.into(),
+            identity: None,
+            password: None,
+            env: Vec::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    /// 构造一个使用密码认证、默认 SSH 端口 `22` 和默认 `80x24` 尺寸的 SSH 终端配置。
+    ///
+    /// 参数/输出：`user`、`host` 和 `password` 为输入；返回 SSH 终端配置。
+    pub fn ssh_with_password(
+        user: impl Into<String>,
+        host: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        let mut config = Self::ssh(user, host);
+        if let Self::Ssh { password: slot, .. } = &mut config {
+            *slot = Some(password.into());
+        }
+        config
+    }
+
+    /// 构造一个使用私钥认证、默认 SSH 端口 `22` 和默认 `80x24` 尺寸的 SSH 终端配置。
+    ///
+    /// 参数/输出：`user`、`host` 和 `identity` 私钥路径为输入；返回 SSH 终端配置。
+    pub fn ssh_with_identity(
+        user: impl Into<String>,
+        host: impl Into<String>,
+        identity: impl Into<String>,
+    ) -> Self {
+        let mut config = Self::ssh(user, host);
+        if let Self::Ssh { identity: slot, .. } = &mut config {
+            *slot = Some(identity.into());
+        }
+        config
+    }
+
+    /// 替换终端初始尺寸。
+    ///
+    /// 参数/输出：`self` 为输入输出配置；`size` 为输入尺寸；返回更新后的配置。
+    pub fn with_size(mut self, size: Size) -> Self {
+        match &mut self {
+            Self::Local { cols, rows, .. } | Self::Ssh { cols, rows, .. } => {
+                *cols = size.cols;
+                *rows = size.rows;
+            }
+        }
+        self
+    }
+}
+
 /// 单个终端的统一异步句柄。
 ///
 /// 实现必须保证每个实例只操作一个终端，并隔离其输入、输出和生命周期。
@@ -165,11 +258,55 @@ pub trait Domain: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::TerminalId;
+    use super::{TerminalConfig, TerminalId};
+    use crate::platform::Size;
 
     #[test]
     fn pane_id_display_respects_width() {
         assert_eq!(format!("{:<10}", TerminalId::new(1)), "1         ");
         assert_eq!(format!("{:>10}", TerminalId::new(1)), "         1");
+    }
+
+    #[test]
+    fn convenience_constructors_apply_expected_defaults() {
+        let local =
+            TerminalConfig::local_command("sh", ["-c", "true"]).with_size(Size::new(120, 40));
+        assert!(matches!(
+            local,
+            TerminalConfig::Local {
+                args,
+                cols: 120,
+                rows: 40,
+                ..
+            } if args == ["-c", "true"]
+        ));
+
+        let ssh = TerminalConfig::ssh("alice", "example.com").with_size(Size::new(100, 30));
+        assert!(matches!(
+            ssh,
+            TerminalConfig::Ssh {
+                user,
+                host,
+                port: 22,
+                cols: 100,
+                rows: 30,
+                ..
+            } if user == "alice" && host == "example.com"
+        ));
+
+        assert!(matches!(
+            TerminalConfig::ssh_with_password("alice", "example.com", "secret"),
+            TerminalConfig::Ssh {
+                password: Some(password),
+                ..
+            } if password == "secret"
+        ));
+        assert!(matches!(
+            TerminalConfig::ssh_with_identity("alice", "example.com", "/tmp/id"),
+            TerminalConfig::Ssh {
+                identity: Some(identity),
+                ..
+            } if identity == "/tmp/id"
+        ));
     }
 }

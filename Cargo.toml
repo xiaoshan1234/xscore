@@ -6,6 +6,7 @@ members = [
     "crates/xsc-client",
     "crates/xsc-server",
 ]
+default-members = ["crates/xscore"]
 
 [workspace.package]
 edition = "2021"

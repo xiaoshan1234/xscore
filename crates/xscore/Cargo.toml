@@ -3,12 +3,22 @@ name = "xscore"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+description = "Reusable local PTY/ConPTY, SSH, and tmux terminal transport library"
+readme = "README.md"
+keywords = ["terminal", "pty", "ssh", "tmux", "conpty"]
+categories = ["command-line-interface", "network-programming"]
+documentation = "https://docs.rs/xscore"
+repository = "https://github.com/xiaoshan1234/xscore"
+homepage = "https://github.com/xiaoshan1234/xscore"
 
 [dependencies]
-tokio.workspace = true
+tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
 thiserror.workspace = true
 async-trait.workspace = true
 portable-pty.workspace = true
 tracing.workspace = true
 russh.workspace = true
 russh-keys.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "time"] }
