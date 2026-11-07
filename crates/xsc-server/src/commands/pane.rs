@@ -6,10 +6,10 @@ use xscore::domain::{PaneId, PaneKind};
 use xscore::platform::Size;
 use xscore::term::TerminalCore;
 
-use crate::command::{LogFormat, TmlLogRequest};
+use crate::cli::{LogFormat, TmlLogRequest};
 
 use crate::app::App;
-use crate::logger::{default_path, LoggerFormat};
+use crate::logging::{default_path, LoggerFormat};
 use crate::render::{snapshot_text, Output};
 
 /// 向指定 pane 写入以空格拼接的文本并补平台换行。

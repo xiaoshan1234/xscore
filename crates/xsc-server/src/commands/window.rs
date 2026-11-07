@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 
 use crate::app::App;
+use crate::app::{WindowId, WindowKind};
 use crate::render::Output;
-use crate::window_group::{WindowId, WindowKind};
 
 /// 列出全部或指定 group 的 window。
 ///

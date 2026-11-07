@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::command::{
-    parse_conversation_url, parse_ssh_target, ConversationSpec, TmxAttachRequest,
-};
+use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmxAttachRequest};
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 

@@ -10,8 +10,8 @@ use xscore::domain::{PaneId, PaneKind};
 use xscore::term::{TerminalCore, VtTerm};
 
 use crate::app::App;
+use crate::app::{parse_window_id, WindowKind};
 use crate::layout::PaneRect;
-use crate::window_group::{parse_window_id, WindowKind};
 
 /// 追加式输出缓冲：`line` 等价于 `println!`（补一个换行），`push` 原样追加。
 #[derive(Debug, Default, Clone)]

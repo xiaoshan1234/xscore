@@ -57,10 +57,13 @@ crates/xsc-protocol/      client 与 server 共享的请求/响应、IPC 编解�
 crates/xsc-client/        `xs` 命令客户端：仅转发 argv、边缘密码提示、自动拉起 daemon、RPC
 crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分发、App、pane、layout、logger、tmux
   src/main.rs                daemon 入口
-  src/server.rs              TCP accept、协议握手与请求分发
-  src/app.rs                 App 状态：pane 注册表、布局、window group、tmux 会话
-  src/pane.rs                PaneRegistry：PaneHandle ↔ TerminalCore 绑定 + 字节泵
-  src/commands/              服务端命令处理器
+  src/server/                回环 TCP：accept、协议握手与请求分发
+  src/cli/                   命令输入：clap 解析、命令模型、URL 解析、命令映射
+  src/app/                   应用状态：App、PaneRegistry、window/group 标识
+  src/commands/              命令分发与处理器
+  src/layout/                布局树
+  src/render/                文本渲染
+  src/logging/               进程日志初始化与 pane logger
   src/tmux/                  tmux 会话协调（events 差集 / session reconcile）
 
 ```

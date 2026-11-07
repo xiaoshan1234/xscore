@@ -5,13 +5,13 @@ use anyhow::{anyhow, Context, Result};
 use xscore::domain::{Domain, LocalDomain, PaneConfig, PaneId, RemoteSshDomain};
 use xscore::platform::tmux::quote_arg;
 
-use crate::command::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddRequest};
+use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddRequest};
 
 use crate::app::App;
+use crate::app::{GroupId, GroupKind, WindowId, WindowKind};
 use crate::layout::Direction;
 use crate::render::Output;
 use crate::tmux::session::reconcile_session;
-use crate::window_group::{GroupId, GroupKind, WindowId, WindowKind};
 
 /// 按目标 group 类型创建本地对话、SSH/WSL pane 或 tmux window/pane。
 ///

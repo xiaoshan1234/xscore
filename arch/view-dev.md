@@ -46,13 +46,13 @@ crates/xsc-client/src/
   daemon.rs               daemon 自动拉起、协议协商、RPC
 crates/xsc-server/src/
   main.rs                 `xs-daemon` 入口与日志初始化
-  server.rs               TCP accept 与请求分发
-  cli.rs                  clap 命令面与 argv 解析
-  command.rs              命令模型与 URL/SSH 参数解析
-  wire.rs                 clap 命令 → 命令模型映射
-  app.rs / pane.rs        常驻状态与 PaneRegistry
-  commands/               命令处理器
-  layout.rs / render.rs   布局与文本渲染
+  server/                 回环 TCP：accept、握手、请求分发
+  cli/                    命令输入：args（clap）/ model / url / map
+  app/                    应用状态：App / PaneRegistry / window/group
+  commands/               命令分发与处理器
+  layout/                 布局树
+  render/                 文本渲染
+  logging/                进程日志初始化与 pane logger
   tmux/                   tmux 会话协调
 ```
 

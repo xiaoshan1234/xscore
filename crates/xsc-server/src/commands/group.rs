@@ -1,8 +1,8 @@
 //! group 命令：列出 window group。
 
 use crate::app::App;
+use crate::app::{GroupKind, WindowGroup};
 use crate::render::Output;
-use crate::window_group::{GroupKind, WindowGroup};
 
 /// 列出所有 window group。
 ///

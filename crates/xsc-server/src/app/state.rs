@@ -6,11 +6,10 @@ use std::sync::Arc;
 use xscore::domain::{PaneHandle, PaneId};
 use xscore::platform::tmux::TmuxControl;
 
+use crate::app::{GroupId, GroupKind, PaneEntry, PaneRegistry, WindowGroup, WindowId};
 use crate::layout::Layout;
-use crate::logger::LoggerRegistry;
-use crate::pane::{PaneEntry, PaneRegistry};
+use crate::logging::LoggerRegistry;
 use crate::tmux::session::TmuxMeta;
-use crate::window_group::{GroupId, GroupKind, WindowGroup, WindowId};
 
 /// CLI 前端的全局应用状态。
 pub struct App {

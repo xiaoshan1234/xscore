@@ -102,7 +102,7 @@ async fn handle(app: &Arc<Mutex<App>>, request: Request) -> Response {
 
 async fn handle_command(app: &Arc<Mutex<App>>, argv: Vec<String>) -> Response {
     let command = match crate::cli::parse_args(argv) {
-        Ok(cmd) => match crate::wire::command_request(cmd) {
+        Ok(cmd) => match crate::cli::command_request(cmd) {
             Ok(command) => command,
             Err(error) => return Response::fail(format!("{error:#}")),
         },

@@ -3,7 +3,7 @@
 use anyhow::Result;
 
 use crate::cli::{Cmd, LogFormatArg, LsCmd, TmlAddArgs, TmlCmd, TmlLogArgs, TmxAttachArgs, TmxCmd};
-use crate::command::{
+use crate::cli::{
     CommandRequest, LogFormat, LsCommand, TmlAddRequest, TmlCommand, TmlLogRequest,
     TmxAttachRequest, TmxCommand,
 };
