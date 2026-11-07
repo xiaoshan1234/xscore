@@ -50,7 +50,7 @@ Markdown、JSON、JUnit XML 和逐套件日志。
 ```text
 crates/xscore/            L0–L1 连接/传输后端库
   platform/                 L0：PTY/ConPTY、SSH（russh）、tmux 控制客户端
-  domain/                   L1：Domain / PaneHandle、Local/Ssh/Tmux 三种域
+  domain/                   L1：Domain / TerminalHandle、Local/Ssh/Tmux 三种域
 
 crates/xsc-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
 crates/xsc-client/        `xs` 命令客户端：仅转发 argv、边缘密码提示、自动拉起 daemon、RPC
@@ -58,7 +58,7 @@ crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分�
   src/main.rs                daemon 入口
   src/server/                回环 TCP：accept、协议握手与请求分发
   src/cli/                   命令输入：clap 解析、命令模型、URL 解析、命令映射
-  src/app/                   应用状态：App、PaneRegistry、window/group 标识
+  src/app/                   应用状态：App、TerminalRegistry、window/group 标识
   src/commands/              命令分发与处理器
   src/layout/                布局树
   src/render/                文本渲染
@@ -90,7 +90,7 @@ crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分�
   - SSH：russh exec channel 直接运行 `tmux -C attach`，密钥或密码直接认证。
   - Local / WSL：portable-pty 的 ConPTY（`wsl.exe` 需要独立控制台，避免抢宿主输入）。
 - **Windows ConPTY 输入回车用 `\r\n`**，Unix 用 `\n`。本地 shell 的 `write` 按
-  `PaneKind::Local` 区分；SSH/tmux 仍是 `\n`（Unix 语义）。
+  `TerminalKind::Local` 区分；SSH/tmux 仍是 `\n`（Unix 语义）。
 - **一个 tmux window 独占全屏**：`layout` 只放当前（active）window 的镜像容器，
   其余 window 只登记数据不进布局；服务端 `%session-window-changed` 会触发
   reconcile 自动跟随。

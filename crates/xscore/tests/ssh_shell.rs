@@ -4,7 +4,7 @@ mod common;
 
 use common::{receive_until, TestConfig};
 use std::time::Duration;
-use xscore::domain::{Domain, PaneConfig, PaneKind, RemoteSshDomain};
+use xscore::domain::{Domain, RemoteSshDomain, TerminalConfig, TerminalKind};
 use xscore::platform::Size;
 
 const SSH_OK: &[u8] = b"XSCORE_SSH_DOMAIN_OK";
@@ -16,7 +16,7 @@ async fn ssh_shell_roundtrip_and_resize() {
     let domain = RemoteSshDomain::new();
 
     let pane = domain
-        .spawn_pane(&PaneConfig::Ssh {
+        .spawn_terminal(&TerminalConfig::Ssh {
             host: config.ssh_host,
             port: config.ssh_port,
             user: config.ssh_user,
@@ -28,7 +28,7 @@ async fn ssh_shell_roundtrip_and_resize() {
         .await
         .expect("connect and start remote SSH shell");
 
-    assert_eq!(pane.kind(), PaneKind::Ssh);
+    assert_eq!(pane.kind(), TerminalKind::Ssh);
     pane.resize(Size::new(100, 30))
         .await
         .expect("resize remote SSH PTY");

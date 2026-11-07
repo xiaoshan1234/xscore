@@ -1,7 +1,7 @@
 //! tmux 结构事件的纯决策逻辑：把事件映射为动作，并计算结构差集。
 
 use std::collections::HashMap;
-use xscore::domain::{PaneId, TmuxWindowInfo};
+use xscore::domain::{TerminalId, TmuxWindowInfo};
 use xscore::platform::tmux::TmuxEvent;
 
 /// 一个结构事件应触发的本地动作。
@@ -51,12 +51,12 @@ pub fn classify_tmux_event(event: &TmuxEvent) -> StructureAction {
 
 /// 计算远端结构与本地句柄的差集。
 ///
-/// 返回 `(需要删除的 PaneId, 需要新增的 PaneAddSpec)`。
+/// 返回 `(需要删除的 TerminalId, 需要新增的 PaneAddSpec)`。
 /// 参数/输出：`local` 和 `remote` 为输入；返回待删除与待新增列表。
 pub fn diff_tmux_structure(
-    local: &HashMap<String, PaneId>,
+    local: &HashMap<String, TerminalId>,
     remote: &[TmuxWindowInfo],
-) -> (Vec<PaneId>, Vec<PaneAddSpec>) {
+) -> (Vec<TerminalId>, Vec<PaneAddSpec>) {
     let mut desired: HashMap<String, PaneAddSpec> = HashMap::new();
     for window in remote {
         for pane in &window.panes {
@@ -97,10 +97,10 @@ pub fn diff_tmux_structure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xscore::domain::TmuxPaneInfo;
+    use xscore::domain::TmuxTerminalInfo;
 
-    fn pane_info(handle: &str, cols: u16, rows: u16, x: u16, y: u16) -> TmuxPaneInfo {
-        TmuxPaneInfo {
+    fn pane_info(handle: &str, cols: u16, rows: u16, x: u16, y: u16) -> TmuxTerminalInfo {
+        TmuxTerminalInfo {
             handle: handle.to_string(),
             cols,
             rows,
@@ -134,8 +134,8 @@ mod tests {
     #[test]
     fn diff_adds_and_removes() {
         let mut local = HashMap::new();
-        local.insert("%0".to_string(), PaneId::new(10));
-        local.insert("%1".to_string(), PaneId::new(11));
+        local.insert("%0".to_string(), TerminalId::new(10));
+        local.insert("%1".to_string(), TerminalId::new(11));
 
         let remote = vec![
             TmuxWindowInfo {
@@ -157,7 +157,7 @@ mod tests {
         ];
 
         let (remove_panes, add_panes) = diff_tmux_structure(&local, &remote);
-        assert_eq!(remove_panes, vec![PaneId::new(10)]);
+        assert_eq!(remove_panes, vec![TerminalId::new(10)]);
         assert_eq!(add_panes.len(), 1);
         assert_eq!(add_panes[0].handle, "%2");
         assert_eq!(add_panes[0].window, "@2");

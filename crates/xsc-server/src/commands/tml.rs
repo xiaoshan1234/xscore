@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Context, Result};
 
-use xscore::domain::{Domain, LocalDomain, PaneConfig, PaneId, RemoteSshDomain};
+use xscore::domain::{Domain, LocalDomain, RemoteSshDomain, TerminalConfig, TerminalId};
 use xscore::platform::tmux::quote_arg;
 
 use crate::cli::{parse_conversation_url, parse_ssh_target, ConversationSpec, TmlAddRequest};
@@ -101,24 +101,24 @@ async fn add_in_tmux(app: &mut App, args: &TmlAddRequest, group: GroupId) -> Res
 }
 
 fn tmux_pane_handle(app: &App, raw: &str) -> Result<String> {
-    let id = PaneId::new(raw.parse().context("pane id")?);
+    let id = TerminalId::new(raw.parse().context("pane id")?);
     app.tmux
         .get(&id)
         .map(|meta| meta.handle.clone())
         .ok_or_else(|| anyhow!("tmux pane not found: {id}"))
 }
 
-fn split_target(args: &TmlAddRequest) -> Result<Option<(Direction, PaneId)>> {
+fn split_target(args: &TmlAddRequest) -> Result<Option<(Direction, TerminalId)>> {
     if let Some(raw) = &args.sph {
         return Ok(Some((
             Direction::Horizontal,
-            PaneId::new(raw.parse().context("pane id")?),
+            TerminalId::new(raw.parse().context("pane id")?),
         )));
     }
     if let Some(raw) = &args.spv {
         return Ok(Some((
             Direction::Vertical,
-            PaneId::new(raw.parse().context("pane id")?),
+            TerminalId::new(raw.parse().context("pane id")?),
         )));
     }
     Ok(None)
@@ -130,7 +130,7 @@ async fn spawn(
     password: Option<String>,
     group: GroupId,
     window: Option<WindowId>,
-) -> Result<PaneId> {
+) -> Result<TerminalId> {
     match spec {
         ConversationSpec::Shell {
             program,
@@ -141,7 +141,7 @@ async fn spawn(
         } => {
             let domain = LocalDomain::new();
             let handle = domain
-                .spawn_pane(&PaneConfig::Local {
+                .spawn_terminal(&TerminalConfig::Local {
                     command: program.clone(),
                     args: args.clone(),
                     cwd: cwd.clone(),
@@ -150,8 +150,8 @@ async fn spawn(
                 })
                 .await?;
             Ok(match window {
-                Some(window) => app.register_pane_in_window(handle, *cols, *rows, window),
-                None => app.register_pane_in_group(handle, *cols, *rows, group),
+                Some(window) => app.register_terminal_in_window(handle, *cols, *rows, window),
+                None => app.register_terminal_in_group(handle, *cols, *rows, group),
             })
         }
         ConversationSpec::Ssh {
@@ -164,7 +164,7 @@ async fn spawn(
             let (user, host, port) = parse_ssh_target(target)?;
             let domain = RemoteSshDomain::new();
             let handle = domain
-                .spawn_pane(&PaneConfig::Ssh {
+                .spawn_terminal(&TerminalConfig::Ssh {
                     host,
                     port,
                     user,
@@ -175,14 +175,14 @@ async fn spawn(
                 })
                 .await?;
             Ok(match window {
-                Some(window) => app.register_pane_in_window(handle, *cols, *rows, window),
-                None => app.register_pane_in_group(handle, *cols, *rows, group),
+                Some(window) => app.register_terminal_in_window(handle, *cols, *rows, window),
+                None => app.register_terminal_in_group(handle, *cols, *rows, group),
             })
         }
         ConversationSpec::Wsl { args, cols, rows } => {
             let domain = LocalDomain::new();
             let handle = domain
-                .spawn_pane(&PaneConfig::Local {
+                .spawn_terminal(&TerminalConfig::Local {
                     command: "wsl.exe".to_string(),
                     args: args.clone(),
                     cwd: None,
@@ -191,8 +191,8 @@ async fn spawn(
                 })
                 .await?;
             Ok(match window {
-                Some(window) => app.register_pane_in_window(handle, *cols, *rows, window),
-                None => app.register_pane_in_group(handle, *cols, *rows, group),
+                Some(window) => app.register_terminal_in_window(handle, *cols, *rows, window),
+                None => app.register_terminal_in_group(handle, *cols, *rows, group),
             })
         }
     }

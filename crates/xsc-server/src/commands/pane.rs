@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use crate::term::TerminalCore;
-use xscore::domain::{PaneId, PaneKind};
+use xscore::domain::{TerminalId, TerminalKind};
 use xscore::platform::Size;
 
 use crate::cli::{LogFormat, TmlLogRequest};
@@ -17,9 +17,9 @@ use crate::render::{snapshot_text, Output};
 /// 参数/输出：`app`、`pane`、`text` 为输入；返回空输出，失败时返回错误。
 pub async fn write(app: &App, pane: String, text: Vec<String>) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
-    let entry = app.pane_entry(id).unwrap();
+    let entry = app.terminal(id).unwrap();
     let mut data = text.join(" ").into_bytes();
-    let eol: &[u8] = if entry.handle.kind() == PaneKind::Local && cfg!(windows) {
+    let eol: &[u8] = if entry.handle.kind() == TerminalKind::Local && cfg!(windows) {
         b"\r\n"
     } else {
         b"\n"
@@ -34,7 +34,7 @@ pub async fn write(app: &App, pane: String, text: Vec<String>) -> Result<Output>
 /// 参数/输出：`app` 和 `pane` 为输入；返回快照文本。
 pub async fn read(app: &App, pane: String) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
-    let entry = app.pane_entry(id).unwrap();
+    let entry = app.terminal(id).unwrap();
     let mut out = Output::new();
     out.push(&snapshot_text(&entry.term).await);
     Ok(out)
@@ -45,7 +45,7 @@ pub async fn read(app: &App, pane: String) -> Result<Output> {
 /// 参数/输出：`app`、`pane`、`cols`、`rows` 为输入；返回空输出。
 pub async fn resize(app: &App, pane: String, cols: u16, rows: u16) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
-    let entry = app.pane_entry(id).unwrap();
+    let entry = app.terminal(id).unwrap();
     entry.handle.resize(Size::new(cols, rows)).await?;
     entry.term.lock().await.resize(cols, rows);
     Ok(Output::new())
@@ -74,10 +74,10 @@ pub fn focus(app: &mut App, pane: String) -> Result<Output> {
 pub async fn pane_del(app: &mut App, pane: String) -> Result<Output> {
     let id = parse_pane(app, &pane)?;
     {
-        let entry = app.pane_entry(id).unwrap();
+        let entry = app.terminal(id).unwrap();
         entry.handle.close().await?;
     }
-    app.remove_pane_local(id);
+    app.remove_terminal_local(id);
     let mut out = Output::new();
     out.line(format!("deleted pane: {id}"));
     Ok(out)
@@ -125,7 +125,7 @@ pub fn pane_log(app: &mut App, args: TmlLogRequest) -> Result<Output> {
         None => default_path(id, format)?,
     };
     let handle = app
-        .pane_entry(id)
+        .terminal(id)
         .ok_or_else(|| anyhow!("pane not found: {id}"))?
         .handle
         .clone();
@@ -149,9 +149,9 @@ pub fn pane_log(app: &mut App, args: TmlLogRequest) -> Result<Output> {
     Ok(out)
 }
 
-fn parse_pane(app: &App, s: &str) -> Result<PaneId> {
-    let id = PaneId::new(s.parse().context("pane id")?);
-    if !app.panes.contains(id) {
+fn parse_pane(app: &App, s: &str) -> Result<TerminalId> {
+    let id = TerminalId::new(s.parse().context("pane id")?);
+    if !app.terminals.contains(id) {
         return Err(anyhow!("pane not found: {id}"));
     }
     Ok(id)

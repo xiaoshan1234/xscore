@@ -1,6 +1,6 @@
 //! L3 组合窗格树（CLI 模拟）：本地分屏树、tmux 镜像容器与两级焦点。
 
-use xscore::domain::PaneId;
+use xscore::domain::TerminalId;
 
 /// 分屏方向。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +15,7 @@ pub enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneRect {
     /// 对应 pane ID。
-    pub id: PaneId,
+    pub id: TerminalId,
     /// 相对容器左偏移。
     pub x: u16,
     /// 相对容器上偏移。
@@ -38,14 +38,14 @@ pub struct TmuxContainer {
     /// window 内的 pane 几何。
     pub panes: Vec<PaneRect>,
     /// 容器当前活动的 pane。
-    pub active: Option<PaneId>,
+    pub active: Option<TerminalId>,
 }
 
 /// 本地布局树节点。
 #[derive(Debug, Clone)]
 pub enum Node {
     /// 单个本地 pane 叶节点。
-    Leaf(PaneId),
+    Leaf(TerminalId),
     /// 二分屏分支。
     Branch {
         /// 分屏方向。
@@ -65,7 +65,7 @@ pub enum Node {
 #[derive(Debug, Default)]
 pub struct Layout {
     root: Option<Node>,
-    focused: Option<PaneId>,
+    focused: Option<TerminalId>,
 }
 
 impl Layout {
@@ -79,21 +79,21 @@ impl Layout {
     /// 返回当前聚焦的 pane。
     ///
     /// 参数/输出：`self` 为输入；返回焦点或 `None`。
-    pub fn focused(&self) -> Option<PaneId> {
+    pub fn focused(&self) -> Option<TerminalId> {
         self.focused
     }
 
     /// 本地 pane：第一个为根，后续作为聚焦节点兄弟（默认垂直拆分）。
     ///
     /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
-    pub fn add(&mut self, pane: PaneId) {
+    pub fn add(&mut self, pane: TerminalId) {
         self.split_focused(Direction::Vertical, pane);
     }
 
     /// 拆分聚焦节点，新 pane 为右/下兄弟。
     ///
     /// 参数/输出：`self` 为输入输出；`direction` 和 `pane` 为输入；不返回值。
-    pub fn split_focused(&mut self, direction: Direction, pane: PaneId) {
+    pub fn split_focused(&mut self, direction: Direction, pane: TerminalId) {
         self.insert_node(direction, Node::Leaf(pane));
     }
 
@@ -108,14 +108,14 @@ impl Layout {
     ///
     /// 参数/输出：`self` 为输入输出；`direction`、`target`、`pane` 为输入；
     /// 不返回值。
-    pub fn split_pane(&mut self, direction: Direction, target: PaneId, pane: PaneId) {
+    pub fn split_pane(&mut self, direction: Direction, target: TerminalId, pane: TerminalId) {
         self.insert_node_at(direction, Some(target), Node::Leaf(pane));
     }
 
     /// 布局树中是否包含某个 pane。
     ///
     /// 参数/输出：`self` 和 `pane` 为输入；返回是否存在。
-    pub fn contains(&self, pane: PaneId) -> bool {
+    pub fn contains(&self, pane: TerminalId) -> bool {
         self.root
             .as_ref()
             .map(|root| contains_in(root, pane))
@@ -127,7 +127,7 @@ impl Layout {
         self.insert_node_at(direction, target, node);
     }
 
-    fn insert_node_at(&mut self, direction: Direction, target: Option<PaneId>, node: Node) {
+    fn insert_node_at(&mut self, direction: Direction, target: Option<TerminalId>, node: Node) {
         let focus = node_focus(&node);
         let root = match self.root.take() {
             None => {
@@ -152,14 +152,14 @@ impl Layout {
     /// 本地叶子焦点。
     ///
     /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
-    pub fn focus(&mut self, pane: PaneId) {
+    pub fn focus(&mut self, pane: TerminalId) {
         self.focused = Some(pane);
     }
 
     /// 容器内焦点：找到指定 window 的镜像并设置 active。
     ///
     /// 参数/输出：`self` 为输入输出；`window` 和 `pane` 为输入；返回是否找到。
-    pub fn set_mirror_active(&mut self, window: &str, pane: PaneId) -> bool {
+    pub fn set_mirror_active(&mut self, window: &str, pane: TerminalId) -> bool {
         let found = match self.root.as_mut() {
             Some(root) => set_mirror_active_in(root, window, pane),
             None => false,
@@ -173,7 +173,7 @@ impl Layout {
     /// 从布局树移除指定 pane，并自动收缩空分支。
     ///
     /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
-    pub fn remove_pane(&mut self, pane: PaneId) {
+    pub fn remove_pane(&mut self, pane: TerminalId) {
         self.root = self.root.take().and_then(|root| remove_pane_in(root, pane));
         self.focused = self.root.as_ref().and_then(node_focus);
     }
@@ -207,7 +207,7 @@ impl Layout {
     }
 }
 
-fn node_focus(node: &Node) -> Option<PaneId> {
+fn node_focus(node: &Node) -> Option<TerminalId> {
     match node {
         Node::Leaf(id) => Some(*id),
         Node::TmuxMirror(container) => container
@@ -217,7 +217,7 @@ fn node_focus(node: &Node) -> Option<PaneId> {
     }
 }
 
-fn contains_in(node: &Node, pane: PaneId) -> bool {
+fn contains_in(node: &Node, pane: TerminalId) -> bool {
     match node {
         Node::Leaf(id) => *id == pane,
         Node::TmuxMirror(container) => container.panes.iter().any(|rect| rect.id == pane),
@@ -225,7 +225,7 @@ fn contains_in(node: &Node, pane: PaneId) -> bool {
     }
 }
 
-fn split_at(node: Node, target: PaneId, direction: Direction, new_node: Node) -> Node {
+fn split_at(node: Node, target: TerminalId, direction: Direction, new_node: Node) -> Node {
     match node {
         Node::Leaf(id) if id == target => Node::Branch {
             direction,
@@ -256,7 +256,7 @@ fn split_at(node: Node, target: PaneId, direction: Direction, new_node: Node) ->
     }
 }
 
-fn set_mirror_active_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
+fn set_mirror_active_in(node: &mut Node, window: &str, pane: TerminalId) -> bool {
     match node {
         Node::TmuxMirror(container) if container.window == window => {
             container.active = Some(pane);
@@ -269,7 +269,7 @@ fn set_mirror_active_in(node: &mut Node, window: &str, pane: PaneId) -> bool {
     }
 }
 
-fn remove_pane_in(node: Node, pane: PaneId) -> Option<Node> {
+fn remove_pane_in(node: Node, pane: TerminalId) -> Option<Node> {
     match node {
         Node::Leaf(id) if id == pane => None,
         Node::TmuxMirror(mut container) => {
@@ -375,7 +375,7 @@ mod tests {
 
     fn rect(id: u64, x: u16, y: u16, cols: u16, rows: u16) -> PaneRect {
         PaneRect {
-            id: PaneId::new(id),
+            id: TerminalId::new(id),
             x,
             y,
             cols,
@@ -399,34 +399,38 @@ mod tests {
                     }
                 })
                 .collect(),
-            active: pane_ids.first().map(|id| PaneId::new(*id)),
+            active: pane_ids.first().map(|id| TerminalId::new(*id)),
         }
     }
 
     #[test]
     fn first_pane_becomes_root() {
         let mut layout = Layout::new();
-        layout.add(PaneId::new(1));
+        layout.add(TerminalId::new(1));
         assert_eq!(layout.render(), "P1");
     }
 
     #[test]
     fn add_splits_vertically() {
         let mut layout = Layout::new();
-        layout.add(PaneId::new(1));
-        layout.add(PaneId::new(2));
+        layout.add(TerminalId::new(1));
+        layout.add(TerminalId::new(2));
         assert_eq!(layout.render(), "v: 0.50\n  P1\n  P2");
     }
 
     #[test]
     fn split_pane_targets_a_specific_pane() {
         let mut layout = Layout::new();
-        layout.add(PaneId::new(1));
-        layout.add(PaneId::new(2));
-        layout.split_pane(Direction::Horizontal, PaneId::new(1), PaneId::new(3));
+        layout.add(TerminalId::new(1));
+        layout.add(TerminalId::new(2));
+        layout.split_pane(
+            Direction::Horizontal,
+            TerminalId::new(1),
+            TerminalId::new(3),
+        );
         assert_eq!(layout.render(), "v: 0.50\n  h: 0.50\n    P1\n    P3\n  P2");
-        assert!(layout.contains(PaneId::new(3)));
-        assert!(!layout.contains(PaneId::new(9)));
+        assert!(layout.contains(TerminalId::new(3)));
+        assert!(!layout.contains(TerminalId::new(9)));
     }
 
     #[test]
@@ -443,7 +447,7 @@ mod tests {
     fn mirror_is_atomic_and_not_split() {
         let mut layout = Layout::new();
         layout.add_mirror(mirror("@1", &[10, 11]));
-        layout.add(PaneId::new(20));
+        layout.add(TerminalId::new(20));
         assert_eq!(
             layout.render(),
             "v: 0.50\n  window @1(50*50):\n    P10(0,0,25,50)*\n    P11(0,25,25,50)\n  P20"
@@ -454,8 +458,8 @@ mod tests {
     fn mirror_active_pane_is_two_level_focus() {
         let mut layout = Layout::new();
         layout.add_mirror(mirror("@1", &[10, 11]));
-        assert!(layout.set_mirror_active("@1", PaneId::new(11)));
-        assert_eq!(layout.focused(), Some(PaneId::new(11)));
+        assert!(layout.set_mirror_active("@1", TerminalId::new(11)));
+        assert_eq!(layout.focused(), Some(TerminalId::new(11)));
         assert_eq!(
             layout.render(),
             "window @1(50*50):\n  P10(0,0,25,50)\n  P11(0,25,25,50)*"
@@ -465,9 +469,9 @@ mod tests {
     #[test]
     fn remove_pane_shrinks_branch() {
         let mut layout = Layout::new();
-        layout.add(PaneId::new(1));
-        layout.split_focused(Direction::Horizontal, PaneId::new(2));
-        layout.remove_pane(PaneId::new(2));
+        layout.add(TerminalId::new(1));
+        layout.split_focused(Direction::Horizontal, TerminalId::new(2));
+        layout.remove_pane(TerminalId::new(2));
         assert_eq!(layout.render(), "P1");
     }
 
@@ -475,7 +479,7 @@ mod tests {
     fn remove_window_removes_mirror() {
         let mut layout = Layout::new();
         layout.add_mirror(mirror("@1", &[10, 11]));
-        layout.add(PaneId::new(20));
+        layout.add(TerminalId::new(20));
         layout.remove_window("@1");
         assert_eq!(layout.render(), "P20");
     }

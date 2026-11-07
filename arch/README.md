@@ -4,7 +4,7 @@
 
 | 视图 | 文档 | 关注点 |
 |---|---|---|
-| 核心模型 | [terminal-emulator.md](./terminal-emulator.md) | L0–L5 分层、Domain/PaneHandle、TmuxContainer、硬约束与权衡 |
+| 核心模型 | [terminal-emulator.md](./terminal-emulator.md) | L0–L5 分层、Domain/TerminalHandle、TmuxContainer、硬约束与权衡 |
 | 逻辑视图 | [view-logic.md](./view-logic.md) | 实体、职责、协作与不变量 |
 | 开发视图 | [view-dev.md](./view-dev.md) | 模块、目录、依赖、构建与测试 |
 | 运行视图 | [view-process.md](./view-process.md) | 进程、任务、数据流、并发与故障 |

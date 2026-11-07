@@ -1,13 +1,13 @@
 //! L4 渲染（CLI 文本模拟）：把应用状态渲染为文本。
 //!
-//! 渲染层只读取快照与布局树，不持有 PaneHandle、不修改状态、不做 I/O。
+//! 渲染层只读取快照与布局树，不持有 TerminalHandle、不修改状态、不做 I/O。
 
 use std::time::Duration;
 
 use crate::term::{TerminalCore, VtTerm};
 use anyhow::Result;
 use tokio::sync::Mutex;
-use xscore::domain::{PaneId, PaneKind};
+use xscore::domain::{TerminalId, TerminalKind};
 
 use crate::app::App;
 use crate::app::{parse_window_id, WindowKind};
@@ -71,18 +71,18 @@ pub async fn pane_table(app: &App) -> Output {
         "{:<6} {:<8} {:<12} {:<12} {:<5} {:<5}",
         "PANE", "KIND", "GROUP", "WINDOW", "COLS", "ROWS"
     ));
-    let mut ids: Vec<PaneId> = app.panes.ids().collect();
+    let mut ids: Vec<TerminalId> = app.terminals.ids().collect();
     ids.sort_by_key(|p| p.as_u64());
     for id in ids {
-        let entry = app.pane_entry(id).unwrap();
+        let entry = app.terminal(id).unwrap();
         let (cols, rows) = {
             let term = entry.term.lock().await;
             (term.cols(), term.rows())
         };
         let kind = match entry.handle.kind() {
-            PaneKind::Local => "local",
-            PaneKind::Ssh => "ssh",
-            PaneKind::Tmux => "tmux",
+            TerminalKind::Local => "local",
+            TerminalKind::Ssh => "ssh",
+            TerminalKind::Tmux => "tmux",
         };
         let group = app
             .pane_group(id)
@@ -105,7 +105,7 @@ pub async fn pane_table(app: &App) -> Output {
 /// 参数/输出：`app` 和 `spec` 为输入；成功时返回文本，非法 window ID 返回错误。
 pub fn window_layout_text(app: &App, spec: &str) -> Result<Output> {
     let window = parse_window_id(spec)?;
-    let mut panes: Vec<PaneId> = app
+    let mut panes: Vec<TerminalId> = app
         .pane_windows
         .iter()
         .filter(|(_, w)| **w == window)
@@ -137,10 +137,10 @@ pub fn window_layout_text(app: &App, spec: &str) -> Result<Output> {
         WindowKind::Manual => {
             out.line(format!("{window}:"));
             for pane in panes {
-                let kind = match app.pane_entry(pane).map(|entry| entry.handle.kind()) {
-                    Some(PaneKind::Local) => "local",
-                    Some(PaneKind::Ssh) => "ssh",
-                    Some(PaneKind::Tmux) => "tmux",
+                let kind = match app.terminal(pane).map(|entry| entry.handle.kind()) {
+                    Some(TerminalKind::Local) => "local",
+                    Some(TerminalKind::Ssh) => "ssh",
+                    Some(TerminalKind::Tmux) => "tmux",
                     None => "?",
                 };
                 out.line(format!("  P{pane} {kind}"));
@@ -169,7 +169,7 @@ pub fn status_text(app: &App) -> Output {
     let mut out = Output::new();
     out.line(format!(
         "daemon: {} pane(s), {} logger(s)",
-        app.panes.len(),
+        app.terminals.len(),
         app.loggers.len()
     ));
     let mut sessions: Vec<String> = app

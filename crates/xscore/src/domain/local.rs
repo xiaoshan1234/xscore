@@ -1,6 +1,6 @@
 //! LocalDomain：1:1 域，一个 pane 对应一个本地 PTY 子进程。
 
-use crate::domain::{Domain, PaneConfig, PaneHandle, PaneId, PaneKind};
+use crate::domain::{Domain, TerminalConfig, TerminalHandle, TerminalId, TerminalKind};
 use crate::platform::{LocalPty, Size};
 use crate::{Error, Result};
 use async_trait::async_trait;
@@ -24,12 +24,12 @@ impl LocalDomain {
 
 #[async_trait]
 impl Domain for LocalDomain {
-    fn kind(&self) -> PaneKind {
-        PaneKind::Local
+    fn kind(&self) -> TerminalKind {
+        TerminalKind::Local
     }
 
-    async fn spawn_pane(&self, config: &PaneConfig) -> Result<Arc<dyn PaneHandle>> {
-        let PaneConfig::Local {
+    async fn spawn_terminal(&self, config: &TerminalConfig) -> Result<Arc<dyn TerminalHandle>> {
+        let TerminalConfig::Local {
             command,
             args,
             cwd,
@@ -41,7 +41,7 @@ impl Domain for LocalDomain {
                 "local domain requires Local pane config".into(),
             ));
         };
-        let id = PaneId::next();
+        let id = TerminalId::next();
         let pty = Arc::new(LocalPty::new(command.clone(), args.clone(), cwd.clone()));
         let mut rx = pty.spawn(Size::new(*cols, *rows))?;
 
@@ -55,7 +55,7 @@ impl Domain for LocalDomain {
             }
         });
 
-        Ok(Arc::new(LocalPane {
+        Ok(Arc::new(LocalTerminal {
             id,
             pty,
             output: tx,
@@ -68,23 +68,23 @@ impl Domain for LocalDomain {
     }
 }
 
-/// 本地 PTY 窗格句柄。
+/// 本地 PTY 终端句柄。
 ///
-/// 实现 [`PaneHandle`] 的本地字节读写、尺寸调整和进程关闭。
-pub struct LocalPane {
-    id: PaneId,
+/// 实现 [`TerminalHandle`] 的本地字节读写、尺寸调整和进程关闭。
+pub struct LocalTerminal {
+    id: TerminalId,
     pty: Arc<LocalPty>,
     output: broadcast::Sender<Vec<u8>>,
 }
 
 #[async_trait]
-impl PaneHandle for LocalPane {
-    fn id(&self) -> PaneId {
+impl TerminalHandle for LocalTerminal {
+    fn id(&self) -> TerminalId {
         self.id
     }
 
-    fn kind(&self) -> PaneKind {
-        PaneKind::Local
+    fn kind(&self) -> TerminalKind {
+        TerminalKind::Local
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

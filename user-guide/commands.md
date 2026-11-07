@@ -68,7 +68,7 @@ tmux session group：
 
 - `--url` 忽略（新 window/pane 使用 tmux 默认 shell）。
 - `--new-window`：在会话内 `new-window`（默认）。
-- `--sph <ID>` / `--spv <ID>`：`split-window` 拆分指定 tmux pane（`<ID>` 为该 pane 的本地 PaneId）。
+- `--sph <ID>` / `--spv <ID>`：`split-window` 拆分指定 tmux pane（`<ID>` 为该 pane 的本地 TerminalId）。
 
 URL scheme：
 

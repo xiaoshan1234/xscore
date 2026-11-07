@@ -1,4 +1,4 @@
-//! L1 域/连接抽象：把“连接”抽象为可插拔 Domain，产出统一 PaneHandle。
+//! L1 域/连接抽象：把“连接”抽象为可插拔 Domain，产出统一 TerminalHandle。
 
 pub mod local;
 pub mod ssh;
@@ -11,23 +11,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-pub use local::{LocalDomain, LocalPane};
-pub use ssh::{RemoteSshDomain, SshPane};
-pub use tmux::{enumerate, make_pane, TmuxDomain, TmuxPane, TmuxPaneInfo, TmuxWindowInfo};
+pub use local::{LocalDomain, LocalTerminal};
+pub use ssh::{RemoteSshDomain, SshTerminal};
+pub use tmux::{
+    enumerate, make_terminal, TmuxDomain, TmuxTerminal, TmuxTerminalInfo, TmuxWindowInfo,
+};
 
-/// 逻辑窗格句柄标识。
+/// 终端标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PaneId(u64);
+pub struct TerminalId(u64);
 
-impl PaneId {
-    /// 用指定整数构造 pane ID。
+impl TerminalId {
+    /// 用指定整数构造终端 ID。
     ///
-    /// 参数/输出：`n` 为输入 ID 数值；返回包装后的 [`PaneId`]。
+    /// 参数/输出：`n` 为输入 ID 数值；返回包装后的 [`TerminalId`]。
     pub fn new(n: u64) -> Self {
         Self(n)
     }
 
-    /// 分配进程内全局唯一的下一个 pane ID。
+    /// 分配进程内全局唯一的下一个终端 ID。
     ///
     /// 参数/输出：无显式输入；返回新分配的 ID。
     pub fn next() -> Self {
@@ -35,7 +37,7 @@ impl PaneId {
         Self(NEXT.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
-    /// 读取 pane ID 的原始整数。
+    /// 读取终端 ID 的原始整数。
     ///
     /// 参数/输出：`self` 为输入；返回 ID 数值。
     pub fn as_u64(&self) -> u64 {
@@ -43,7 +45,7 @@ impl PaneId {
     }
 }
 
-impl std::fmt::Display for PaneId {
+impl std::fmt::Display for TerminalId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)
     }
@@ -51,18 +53,18 @@ impl std::fmt::Display for PaneId {
 
 /// 后端类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneKind {
-    /// 本地 PTY/ConPTY 窗格。
+pub enum TerminalKind {
+    /// 本地 PTY/ConPTY 终端。
     Local,
-    /// russh SSH 窗格。
+    /// russh SSH 终端。
     Ssh,
-    /// tmux 控制连接中的窗格。
+    /// tmux 控制连接中的终端。
     Tmux,
 }
 
-/// 新建 pane 的配置：按后端类型区分。
+/// 新建终端的配置：按后端类型区分。
 #[derive(Debug, Clone)]
-pub enum PaneConfig {
+pub enum TerminalConfig {
     /// 启动本地 PTY 子进程的配置。
     Local {
         /// 要启动的程序路径或名称。
@@ -95,27 +97,27 @@ pub enum PaneConfig {
     },
 }
 
-/// 单个逻辑窗格的统一异步句柄。
+/// 单个终端的统一异步句柄。
 ///
-/// 实现必须保证每个实例只操作一个 pane，并隔离其输入、输出和生命周期。
+/// 实现必须保证每个实例只操作一个终端，并隔离其输入、输出和生命周期。
 #[async_trait]
-pub trait PaneHandle: Send + Sync {
-    /// 返回 pane 的进程内唯一标识。
+pub trait TerminalHandle: Send + Sync {
+    /// 返回终端的进程内唯一标识。
     ///
     /// 参数/输出：`self` 为输入；返回 ID。
-    fn id(&self) -> PaneId;
+    fn id(&self) -> TerminalId;
 
-    /// 返回 pane 的后端类型。
+    /// 返回终端的后端类型。
     ///
     /// 参数/输出：`self` 为输入；返回类型枚举。
-    fn kind(&self) -> PaneKind;
+    fn kind(&self) -> TerminalKind;
 
     /// 将句柄转为 `Any`，供上层按需 downcast 到具体实现。
     ///
     /// 参数/输出：`self` 为输入；返回动态类型引用。
     fn as_any(&self) -> &dyn std::any::Any;
 
-    /// 向 pane 写入原始字节。
+    /// 向终端写入原始字节。
     ///
     /// 参数/输出：`self` 为输入；`data` 为输入字节；返回成功写入的字节数。
     async fn send_input(&self, data: &[u8]) -> Result<usize>;
@@ -125,31 +127,31 @@ pub trait PaneHandle: Send + Sync {
     /// 参数/输出：`self` 为输入；`size` 为输入尺寸；成功时无返回值。
     async fn resize(&self, size: Size) -> Result<()>;
 
-    /// 订阅 pane 的后续输出字节。
+    /// 订阅终端的后续输出字节。
     ///
     /// 参数/输出：`self` 为输入；返回广播接收端，订阅前的输出不会回放。
     fn subscribe(&self) -> broadcast::Receiver<Vec<u8>>;
 
-    /// 关闭 pane 及其底层连接或子进程。
+    /// 关闭终端及其底层连接或子进程。
     ///
     /// 参数/输出：`self` 为输入；成功时无返回值。
     async fn close(&self) -> Result<()>;
 }
 
-/// 创建并管理一类 pane 的域接口。
+/// 创建并管理一类终端的域接口。
 ///
-/// 域负责后端差异、连接复用和 pane 工厂；上层只消费 [`PaneHandle`]。
+/// 域负责后端差异、连接复用和终端工厂；上层只消费 [`TerminalHandle`]。
 #[async_trait]
 pub trait Domain: Send + Sync {
-    /// 返回该域创建的 pane 类型。
+    /// 返回该域创建的终端类型。
     ///
     /// 参数/输出：`self` 为输入；返回类型枚举。
-    fn kind(&self) -> PaneKind;
+    fn kind(&self) -> TerminalKind;
 
-    /// 按配置创建并连接一个 pane。
+    /// 按配置创建并连接一个终端。
     ///
-    /// 参数/输出：`self` 为输入；`config` 为输入配置；返回新 pane 的共享句柄。
-    async fn spawn_pane(&self, config: &PaneConfig) -> Result<Arc<dyn PaneHandle>>;
+    /// 参数/输出：`self` 为输入；`config` 为输入配置；返回新终端的共享句柄。
+    async fn spawn_terminal(&self, config: &TerminalConfig) -> Result<Arc<dyn TerminalHandle>>;
 
     /// 关闭该域持有的公共资源。
     ///
@@ -159,11 +161,11 @@ pub trait Domain: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::PaneId;
+    use super::TerminalId;
 
     #[test]
     fn pane_id_display_respects_width() {
-        assert_eq!(format!("{:<10}", PaneId::new(1)), "1         ");
-        assert_eq!(format!("{:>10}", PaneId::new(1)), "         1");
+        assert_eq!(format!("{:<10}", TerminalId::new(1)), "1         ");
+        assert_eq!(format!("{:>10}", TerminalId::new(1)), "         1");
     }
 }

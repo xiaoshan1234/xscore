@@ -7,7 +7,7 @@
 
 | # | 里程碑 | 内容 | 验收 |
 |---|---|---|---|
-| M1 | 本地 Shell 通路 | L0 PTY/ConPTY、L1 Domain/PaneHandle + LocalDomain、L2 原始字节核心、CLI REPL | `shell` 后能 `write`/`read`/`resize`/`list` |
+| M1 | 本地 Shell 通路 | L0 PTY/ConPTY、L1 Domain/TerminalHandle + LocalDomain、L2 原始字节核心、CLI REPL | `shell` 后能 `write`/`read`/`resize`/`list` |
 | M2 | VT 核心 | xterm 子集状态机 + 网格 + 脏区，`RawTerm` 替换为 `GridTerm` | 光标/清屏/换行等基本序列正确 |
 | M3 | SSH 域 | L0 SSH 传输（russh）+ RemoteSshDomain + CLI `ssh` | 远端 PTY 可交互读写 |
 | M4 | tmux 域 | 复用控制模式协议解析，TmuxDomain（1:N）+ CLI `tmux` | 多 pane 按 `%id` 路由 |

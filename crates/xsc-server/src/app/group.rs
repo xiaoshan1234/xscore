@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, Result};
-use xscore::domain::PaneId;
+use xscore::domain::TerminalId;
 
 /// 全局唯一的 window group 标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,7 +141,7 @@ pub struct WindowGroup {
     /// group 类别。
     pub kind: GroupKind,
     /// 属于该 group 的 pane。
-    pub panes: Vec<PaneId>,
+    pub panes: Vec<TerminalId>,
 }
 
 impl WindowGroup {
@@ -172,7 +172,7 @@ impl WindowGroup {
     /// 将一个 pane 加入 group，重复加入会被忽略。
     ///
     /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
-    pub fn add_pane(&mut self, pane: PaneId) {
+    pub fn add_pane(&mut self, pane: TerminalId) {
         if !self.panes.contains(&pane) {
             self.panes.push(pane);
         }
@@ -181,7 +181,7 @@ impl WindowGroup {
     /// 从 group 中移除一个 pane。
     ///
     /// 参数/输出：`self` 为输入输出；`pane` 为输入；不返回值。
-    pub fn remove_pane(&mut self, pane: PaneId) {
+    pub fn remove_pane(&mut self, pane: TerminalId) {
         self.panes.retain(|p| *p != pane);
     }
 }
@@ -232,12 +232,12 @@ mod tests {
         assert_eq!(group.name, "default");
         assert_eq!(group.kind, GroupKind::Default);
 
-        group.add_pane(PaneId::new(1));
-        group.add_pane(PaneId::new(2));
-        group.add_pane(PaneId::new(1));
+        group.add_pane(TerminalId::new(1));
+        group.add_pane(TerminalId::new(2));
+        group.add_pane(TerminalId::new(1));
         assert_eq!(group.panes.len(), 2);
 
-        group.remove_pane(PaneId::new(1));
-        assert_eq!(group.panes, vec![PaneId::new(2)]);
+        group.remove_pane(TerminalId::new(1));
+        assert_eq!(group.panes, vec![TerminalId::new(2)]);
     }
 }

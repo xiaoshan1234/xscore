@@ -5,5 +5,5 @@ mod pane;
 mod state;
 
 pub use group::{parse_window_id, GroupId, GroupKind, WindowGroup, WindowId, WindowKind};
-pub use pane::{PaneEntry, PaneRegistry};
+pub use pane::{Terminal, TerminalRegistry};
 pub use state::App;

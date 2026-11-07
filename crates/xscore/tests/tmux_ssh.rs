@@ -5,7 +5,7 @@ mod common;
 use common::{receive_until, ssh_exec, TestConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use xscore::domain::{PaneHandle, TmuxDomain};
+use xscore::domain::{TerminalHandle, TmuxDomain};
 use xscore::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use xscore::platform::Size;
 

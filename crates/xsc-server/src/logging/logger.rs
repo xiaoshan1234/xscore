@@ -9,7 +9,7 @@ use chrono::Local;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
-use xscore::domain::{PaneHandle, PaneId};
+use xscore::domain::{TerminalHandle, TerminalId};
 
 const MAX_CHAR_LINE_BYTES: usize = 64 * 1024;
 
@@ -44,7 +44,7 @@ impl std::fmt::Display for LoggerFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggerInfo {
     /// 被记录的 pane ID。
-    pub pane_id: PaneId,
+    pub pane_id: TerminalId,
     /// 输出格式。
     pub format: LoggerFormat,
     /// raw 最大字节数或 char 最大行数。
@@ -78,7 +78,7 @@ impl LoggerRegistry {
     /// 元数据。raw 的 `max_size` 按字节计，char 按输出行数计。
     pub fn start(
         &mut self,
-        handle: Arc<dyn PaneHandle>,
+        handle: Arc<dyn TerminalHandle>,
         format: LoggerFormat,
         max_size: usize,
         path: PathBuf,
@@ -142,7 +142,7 @@ impl LoggerRegistry {
     /// 停止并移除指定 pane 的全部 logger。
     ///
     /// 参数/输出：`self` 为输入输出；`pane_id` 为输入；不返回值。
-    pub fn remove_pane(&mut self, pane_id: PaneId) {
+    pub fn remove_pane(&mut self, pane_id: TerminalId) {
         for entry in &self.entries {
             if entry.info.pane_id == pane_id {
                 entry.task.abort();
@@ -155,7 +155,7 @@ impl LoggerRegistry {
 /// 生成默认 logger 文件路径。
 ///
 /// 参数/输出：`pane_id` 和 `format` 为输入；返回当前目录下的绝对文件路径。
-pub fn default_path(pane_id: PaneId, format: LoggerFormat) -> Result<PathBuf> {
+pub fn default_path(pane_id: TerminalId, format: LoggerFormat) -> Result<PathBuf> {
     let timestamp = Local::now().format("%Y%m%dT%H%M%S%.3f");
     Ok(std::env::current_dir()
         .context("resolve current directory")?
@@ -366,7 +366,7 @@ mod tests {
     use tokio::io::AsyncWrite;
     use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout, Instant};
-    use xscore::domain::{PaneHandle, PaneId, PaneKind};
+    use xscore::domain::{TerminalHandle, TerminalId, TerminalKind};
     use xscore::platform::Size;
 
     use super::{write_char, write_raw, CharFilter, LoggerFormat, LoggerRegistry};
@@ -374,18 +374,18 @@ mod tests {
     static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
     struct FakePane {
-        id: PaneId,
+        id: TerminalId,
         output: broadcast::Sender<Vec<u8>>,
     }
 
     #[async_trait]
-    impl PaneHandle for FakePane {
-        fn id(&self) -> PaneId {
+    impl TerminalHandle for FakePane {
+        fn id(&self) -> TerminalId {
             self.id
         }
 
-        fn kind(&self) -> PaneKind {
-            PaneKind::Local
+        fn kind(&self) -> TerminalKind {
+            TerminalKind::Local
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -532,10 +532,10 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    fn fake_pane(label: &str) -> (Arc<dyn PaneHandle>, broadcast::Sender<Vec<u8>>, PathBuf) {
+    fn fake_pane(label: &str) -> (Arc<dyn TerminalHandle>, broadcast::Sender<Vec<u8>>, PathBuf) {
         let (sender, _) = broadcast::channel(16);
         let pane = Arc::new(FakePane {
-            id: PaneId::new(NEXT_FILE.fetch_add(1, Ordering::Relaxed) + 1),
+            id: TerminalId::new(NEXT_FILE.fetch_add(1, Ordering::Relaxed) + 1),
             output: sender.clone(),
         });
         let path = std::env::temp_dir().join(format!(

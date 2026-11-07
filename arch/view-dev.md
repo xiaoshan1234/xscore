@@ -27,10 +27,10 @@ crates/xscore/src/
       format.rs           -F 输出解析、send-keys、本地/WSL 进程前缀
       control.rs          TmuxControl + TmuxTransport（PTY 或 russh channel）
   domain/
-    mod.rs                Domain / PaneHandle / PaneId / PaneConfig
-    local.rs              LocalDomain / LocalPane
-    ssh.rs                RemoteSshDomain / SshPane
-    tmux.rs               TmuxDomain / TmuxPane / enumerate / make_pane
+    mod.rs                Domain / TerminalHandle / TerminalId / TerminalConfig
+    local.rs              LocalDomain / LocalTerminal
+    ssh.rs                RemoteSshDomain / SshTerminal
+    tmux.rs               TmuxDomain / TmuxTerminal / enumerate / make_terminal
   error.rs
   lib.rs
 
@@ -44,7 +44,7 @@ crates/xsc-server/src/
   main.rs                 `xs-daemon` 入口与日志初始化
   server/                 回环 TCP：accept、握手、请求分发
   cli/                    命令输入：args（clap）/ model / url / map
-  app/                    应用状态：App / PaneRegistry / window/group
+  app/                    应用状态：App / TerminalRegistry / window/group
   commands/               命令分发与处理器
   layout/                 布局树
   render/                 文本渲染
@@ -69,8 +69,8 @@ xscore: platform ← domain
 
 ## 4. 关键接口
 
-- `PaneHandle`：`id` / `kind` / `as_any` / `send_input` / `resize` / `subscribe` /
-  `close`。`as_any` 供前端 downcast 到 `TmuxPane` 以发送 tmux 命令。
+- `TerminalHandle`：`id` / `kind` / `as_any` / `send_input` / `resize` / `subscribe` /
+  `close`。`as_any` 供前端 downcast 到 `TmuxTerminal` 以发送 tmux 命令。
 - `TerminalCore`：`feed` / `snapshot` / `resize`。
 - `TmuxControl`：`spawn` / `send` / `subscribe` / `output` / `close`，命令按
   `%begin` 编号关联回复。
@@ -100,7 +100,7 @@ cargo fmt --all -- --check
 
 ## 6. 扩展点
 
-- 新 Domain：实现 `Domain`/`PaneHandle`，在 `domain/` 增加模块。
+- 新 Domain：实现 `Domain`/`TerminalHandle`，在 `domain/` 增加模块。
 - 新传输后端：在 `platform/` 增加适配器。
 - 新渲染：替换 CLI 前端的文本快照，消费 `TerminalCore::snapshot` 与布局树。
 - GUI 前端：保留 `xscore` 与 `xsc-server` 不变，将协议响应扩展为结构化视图 DTO。

@@ -1,6 +1,6 @@
 //! RemoteSshDomain：1:1 域，一个 pane 对应一条 SSH channel。
 
-use crate::domain::{Domain, PaneConfig, PaneHandle, PaneId, PaneKind};
+use crate::domain::{Domain, TerminalConfig, TerminalHandle, TerminalId, TerminalKind};
 use crate::platform::ssh::SshConnection;
 use crate::platform::Size;
 use crate::{Error, Result};
@@ -25,12 +25,12 @@ impl RemoteSshDomain {
 
 #[async_trait]
 impl Domain for RemoteSshDomain {
-    fn kind(&self) -> PaneKind {
-        PaneKind::Ssh
+    fn kind(&self) -> TerminalKind {
+        TerminalKind::Ssh
     }
 
-    async fn spawn_pane(&self, config: &PaneConfig) -> Result<Arc<dyn PaneHandle>> {
-        let PaneConfig::Ssh {
+    async fn spawn_terminal(&self, config: &TerminalConfig) -> Result<Arc<dyn TerminalHandle>> {
+        let TerminalConfig::Ssh {
             host,
             port,
             user,
@@ -43,7 +43,7 @@ impl Domain for RemoteSshDomain {
             return Err(Error::Invalid("ssh domain requires Ssh pane config".into()));
         };
 
-        let id = PaneId::next();
+        let id = TerminalId::next();
         let conn = Arc::new(SshConnection::new(
             user.clone(),
             host.clone(),
@@ -61,7 +61,7 @@ impl Domain for RemoteSshDomain {
             }
         });
 
-        Ok(Arc::new(SshPane {
+        Ok(Arc::new(SshTerminal {
             id,
             conn,
             output: tx,
@@ -73,23 +73,23 @@ impl Domain for RemoteSshDomain {
     }
 }
 
-/// 单连接 SSH 窗格句柄。
+/// 单连接 SSH 终端句柄。
 ///
 /// 输入输出直接映射到该 pane 独占的 SSH channel。
-pub struct SshPane {
-    id: PaneId,
+pub struct SshTerminal {
+    id: TerminalId,
     conn: Arc<SshConnection>,
     output: broadcast::Sender<Vec<u8>>,
 }
 
 #[async_trait]
-impl PaneHandle for SshPane {
-    fn id(&self) -> PaneId {
+impl TerminalHandle for SshTerminal {
+    fn id(&self) -> TerminalId {
         self.id
     }
 
-    fn kind(&self) -> PaneKind {
-        PaneKind::Ssh
+    fn kind(&self) -> TerminalKind {
+        TerminalKind::Ssh
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

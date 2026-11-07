@@ -1,6 +1,6 @@
 //! TmuxDomain：1:N 域，一个控制连接对应 session 内的多个 pane。
 
-use crate::domain::{PaneHandle, PaneId, PaneKind};
+use crate::domain::{TerminalHandle, TerminalId, TerminalKind};
 use crate::platform::tmux::{
     list_panes_command, list_windows_command, parse_pane_line, parse_window_line,
     resize_pane_command, send_keys_literal, TmuxControl, TmuxHostConfig, TmuxSocket,
@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 /// 一个 tmux pane 的结构与几何信息。
 #[derive(Debug, Clone)]
-pub struct TmuxPaneInfo {
+pub struct TmuxTerminalInfo {
     /// tmux pane 句柄，例如 `%3`。
     pub handle: String,
     /// pane 列数。
@@ -40,7 +40,7 @@ pub struct TmuxWindowInfo {
     /// 该 window 是否为 session 的当前活动 window。
     pub active: bool,
     /// window 内的 pane 列表。
-    pub panes: Vec<TmuxPaneInfo>,
+    pub panes: Vec<TmuxTerminalInfo>,
 }
 
 /// 通过 control 客户端枚举一个 session 当前的 window/pane 结构。
@@ -59,7 +59,7 @@ pub async fn enumerate(control: &TmuxControl, session: &str) -> Result<Vec<TmuxW
             let Some(pane) = parse_pane_line(&line) else {
                 continue;
             };
-            panes.push(TmuxPaneInfo {
+            panes.push(TmuxTerminalInfo {
                 handle: pane.handle,
                 cols: pane.cols,
                 rows: pane.rows,
@@ -102,7 +102,7 @@ impl TmuxDomain {
         host: &TmuxHostConfig,
         socket: &TmuxSocket,
         session: &str,
-    ) -> Result<Vec<Arc<TmuxPane>>> {
+    ) -> Result<Vec<Arc<TmuxTerminal>>> {
         let host_desc = match host {
             TmuxHostConfig::Local => "local".to_string(),
             TmuxHostConfig::Ssh {
@@ -117,7 +117,7 @@ impl TmuxDomain {
         let mut panes = Vec::new();
         for window in &windows {
             for pane in &window.panes {
-                panes.push(make_pane(
+                panes.push(make_terminal(
                     control.clone(),
                     window.handle.clone(),
                     pane,
@@ -133,19 +133,19 @@ impl TmuxDomain {
     }
 }
 
-/// 为一个已存在的 control 客户端创建一个 pane 句柄并订阅其 `%output`。
+/// 为一个已存在的 control 客户端创建一个终端句柄并订阅其 `%output`。
 ///
 /// 参数/输出：`control`、`window`、`pane`、`window_cols`、`window_rows` 和
-/// `window_active` 为输入；返回新建的 pane 句柄，并同时启动输出转发任务。
-pub fn make_pane(
+/// `window_active` 为输入；返回新建的终端句柄，并同时启动输出转发任务。
+pub fn make_terminal(
     control: Arc<TmuxControl>,
     window: String,
-    pane: &TmuxPaneInfo,
+    pane: &TmuxTerminalInfo,
     window_cols: u16,
     window_rows: u16,
     window_active: bool,
-) -> Arc<TmuxPane> {
-    let id = PaneId::next();
+) -> Arc<TmuxTerminal> {
+    let id = TerminalId::next();
     let mut rx = control.output(&pane.handle);
     let (tx, _) = broadcast::channel::<Vec<u8>>(256);
     let tx_pump = tx.clone();
@@ -156,7 +156,7 @@ pub fn make_pane(
             }
         }
     });
-    Arc::new(TmuxPane {
+    Arc::new(TmuxTerminal {
         id,
         window,
         handle: pane.handle.clone(),
@@ -172,11 +172,11 @@ pub fn make_pane(
     })
 }
 
-/// tmux 控制连接上的逻辑 pane 句柄。
+/// tmux 控制连接上的逻辑终端句柄。
 ///
 /// 所有输入都转换为 tmux 控制命令，输出来自对应 `%output` 订阅。
-pub struct TmuxPane {
-    id: PaneId,
+pub struct TmuxTerminal {
+    id: TerminalId,
     window: String,
     handle: String,
     cols: u16,
@@ -190,7 +190,7 @@ pub struct TmuxPane {
     output: broadcast::Sender<Vec<u8>>,
 }
 
-impl TmuxPane {
+impl TmuxTerminal {
     /// 返回 pane 当前记录的列数。
     ///
     /// 参数/输出：`self` 为输入；返回列数。
@@ -277,13 +277,13 @@ impl TmuxPane {
 }
 
 #[async_trait]
-impl PaneHandle for TmuxPane {
-    fn id(&self) -> PaneId {
+impl TerminalHandle for TmuxTerminal {
+    fn id(&self) -> TerminalId {
         self.id
     }
 
-    fn kind(&self) -> PaneKind {
-        PaneKind::Tmux
+    fn kind(&self) -> TerminalKind {
+        TerminalKind::Tmux
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

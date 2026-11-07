@@ -36,7 +36,7 @@
 | 层 | 名称 | 职责一句话 | 平台相关性 |
 |---|---|---|---|
 | L0 | 平台抽象层 | PTY、进程、SSH 传输、窗口尺寸等 OS 原语 | 高 |
-| L1 | 域 / 连接抽象层 | 将“连接”抽象为可插拔 Domain，产出统一 PaneHandle | 中 |
+| L1 | 域 / 连接抽象层 | 将“连接”抽象为可插拔 Domain，产出统一 TerminalHandle | 中 |
 | L2 | 终端模拟核心层 | 字节流 → 屏幕网格（VT 状态机） | 无 |
 | L3 | 组合窗格树层 | 布局模型：本地分屏树 + tmux 镜像容器 | 无 |
 | L4 | 渲染层 | 网格与布局 → 像素 | 高 |
@@ -45,7 +45,7 @@
 **横切设施**：事件总线（Domain → 树 → 渲染的单向通知）、焦点管理器、生命周
 期管理器。它们由 L5 持有并注入，不构成独立层。
 
-**核心原则**：L3 只认识 `PaneHandle`，不认识“SSH”或“tmux”；L1 只负责 I/O
+**核心原则**：L3 只认识 `TerminalHandle`，不认识“SSH”或“tmux”；L1 只负责 I/O
 与协议，不负责布局；L2 每窗格独立实例，互不共享状态。
 
 ---
@@ -91,26 +91,26 @@ trait SshTransport {
 | 概念 | 含义 | 基数 |
 |---|---|---|
 | **Connection** | 实际 I/O 通道（PTY、SSH channel 或 tmux 控制传输） | 每个 Domain 实例至少 1 个 |
-| **PaneHandle** | 逻辑窗格句柄：绑定一个模拟核心 + 输入路由 + 输出事件流 | SSH/本地域为 1；tmux 域为 N |
+| **TerminalHandle** | 逻辑窗格句柄：绑定一个模拟核心 + 输入路由 + 输出事件流 | SSH/本地域为 1；tmux 域为 N |
 
-`Domain` 的职责定义为：**PaneHandle 的工厂 + 本域内所有 PaneHandle 的注册表 +
+`Domain` 的职责定义为：**TerminalHandle 的工厂 + 本域内所有 TerminalHandle 的注册表 +
 输出路由器**。
 
 ### 3.2 统一接口
 
 ```rust
 trait Domain {
-    fn spawn_pane(config) -> PaneHandle       // 1:1 域：新建连接；tmux 域：复用连接并新开/附加 pane
-    fn attach_pane(pane_id) -> PaneHandle     // tmux 域：将远端已存在的 pane 注册进来
+    fn spawn_terminal(config) -> TerminalHandle       // 1:1 域：新建连接；tmux 域：复用连接并新开/附加 pane
+    fn attach_terminal(pane_id) -> TerminalHandle     // tmux 域：将远端已存在的 pane 注册进来
     fn detach_all()                           // 断开整个域
 }
 
-trait PaneHandle {
+trait TerminalHandle {
     fn send_input(Bytes)                      // 域内负责封装
     fn resize(cols, rows)                     // 域内负责封装
     fn output_stream() -> AsyncStream<Bytes>  // 该 pane 专属字节流
     fn on_closed(callback)                    // 双向生命周期事件
-    fn pane_kind() -> PaneKind                // Local | Ssh | Tmux
+    fn terminal_kind() -> TerminalKind                // Local | Ssh | Tmux
 }
 ```
 
@@ -118,13 +118,13 @@ trait PaneHandle {
 
 **LocalDomain**
 
-- `spawn_pane` 调 L0 的 `PtyTransport::spawn` 启动 Shell，返回唯一 PaneHandle。
+- `spawn_terminal` 调 L0 的 `PtyTransport::spawn` 启动 Shell，返回唯一 TerminalHandle。
 - `send_input` 直写 PTY；`output_stream` 即 PTY 读流；`resize` 直调 PTY 尺寸。
 - 生命周期由本地驱动。
 
 **RemoteSshDomain**
 
-- `spawn_pane` 建立 SSH 连接并申请 PTY channel，返回唯一 PaneHandle。
+- `spawn_terminal` 建立 SSH 连接并申请 PTY channel，返回唯一 TerminalHandle。
 - 输入输出直通 SSH channel；`resize` 转成 `window-change` 请求。
 - 生命周期由本地驱动（连接断开或本地关闭）。
 
@@ -140,11 +140,11 @@ trait PaneHandle {
     `%window-pane-changed`、`%session-changed` → 转为结构化事件，一路更新内部
     `pane_registry`，一路向 L3 广播（用于容器增删与镜像布局更新）。
   - `%begin`/`%end` 块按命令编号路由回复。
-- **输入路由**：每个 PaneHandle 知道自己的 `%pane-id`：
+- **输入路由**：每个 TerminalHandle 知道自己的 `%pane-id`：
   - `send_input` → `send-keys -t %<id> -H <hex>` 写入控制传输。
   - `resize` 由容器整体发起，不按 pane 单独发（见 L3）。
 - **生命周期双向**：本地关闭 → 发 `kill-pane`/`kill-window`；远端
-  `kill-pane` → `%window-close`/`%layout-change` → 触发对应 PaneHandle 的
+  `kill-pane` → `%window-close`/`%layout-change` → 触发对应 TerminalHandle 的
   `on_closed`。
 - **布局解析**：`%layout-change` 携带 tmux layout string（含 rotate-add 校验
   和），在域内解析为 tmux 布局树，交给 L3 的容器持有。
@@ -152,7 +152,7 @@ trait PaneHandle {
 ### 3.4 域注册表
 
 L5 持有一个 `DomainRegistry`，按 `domain_id` 索引 Domain 实例。L3 的叶子只保
-存 `PaneHandle` 引用，不直接持有 Domain。域的销毁由 L5 在“其下所有 PaneHandle
+存 `TerminalHandle` 引用，不直接持有 Domain。域的销毁由 L5 在“其下所有 TerminalHandle
 均关闭”后触发。
 
 ---
@@ -161,7 +161,7 @@ L5 持有一个 `DomainRegistry`，按 `domain_id` 索引 Domain 实例。L3 的
 
 **职责**
 
-- 每 PaneHandle 一个独立实例：VT100/xterm 状态机 + 网格缓冲区（光标、字符属
+- 每 TerminalHandle 一个独立实例：VT100/xterm 状态机 + 网格缓冲区（光标、字符属
   性、颜色、滚动区、滚动回看）。
 - 消费 `output_stream` 的字节，产出网格状态变更事件。
 - 不感知连接类型：无论字节来自 SSH、本地 PTY 还是 tmux 的 `%output`，处理完
@@ -196,7 +196,7 @@ trait TerminalCore {
 ```rust
 enum Node {
     Branch { direction: H|V, ratio: f32, left: Box<Node>, right: Box<Node> },
-    LocalLeaf { handle: PaneHandle, core: TerminalCore },
+    LocalLeaf { handle: TerminalHandle, core: TerminalCore },
     TmuxMirror { container: TmuxContainer },   // 不可拆分的布局原子
 }
 
@@ -204,8 +204,8 @@ struct TmuxContainer {
     domain: TmuxDomainRef,
     window_id: TmuxWindowId,
     layout_tree: TmuxLayoutTree,               // 由 %layout-change 驱动
-    panes: Map<TmuxPaneId, (PaneHandle, TerminalCore)>,  // 私有，不暴露给本地树
-    active_pane: TmuxPaneId,
+    panes: Map<TmuxTerminalId, (TerminalHandle, TerminalCore)>,  // 私有，不暴露给本地树
+    active_pane: TmuxTerminalId,
 }
 ```
 
@@ -229,10 +229,10 @@ resize。
 
 ### 5.3 焦点模型（两级）
 
-- **本地焦点**：当前聚焦的 `Node`。若为 `LocalLeaf`，输入直送其 PaneHandle。
+- **本地焦点**：当前聚焦的 `Node`。若为 `LocalLeaf`，输入直送其 TerminalHandle。
 - **容器内焦点**：本地焦点为 `TmuxMirror` 时，本地只记录“焦点在容器内”。具体
   pane 由 tmux 的 `%window-pane-changed` 驱动 `active_pane`，本地按键经
-  `TmuxDomain` 路由到该 pane 的 PaneHandle。
+  `TmuxDomain` 路由到该 pane 的 TerminalHandle。
 - 本地快捷键的窗格导航只遍历本地树节点；容器内部的 pane 切换通过 tmux 的
   `select-pane` 命令，由远端通知回流。
 
@@ -241,7 +241,7 @@ resize。
 - **拆分**：在 `LocalLeaf` 上拆出新的 `LocalLeaf` 或 `TmuxMirror`；在
   `TmuxMirror` 上拆分时，新节点与容器**平级**成为 `Branch` 的子节点，容器本
   身不被破坏。
-- **关闭**：关闭 `LocalLeaf` → 销毁其 PaneHandle 与连接。关闭 `TmuxMirror` →
+- **关闭**：关闭 `LocalLeaf` → 销毁其 TerminalHandle 与连接。关闭 `TmuxMirror` →
   `TmuxDomain` 发 `kill-window` 或 `detach`，收到 `%window-close` 后整体移除
   容器。本地 UI **不提供**单独关闭容器内某个 pane 的入口——那属于 tmux 命令空
   间。
@@ -260,7 +260,7 @@ resize。
 - 只读 L2 的 `GridSnapshot` 与 L3 的布局树，不直接接触 L0/L1。
 - 脏区驱动：L2 的 `on_dirty` → 标记对应叶子矩形 → 合并重绘。
 
-**约束**：渲染层不得持有 PaneHandle；它通过 `snapshot()` 拉取或订阅网格变更，
+**约束**：渲染层不得持有 TerminalHandle；它通过 `snapshot()` 拉取或订阅网格变更，
 保持与 I/O 解耦。
 
 ---
@@ -290,7 +290,7 @@ resize。
 ```text
 SSH channel / PTY / tmux 控制 PTY
   → L1 域路由（tmux 域按 %pane-id 查表；其余直通）
-  → 对应 PaneHandle.output_stream
+  → 对应 TerminalHandle.output_stream
   → L2 该窗格独立 TerminalCore.feed
   → 网格脏区事件
   → L4 按 L3 矩形重绘
@@ -301,7 +301,7 @@ SSH channel / PTY / tmux 控制 PTY
 ```text
 用户按键
   → L3 焦点解析（LocalLeaf 直取；TmuxMirror 取 active_pane）
-  → PaneHandle.send_input
+  → TerminalHandle.send_input
   → L1 域封装（SSH 直写 / tmux 包成 send-keys -t %id）
   → L0 传输
 ```
@@ -328,9 +328,9 @@ tmux 内操作     → %layout-change → L1 解析 → L3 更新容器 layout_t
 |---|---|
 | tmux pane 不与本地窗格并排 | `TmuxContainer` 内部 pane 不出现在本地 `Node` 枚举中，类型上不可表达 |
 | 两套分隔条不越界 | 布局计算分外层/内层，几何边界为容器矩形 |
-| tmux 1:N 与 SSH 1:1 对上层无差异 | 上层只消费 `PaneHandle` 与 `on_closed`，基数差异封装在 L1 路由表 |
+| tmux 1:N 与 SSH 1:1 对上层无差异 | 上层只消费 `TerminalHandle` 与 `on_closed`，基数差异封装在 L1 路由表 |
 | tmux 字节保真 | `%output` 解码后直送 L2，不经任何字符渲染 |
-| 每窗格状态隔离 | L2 每 PaneHandle 独立 TerminalCore 实例 |
+| 每窗格状态隔离 | L2 每 TerminalHandle 独立 TerminalCore 实例 |
 
 ---
 

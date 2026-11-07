@@ -1,7 +1,7 @@
-//! LocalDomain 端到端：PTY 子进程输出经 PaneHandle 路由回来。
+//! LocalDomain 端到端：PTY 子进程输出经 TerminalHandle 路由回来。
 
 use tokio::time::{timeout, Duration};
-use xscore::domain::{Domain, LocalDomain, PaneConfig};
+use xscore::domain::{Domain, LocalDomain, TerminalConfig};
 
 #[tokio::test]
 async fn local_pane_roundtrip() {
@@ -13,7 +13,7 @@ async fn local_pane_roundtrip() {
 
     let domain = LocalDomain::new();
     let handle = domain
-        .spawn_pane(&PaneConfig::Local {
+        .spawn_terminal(&TerminalConfig::Local {
             command: program.to_string(),
             args: args.into_iter().map(str::to_string).collect(),
             cwd: None,

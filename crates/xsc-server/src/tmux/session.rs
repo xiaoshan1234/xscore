@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::Mutex;
 
-use xscore::domain::{enumerate, make_pane, PaneId, TmuxPaneInfo};
+use xscore::domain::{enumerate, make_terminal, TerminalId, TmuxTerminalInfo};
 use xscore::platform::tmux::{TmuxControl, TmuxEvent};
 
 use crate::app::App;
@@ -41,7 +41,7 @@ pub async fn reconcile_session(
     control: &Arc<TmuxControl>,
 ) -> Result<(usize, usize)> {
     let windows = enumerate(control, session).await?;
-    let local: HashMap<String, PaneId> = app
+    let local: HashMap<String, TerminalId> = app
         .tmux
         .iter()
         .filter(|(_, m)| m.session == session)
@@ -50,17 +50,17 @@ pub async fn reconcile_session(
     let (gone, new_panes) = diff_tmux_structure(&local, &windows);
 
     for id in &gone {
-        app.remove_pane_local(*id);
+        app.remove_terminal_local(*id);
     }
     for spec in &new_panes {
-        let pane_info = TmuxPaneInfo {
+        let pane_info = TmuxTerminalInfo {
             handle: spec.handle.clone(),
             cols: spec.cols,
             rows: spec.rows,
             x: spec.x,
             y: spec.y,
         };
-        let new_pane = make_pane(
+        let new_pane = make_terminal(
             control.clone(),
             spec.window.clone(),
             &pane_info,
@@ -68,7 +68,7 @@ pub async fn reconcile_session(
             spec.window_rows,
             spec.window_active,
         );
-        let id = app.register_tmux_pane(new_pane, spec.cols, spec.rows, session, &spec.window);
+        let id = app.register_tmux_terminal(new_pane, spec.cols, spec.rows, session, &spec.window);
         app.tmux.insert(
             id,
             TmuxMeta {
@@ -170,27 +170,27 @@ pub async fn handle_event(
     match classify_tmux_event(&event) {
         StructureAction::RemoveWindow(window) => {
             let mut guard = app.lock().await;
-            let pane_ids: Vec<PaneId> = guard
+            let pane_ids: Vec<TerminalId> = guard
                 .tmux
                 .iter()
                 .filter(|(_, meta)| meta.session == session && meta.window == window)
                 .map(|(id, _)| *id)
                 .collect();
             for id in pane_ids {
-                guard.remove_pane_local(id);
+                guard.remove_terminal_local(id);
             }
             false
         }
         StructureAction::Shutdown => {
             let mut guard = app.lock().await;
-            let pane_ids: Vec<PaneId> = guard
+            let pane_ids: Vec<TerminalId> = guard
                 .tmux
                 .iter()
                 .filter(|(_, meta)| meta.session == session)
                 .map(|(id, _)| *id)
                 .collect();
             for id in pane_ids {
-                guard.remove_pane_local(id);
+                guard.remove_terminal_local(id);
             }
             true
         }

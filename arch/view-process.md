@@ -28,7 +28,7 @@ xs-daemon
   close 经命令队列串行处理，避免超时取消读取导致后续消息丢失。
 - `TmuxControl`：通过 `TmuxTransport` 写入和关闭连接；Local/WSL 使用
   PTY reader/writer 任务，SSH 使用 russh exec channel 的异步读写任务。
-- `LoggerRegistry`：每个 logger 独立订阅 `PaneHandle` 输出，raw 写原始字节，
+- `LoggerRegistry`：每个 logger 独立订阅 `TerminalHandle` 输出，raw 写原始字节，
   char 过滤 ANSI/控制序列后按带时间戳的文本行写入本地文件。
 
 ## 3. 数据流
@@ -36,13 +36,13 @@ xs-daemon
 ### 输出
 
 ```text
-PTY/SSH/tmux → Domain 路由 → PaneHandle 输出流 → TerminalCore.feed → snapshot
+PTY/SSH/tmux → Domain 路由 → TerminalHandle 输出流 → TerminalCore.feed → snapshot
 ```
 
 ### 输入
 
 ```text
-xs client → xs-daemon → PaneHandle.send_input → Domain 封装 → PTY/SSH/send-keys
+xs client → xs-daemon → TerminalHandle.send_input → Domain 封装 → PTY/SSH/send-keys
 ```
 
 ### tmux 控制

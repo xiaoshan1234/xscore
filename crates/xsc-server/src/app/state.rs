@@ -1,24 +1,24 @@
-//! 前端应用状态：pane 注册表、布局树、window group 与 window id。
+//! 前端应用状态：终端注册表、布局树、window group 与 window id。
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use xscore::domain::{PaneHandle, PaneId};
+use xscore::domain::{TerminalHandle, TerminalId};
 use xscore::platform::tmux::TmuxControl;
 
-use crate::app::{GroupId, GroupKind, PaneEntry, PaneRegistry, WindowGroup, WindowId};
+use crate::app::{GroupId, GroupKind, Terminal, TerminalRegistry, WindowGroup, WindowId};
 use crate::layout::Layout;
 use crate::logging::LoggerRegistry;
 use crate::tmux::session::TmuxMeta;
 
 /// CLI 前端的全局应用状态。
 pub struct App {
-    /// 所有已注册 pane。
-    pub panes: PaneRegistry,
+    /// 所有已注册终端。
+    pub terminals: TerminalRegistry,
     /// 本地布局树。
     pub layout: Layout,
     /// tmux pane 的会话和几何元数据。
-    pub tmux: HashMap<PaneId, TmuxMeta>,
+    pub tmux: HashMap<TerminalId, TmuxMeta>,
     /// 按 tmux session 保存的控制连接。
     pub tmux_controls: HashMap<String, Arc<TmuxControl>>,
     /// 全部 window group。
@@ -26,9 +26,9 @@ pub struct App {
     /// tmux session 到 group 的映射。
     pub session_groups: HashMap<String, GroupId>,
     /// pane 到 group 的映射。
-    pub pane_groups: HashMap<PaneId, GroupId>,
+    pub pane_groups: HashMap<TerminalId, GroupId>,
     /// pane 到 window 的映射。
-    pub pane_windows: HashMap<PaneId, WindowId>,
+    pub pane_windows: HashMap<TerminalId, WindowId>,
     /// 每个 group 下一个可用的 manual window 序号。
     pub next_manual_window: HashMap<GroupId, u64>,
     /// 默认 group ID。
@@ -46,7 +46,7 @@ impl App {
         let mut groups = HashMap::new();
         groups.insert(default_group.id, default_group.clone());
         Self {
-            panes: PaneRegistry::new(),
+            terminals: TerminalRegistry::new(),
             layout: Layout::new(),
             tmux: HashMap::new(),
             tmux_controls: HashMap::new(),
@@ -60,54 +60,54 @@ impl App {
         }
     }
 
-    /// 注册一个 pane，并归入 group 里的一个新 manual window。
+    /// 注册一个终端，并归入 group 里的一个新 manual window。
     ///
     /// 参数/输出：`self` 为输入输出；`handle`、`cols`、`rows`、`group` 为输入；
-    /// 返回新 pane ID。
-    pub fn register_pane_in_group(
+    /// 返回新终端 ID。
+    pub fn register_terminal_in_group(
         &mut self,
-        handle: Arc<dyn PaneHandle>,
+        handle: Arc<dyn TerminalHandle>,
         cols: u16,
         rows: u16,
         group: GroupId,
-    ) -> PaneId {
-        let id = self.panes.register(handle, cols, rows);
+    ) -> TerminalId {
+        let id = self.terminals.register(handle, cols, rows);
         self.add_pane_to_group(group, id);
         let window = self.alloc_manual_window(group);
         self.pane_windows.insert(id, window);
         id
     }
 
-    /// 注册一个 pane，并归入指定的 window。
+    /// 注册一个终端，并归入指定的 window。
     ///
     /// 参数/输出：`self` 为输入输出；`handle`、`cols`、`rows`、`window` 为输入；
-    /// 返回新 pane ID。
-    pub fn register_pane_in_window(
+    /// 返回新终端 ID。
+    pub fn register_terminal_in_window(
         &mut self,
-        handle: Arc<dyn PaneHandle>,
+        handle: Arc<dyn TerminalHandle>,
         cols: u16,
         rows: u16,
         window: WindowId,
-    ) -> PaneId {
-        let id = self.panes.register(handle, cols, rows);
+    ) -> TerminalId {
+        let id = self.terminals.register(handle, cols, rows);
         self.add_pane_to_group(window.group, id);
         self.pane_windows.insert(id, window);
         id
     }
 
-    /// 注册一个 tmux pane，归入该 session 对应 group 的 tmux window。
+    /// 注册一个 tmux 终端，归入该 session 对应 group 的 tmux window。
     ///
     /// 参数/输出：`self` 为输入输出；`handle`、`cols`、`rows`、`session` 和
-    /// `window_handle` 为输入；返回新 pane ID。
-    pub fn register_tmux_pane(
+    /// `window_handle` 为输入；返回新终端 ID。
+    pub fn register_tmux_terminal(
         &mut self,
-        handle: Arc<dyn PaneHandle>,
+        handle: Arc<dyn TerminalHandle>,
         cols: u16,
         rows: u16,
         session: &str,
         window_handle: &str,
-    ) -> PaneId {
-        let id = self.panes.register(handle, cols, rows);
+    ) -> TerminalId {
+        let id = self.terminals.register(handle, cols, rows);
         let group = self.ensure_tmux_group(session);
         self.add_pane_to_group(group, id);
         let index = tmux_window_index(window_handle);
@@ -119,7 +119,7 @@ impl App {
     ///
     /// 参数/输出：`self` 为输入输出；`id`、`session`、`window_handle` 为输入；
     /// 不返回值。
-    pub fn update_tmux_window(&mut self, id: PaneId, session: &str, window_handle: &str) {
+    pub fn update_tmux_window(&mut self, id: TerminalId, session: &str, window_handle: &str) {
         if let Some(group) = self.session_groups.get(session).copied() {
             let index = tmux_window_index(window_handle);
             self.pane_windows.insert(id, WindowId::tmux(group, index));
@@ -133,11 +133,11 @@ impl App {
         WindowId::manual(group, index)
     }
 
-    /// 按 pane ID 读取注册条目。
+    /// 按终端 ID 读取注册条目。
     ///
     /// 参数/输出：`self` 和 `id` 为输入；存在时返回条目引用。
-    pub fn pane_entry(&self, id: PaneId) -> Option<&PaneEntry> {
-        self.panes.get(id)
+    pub fn terminal(&self, id: TerminalId) -> Option<&Terminal> {
+        self.terminals.get(id)
     }
 
     /// 按 session 名读取 tmux 控制连接。
@@ -161,10 +161,10 @@ impl App {
         id
     }
 
-    /// 将 pane 加入 group 并更新反向映射。
+    /// 将终端加入 group 并更新反向映射。
     ///
     /// 参数/输出：`self` 为输入输出；`group` 和 `pane` 为输入；不返回值。
-    pub fn add_pane_to_group(&mut self, group: GroupId, pane: PaneId) {
+    pub fn add_pane_to_group(&mut self, group: GroupId, pane: TerminalId) {
         if let Some(group) = self.groups.get_mut(&group) {
             group.add_pane(pane);
         }
@@ -174,14 +174,14 @@ impl App {
     /// 读取 pane 所属 group。
     ///
     /// 参数/输出：`self` 和 `id` 为输入；存在时返回 group ID。
-    pub fn pane_group(&self, id: PaneId) -> Option<GroupId> {
+    pub fn pane_group(&self, id: TerminalId) -> Option<GroupId> {
         self.pane_groups.get(&id).copied()
     }
 
     /// 读取 pane 所属 window。
     ///
     /// 参数/输出：`self` 和 `id` 为输入；存在时返回 window ID。
-    pub fn pane_window(&self, id: PaneId) -> Option<WindowId> {
+    pub fn pane_window(&self, id: TerminalId) -> Option<WindowId> {
         self.pane_windows.get(&id).copied()
     }
 
@@ -220,8 +220,8 @@ impl App {
     /// 从本地应用状态中移除 pane 及其全部映射。
     ///
     /// 参数/输出：`self` 为输入输出；`id` 为输入；不返回值。
-    pub fn remove_pane_local(&mut self, id: PaneId) {
-        self.panes.remove(id);
+    pub fn remove_terminal_local(&mut self, id: TerminalId) {
+        self.terminals.remove(id);
         self.tmux.remove(&id);
         self.layout.remove_pane(id);
         for group in self.groups.values_mut() {
