@@ -5,7 +5,7 @@
 ## 项目是什么
 
 xscore 是一个终端模拟器：原生支持 `tmux -CC` 控制模式、普通 SSH、本地/远端 Shell，
-多 pane 分屏。当前交付的是后端（L0–L2）加一个 CLI 模式前端（L3–L5 模拟），尚无
+多 pane 分屏。当前交付的是后端（L0–L1）加一个 CLI 模式前端（L2–L5 模拟），尚无
 图形界面。
 
 权威设计：[arch/terminal-emulator.md](arch/terminal-emulator.md) 与
@@ -48,14 +48,13 @@ Markdown、JSON、JUnit XML 和逐套件日志。
 依赖单向：client/server → 共享协议；server → 后端库 → 平台。client 不依赖后端库。
 
 ```text
-crates/xscore/            L0–L2 后端库
+crates/xscore/            L0–L1 连接/传输后端库
   platform/                 L0：PTY/ConPTY、SSH（russh）、tmux 控制客户端
   domain/                   L1：Domain / PaneHandle、Local/Ssh/Tmux 三种域
-  term/                     L2：VT 状态机 + 网格（Grid/VtTerm）
 
 crates/xsc-protocol/      client 与 server 共享的请求/响应、IPC 编解码和端口
 crates/xsc-client/        `xs` 命令客户端：仅转发 argv、边缘密码提示、自动拉起 daemon、RPC
-crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分发、App、pane、layout、logger、tmux
+crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分发、App、pane、layout、term、logger、tmux
   src/main.rs                daemon 入口
   src/server/                回环 TCP：accept、协议握手与请求分发
   src/cli/                   命令输入：clap 解析、命令模型、URL 解析、命令映射
@@ -63,6 +62,7 @@ crates/xsc-server/        `xs-daemon` 常驻服务端：clap 解析、命令分�
   src/commands/              命令分发与处理器
   src/layout/                布局树
   src/render/                文本渲染
+  src/term/                  VT 状态机 + 网格（VtTerm/Grid/TerminalCore）
   src/logging/               进程日志初始化与 pane logger
   src/tmux/                  tmux 会话协调（events 差集 / session reconcile）
 

@@ -8,4 +8,5 @@ pub mod layout;
 pub mod logging;
 pub mod render;
 pub mod server;
+pub mod term;
 pub mod tmux;

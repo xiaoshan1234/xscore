@@ -4,10 +4,10 @@
 
 use std::time::Duration;
 
+use crate::term::{TerminalCore, VtTerm};
 use anyhow::Result;
 use tokio::sync::Mutex;
 use xscore::domain::{PaneId, PaneKind};
-use xscore::term::{TerminalCore, VtTerm};
 
 use crate::app::App;
 use crate::app::{parse_window_id, WindowKind};

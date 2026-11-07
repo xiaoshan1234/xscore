@@ -5,7 +5,7 @@
 
 ## 1. 目标
 
-后端实现 L0–L2（平台抽象、域/连接、终端核心），前端以 CLI 模式模拟 L3–L5（布局
+后端实现 L0–L1（平台抽象、域/连接），前端（xsc-server）实现 L2–L5（终端核心、布局
 树、渲染、协调）。核心是把“连接”与“窗格”拆开：上层只消费 `PaneHandle`，连接基数
 差异封装在域内。
 
@@ -15,8 +15,8 @@
 |---|---|
 | 用户 | 通过 `xs` 一次性命令操作窗格、读取屏幕 |
 | `xs` client | argv 转发、边缘密码提示、daemon 生命周期与 IPC |
-| `xs-daemon`（L3–L5，CLI 模拟） | 布局树、焦点、命令分发、结构同步 |
-| 后端（L0–L2） | 平台 I/O、Domain 路由、VT 状态机 |
+| `xs-daemon`（L2–L5，CLI 模拟） | 布局树、焦点、命令分发、结构同步 |
+| 后端（L0–L1） | 平台 I/O、Domain 路由 |
 | PTY 子进程 | 本地 Shell、`tmux -C attach`、`wsl.exe` |
 | SSH server | RemoteSshDomain 与远端 tmux 的通道 |
 | tmux server | TmuxDomain 的结构与字节事实来源 |

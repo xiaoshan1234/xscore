@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::term::{TerminalCore, VtTerm};
 use xscore::domain::{PaneHandle, PaneId};
-use xscore::term::{TerminalCore, VtTerm};
 
 /// pane 句柄与其终端网格的绑定。
 pub struct PaneEntry {

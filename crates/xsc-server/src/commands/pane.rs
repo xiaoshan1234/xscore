@@ -2,9 +2,9 @@
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::term::TerminalCore;
 use xscore::domain::{PaneId, PaneKind};
 use xscore::platform::Size;
-use xscore::term::TerminalCore;
 
 use crate::cli::{LogFormat, TmlLogRequest};
 

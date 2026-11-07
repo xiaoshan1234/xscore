@@ -7,7 +7,7 @@
 
 ```text
 crates/
-  xscore/              后端库（L0–L2）
+  xscore/              连接/传输后端库（L0–L1）
   xsc-protocol/       client/server 共享协议
   xsc-client/         `xs` 命令客户端
   xsc-server/         `xs-daemon` 服务端（L3–L5 模拟）
@@ -31,10 +31,6 @@ crates/xscore/src/
     local.rs              LocalDomain / LocalPane
     ssh.rs                RemoteSshDomain / SshPane
     tmux.rs               TmuxDomain / TmuxPane / enumerate / make_pane
-  term/
-    mod.rs                TerminalCore trait
-    grid.rs               网格、光标、滚动
-    vte.rs                xterm 子集状态机
   error.rs
   lib.rs
 
@@ -52,6 +48,7 @@ crates/xsc-server/src/
   commands/               命令分发与处理器
   layout/                 布局树
   render/                 文本渲染
+  term/                   VT 状态机 + 网格（VtTerm/Grid/TerminalCore）
   logging/                进程日志初始化与 pane logger
   tmux/                   tmux 会话协调
 ```
@@ -62,12 +59,12 @@ crates/xsc-server/src/
 xsc-client → xsc-protocol
 xsc-server → xsc-protocol
 xsc-server → xscore
-xscore: platform ← domain ← term
+xscore: platform ← domain
 ```
 
-- `platform` 只依赖 OS 原语与 tmux 协议，不依赖 domain/term。
+- `platform` 只依赖 OS 原语与 tmux 协议，不依赖 domain。
 - `domain` 依赖 `platform`；tmux 协议细节封装在 `platform/tmux`。
-- `term` 是纯逻辑层，不依赖 platform/domain。
+- `term`（VT 状态机）已移入 server，仍是纯逻辑层，不依赖 platform/domain。
 - server 依赖 `xscore`，组合 Domain、TerminalCore 与布局树；client 不依赖二者。
 
 ## 4. 关键接口
