@@ -45,6 +45,7 @@ pub use domain::{
     TerminalConfig, TerminalHandle, TerminalId, TerminalKind, TmuxDomain, TmuxTerminal,
     TmuxTerminalInfo, TmuxWindowInfo,
 };
+pub use platform::ssh::SshOptions;
 pub use platform::tmux::{TmuxControl, TmuxEvent, TmuxHostConfig, TmuxSocket};
 pub use platform::{LocalPty, Size};
 
@@ -54,7 +55,8 @@ pub use platform::{LocalPty, Size};
 /// [`platform`] 模块显式导入。
 pub mod prelude {
     pub use crate::{
-        Domain, Error, LocalDomain, RemoteSshDomain, Result, Size, TerminalConfig, TerminalHandle,
-        TerminalId, TerminalKind, TmuxDomain, TmuxEvent, TmuxHostConfig, TmuxSocket,
+        Domain, Error, LocalDomain, RemoteSshDomain, Result, Size, SshOptions, TerminalConfig,
+        TerminalHandle, TerminalId, TerminalKind, TmuxDomain, TmuxEvent, TmuxHostConfig,
+        TmuxSocket,
     };
 }

@@ -8,6 +8,7 @@ use std::time::Duration;
 use xscore::domain::{TerminalHandle, TmuxDomain};
 use xscore::platform::tmux::{TmuxHostConfig, TmuxSocket};
 use xscore::platform::Size;
+use xscore::SshOptions;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -62,6 +63,7 @@ async fn tmux_ssh_io_resize_split_kill() {
         port: config.ssh_port,
         identity: None,
         password: Some(config.ssh_password.clone()),
+        options: SshOptions::default(),
     };
     let domain = TmuxDomain::new();
     let panes = domain

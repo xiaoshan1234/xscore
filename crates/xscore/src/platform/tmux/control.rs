@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
-use russh::client;
 use russh::Disconnect;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -20,7 +19,7 @@ use tokio::task::JoinHandle;
 use super::format::{process_prefix, quote_arg, socket_args};
 use super::protocol::{Parsed, ProtocolParser, TmuxEvent};
 use super::{TmuxHostConfig, TmuxSocket};
-use crate::platform::ssh::{connect_authenticated, SshHandler};
+use crate::platform::ssh::{connect_authenticated, SshClient};
 use crate::{Error, Result};
 
 fn gone(session: &str) -> Error {
@@ -161,7 +160,7 @@ impl Drop for LocalTransport {
 }
 
 struct SshTransport {
-    handle: Mutex<Option<client::Handle<SshHandler>>>,
+    handle: Mutex<Option<SshClient>>,
     writer: Mutex<Option<UnboundedSender<String>>>,
 }
 
@@ -173,10 +172,11 @@ impl TmuxTransport for SshTransport {
 
     async fn close(&self) -> Result<()> {
         drop(lock(&self.writer).take());
-        let Some(handle) = lock(&self.handle).take() else {
+        let Some(client) = lock(&self.handle).take() else {
             return Ok(());
         };
-        handle
+        client
+            .handle
             .disconnect(Disconnect::ByApplication, "", "")
             .await
             .map_err(|e| Error::Transport(format!("ssh disconnect: {e}")))
@@ -400,6 +400,7 @@ async fn spawn_ssh_transport(
         port,
         identity,
         password,
+        options,
     } = host
     else {
         return Err(Error::Invalid(
@@ -416,9 +417,17 @@ async fn spawn_ssh_transport(
         "tmux control: spawn ssh channel"
     );
 
-    let handle =
-        connect_authenticated(user, host, *port, identity.as_deref(), password.as_deref()).await?;
-    let channel = handle
+    let client = connect_authenticated(
+        user,
+        host,
+        *port,
+        identity.as_deref(),
+        password.as_deref(),
+        options,
+    )
+    .await?;
+    let channel = client
+        .handle
         .channel_open_session()
         .await
         .map_err(|e| Error::Transport(format!("ssh channel_open_session: {e}")))?;
@@ -446,7 +455,7 @@ async fn spawn_ssh_transport(
     });
 
     let transport = SshTransport {
-        handle: Mutex::new(Some(handle)),
+        handle: Mutex::new(Some(client)),
         writer: Mutex::new(Some(write_tx)),
     };
     Ok((Arc::new(transport), reader))

@@ -12,7 +12,7 @@ repository = "https://github.com/xiaoshan1234/xscore"
 homepage = "https://github.com/xiaoshan1234/xscore"
 
 [dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "rt", "sync"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 thiserror = "1"
 async-trait = "0.1"
 portable-pty = "0.8"

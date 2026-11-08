@@ -18,6 +18,8 @@ pub enum TmuxHostConfig {
         identity: Option<String>,
         /// 可选的登录密码。
         password: Option<String>,
+        /// Optional connection-level knobs for the SSH transport.
+        options: crate::platform::ssh::SshOptions,
     },
     /// 通过 `wsl.exe` 在 WSL 中启动 tmux。
     Wsl {

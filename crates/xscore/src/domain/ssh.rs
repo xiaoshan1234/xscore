@@ -39,19 +39,21 @@ impl Domain for RemoteSshDomain {
             env,
             cols,
             rows,
+            options,
         } = config
         else {
             return Err(Error::Invalid("ssh domain requires Ssh pane config".into()));
         };
 
         let id = TerminalId::next();
-        let conn = Arc::new(SshConnection::new(
+        let conn = Arc::new(SshConnection::with_options(
             user.clone(),
             host.clone(),
             *port,
             identity.clone(),
             password.clone(),
             env.clone(),
+            options.clone(),
         ));
         let mut rx = conn.connect(Size::new(*cols, *rows)).await?;
 

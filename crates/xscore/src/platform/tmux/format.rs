@@ -251,6 +251,7 @@ mod tests {
             port: 2222,
             identity: None,
             password: None,
+            options: crate::SshOptions::default(),
         };
         assert_eq!(process_prefix(&host), None);
     }

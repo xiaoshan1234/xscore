@@ -4,6 +4,7 @@ pub mod local;
 pub mod ssh;
 pub mod tmux;
 
+use crate::platform::ssh::SshOptions;
 use crate::platform::Size;
 use crate::Result;
 use async_trait::async_trait;
@@ -98,6 +99,8 @@ pub enum TerminalConfig {
         cols: u16,
         /// 初始终端行数。
         rows: u16,
+        /// Optional connection-level knobs for the SSH transport.
+        options: SshOptions,
     },
 }
 
@@ -147,6 +150,7 @@ impl TerminalConfig {
             env: Vec::new(),
             cols: 80,
             rows: 24,
+            options: SshOptions::default(),
         }
     }
 
@@ -189,6 +193,14 @@ impl TerminalConfig {
                 *cols = size.cols;
                 *rows = size.rows;
             }
+        }
+        self
+    }
+
+    /// Attach SSH connection options. No-op for the local terminal config.
+    pub fn with_ssh_options(mut self, options: SshOptions) -> Self {
+        if let Self::Ssh { options: slot, .. } = &mut self {
+            *slot = options;
         }
         self
     }

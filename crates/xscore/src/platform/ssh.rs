@@ -1,17 +1,67 @@
-//! L0 SSH 传输：russh 建立会话 channel，提供 PTY 感知的远程 shell。
+//! L0 SSH transport: establish a russh session channel and provide a
+//! PTY-aware remote shell.
 
-use crate::platform::Size;
-use crate::{Error, Result};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use async_trait::async_trait;
 use russh::client::{self, Config, Handler};
 use russh::{Channel, ChannelMsg};
-use std::sync::Arc;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::net::{TcpSocket, TcpStream};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{oneshot, Mutex};
 
-/// russh 客户端事件处理器；当前接受服务端提供的主机密钥。
+use crate::platform::Size;
+use crate::{Error, Result};
+
+/// Interval used by the application-layer null-packet keepalive.
+const NULL_PACKET_KEEPALIVE_SECS: u64 = 60;
+
+/// Default terminal type requested from the SSH server.
+const DEFAULT_TERMINAL_TYPE: &str = "xterm-256color";
+
+/// Optional connection-level knobs for the SSH transport.
+///
+/// Every field is optional or boolean-defaulted so `SshOptions::default()`
+/// preserves the historical behaviour (no keepalive, direct connection,
+/// host keys accepted, `xterm-256color`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SshOptions {
+    /// Send an SSH-level keepalive when nothing has been received for this
+    /// long. `None` disables protocol keepalives.
+    pub keepalive_interval: Option<Duration>,
+    /// Maximum time to wait for the TCP connect plus SSH handshake.
+    /// `None` means no explicit timeout.
+    pub connection_timeout: Option<Duration>,
+    /// Set `TCP_NODELAY` on the socket. Defaults to `true` when `None`.
+    pub tcp_nodelay: Option<bool>,
+    /// Set `SO_KEEPALIVE` on the socket. Defaults to `false` when `None`.
+    pub so_keepalive: Option<bool>,
+    /// Prefer SSH compression (zlib) during negotiation.
+    pub enable_compression: bool,
+    /// Send a zero byte through the channel every 60 seconds to keep the
+    /// application layer alive.
+    pub null_packet_keepalive: bool,
+    /// `ProxyJump` target in `[user@]host[:port]` form. The jump host is
+    /// authenticated with the same identity/password as the target.
+    pub proxy_jump: Option<String>,
+    /// Path to a `known_hosts` file. When set, the server key is verified
+    /// against it; unknown or changed keys are rejected. `None` accepts any
+    /// key (host-key verification disabled).
+    pub known_hosts_path: Option<String>,
+    /// Terminal type requested via `pty-req`. Defaults to `xterm-256color`.
+    pub term_type: Option<String>,
+}
+
+/// A russh client handler. When [`SshOptions::known_hosts_path`] is set the
+/// server key is verified against that file; otherwise any key is accepted.
 #[derive(Clone, Default)]
-pub(crate) struct SshHandler;
+pub(crate) struct SshHandler {
+    known_hosts_path: Option<String>,
+    host: String,
+    port: u16,
+}
 
 #[async_trait]
 impl Handler for SshHandler {
@@ -19,17 +69,310 @@ impl Handler for SshHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        server_public_key: &russh_keys::key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
-        // 当前阶段接受任意 host key；known_hosts 校验后续再做。
-        Ok(true)
+        let Some(path) = self.known_hosts_path.as_deref() else {
+            return Ok(true);
+        };
+
+        match russh_keys::check_known_hosts_path(&self.host, self.port, server_public_key, path) {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                tracing::warn!(
+                    host = %self.host,
+                    port = self.port,
+                    "ssh host key not found in known_hosts; rejecting connection"
+                );
+                Ok(false)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    host = %self.host,
+                    port = self.port,
+                    error = %e,
+                    "ssh host key verification failed; rejecting connection"
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
-/// 单条 russh SSH 连接及其 PTY shell channel。
-///
-/// 连接创建后由一个异步任务独占 channel，并通过命令队列串行处理读写、resize
-/// 和关闭。
+/// An established client handle plus the optional proxy-jump connection that
+/// must stay alive for as long as the target handle does.
+pub(crate) struct SshClient {
+    /// Handle for the target connection.
+    pub(crate) handle: client::Handle<SshHandler>,
+    /// Proxy-jump connection kept alive for the same lifetime as `handle`.
+    #[allow(dead_code)]
+    pub(crate) jump: Option<client::Handle<SshHandler>>,
+}
+
+/// Parsed `ProxyJump` value.
+struct ParsedProxyJump {
+    user: Option<String>,
+    host: String,
+    port: Option<u16>,
+}
+
+/// Parse `[user@]host[:port]` into its components. Returns `None` for empty
+/// input, an empty user/host component, whitespace inside the host, or a
+/// non-numeric port suffix.
+fn parse_proxy_jump(raw: &str) -> Option<ParsedProxyJump> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let (user, rest) = match trimmed.find('@') {
+        Some(idx) if idx > 0 => (Some(trimmed[..idx].trim()), trimmed[idx + 1..].trim()),
+        Some(_) => return None,
+        None => (None, trimmed),
+    };
+    if rest.is_empty() {
+        return None;
+    }
+
+    let (host, port) = match rest.rfind(':') {
+        Some(idx) => {
+            let port_str = rest[idx + 1..].trim();
+            let host_part = rest[..idx].trim();
+            if !port_str.is_empty() && port_str.bytes().all(|b| b.is_ascii_digit()) {
+                (host_part, port_str.parse::<u16>().ok())
+            } else {
+                (rest, None)
+            }
+        }
+        None => (rest, None),
+    };
+
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace()) {
+        return None;
+    }
+
+    Some(ParsedProxyJump {
+        user: user.filter(|u| !u.is_empty()).map(str::to_string),
+        host: host.to_string(),
+        port,
+    })
+}
+
+/// Build a russh client config from the supplied options.
+fn build_client_config(options: &SshOptions) -> Arc<Config> {
+    let mut config = Config::default();
+    if let Some(keepalive) = options.keepalive_interval {
+        config.keepalive_interval = Some(keepalive);
+    }
+    if options.enable_compression {
+        config.preferred = russh::Preferred::COMPRESSED;
+    }
+    Arc::new(config)
+}
+
+/// Open a TCP connection to `host:port`, applying the configured socket
+/// options and an optional connection timeout.
+async fn open_tcp_stream(host: &str, port: u16, options: &SshOptions) -> Result<TcpStream> {
+    let nodelay = options.tcp_nodelay.unwrap_or(true);
+    let keepalive = options.so_keepalive.unwrap_or(false);
+
+    let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| Error::Transport(format!("ssh dns lookup {host}:{port}: {e}")))?
+        .collect();
+    if addrs.is_empty() {
+        return Err(Error::Transport(format!(
+            "no addresses found for {host}:{port}"
+        )));
+    }
+
+    // Prefer IPv4 to preserve stable address ordering.
+    addrs.sort_by_key(|addr| match addr {
+        SocketAddr::V4(_) => 0,
+        SocketAddr::V6(_) => 1,
+    });
+
+    let mut last_error = None;
+    for addr in addrs {
+        let socket = match addr {
+            SocketAddr::V4(_) => TcpSocket::new_v4(),
+            SocketAddr::V6(_) => TcpSocket::new_v6(),
+        };
+        let socket = match socket {
+            Ok(socket) => socket,
+            Err(e) => {
+                last_error = Some(e.to_string());
+                continue;
+            }
+        };
+
+        if let Err(e) = socket.set_nodelay(nodelay) {
+            tracing::warn!(address = %addr, error = %e, "ssh set_nodelay failed");
+        }
+        if let Err(e) = socket.set_keepalive(keepalive) {
+            tracing::warn!(address = %addr, error = %e, "ssh set_keepalive failed");
+        }
+
+        match socket.connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_error = Some(e.to_string()),
+        }
+    }
+
+    Err(Error::Transport(format!(
+        "ssh connect to {host}:{port} failed: {}",
+        last_error.unwrap_or_else(|| "no addresses succeeded".to_string())
+    )))
+}
+
+/// Load a private key from `path`. Passphrases are intentionally unsupported
+/// at this layer.
+fn load_identity(path: &str) -> Result<Arc<russh_keys::key::KeyPair>> {
+    let key = russh_keys::load_secret_key(path, None)
+        .map_err(|e| Error::Transport(format!("ssh key {path}: {e}")))?;
+    Ok(Arc::new(key))
+}
+
+/// Authenticate an already-connected client handle.
+async fn authenticate_handle(
+    handle: &mut client::Handle<SshHandler>,
+    user: &str,
+    key: Option<Arc<russh_keys::key::KeyPair>>,
+    password: Option<&str>,
+) -> Result<()> {
+    let ok = match key {
+        Some(key) => handle
+            .authenticate_publickey(user, key)
+            .await
+            .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
+        None => match password {
+            Some(password) => handle
+                .authenticate_password(user, password.to_string())
+                .await
+                .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
+            None => {
+                return Err(Error::Transport(format!(
+                    "ssh: provide identity= or password for {user}"
+                )));
+            }
+        },
+    };
+
+    if !ok {
+        return Err(Error::Transport(format!(
+            "ssh: authentication failed for {user}"
+        )));
+    }
+    Ok(())
+}
+
+/// Connect directly to `host:port` and authenticate.
+async fn connect_direct(
+    user: &str,
+    host: &str,
+    port: u16,
+    key: Option<Arc<russh_keys::key::KeyPair>>,
+    password: Option<&str>,
+    options: &SshOptions,
+    handler: SshHandler,
+) -> Result<client::Handle<SshHandler>> {
+    let config = build_client_config(options);
+    let connect_block = async {
+        let stream = open_tcp_stream(host, port, options).await?;
+        client::connect_stream(config, stream, handler)
+            .await
+            .map_err(|e| Error::Transport(format!("ssh connect {host}:{port}: {e}")))
+    };
+    let mut handle = match options.connection_timeout {
+        Some(timeout) => tokio::time::timeout(timeout, connect_block)
+            .await
+            .map_err(|_| Error::Transport(format!("ssh connect to {host}:{port} timed out")))??,
+        None => connect_block.await?,
+    };
+    authenticate_handle(&mut handle, user, key, password).await?;
+    Ok(handle)
+}
+
+/// Establish and authenticate a russh client connection, optionally routing
+/// the connection through a `ProxyJump` host.
+pub(crate) async fn connect_authenticated(
+    user: &str,
+    host: &str,
+    port: u16,
+    identity: Option<&str>,
+    password: Option<&str>,
+    options: &SshOptions,
+) -> Result<SshClient> {
+    let key = match identity {
+        Some(path) => Some(load_identity(path)?),
+        None => None,
+    };
+
+    if let Some(raw) = options.proxy_jump.as_deref() {
+        let jump = parse_proxy_jump(raw)
+            .ok_or_else(|| Error::Invalid(format!("invalid proxy_jump: {raw:?}")))?;
+        let jump_port = jump.port.unwrap_or(22);
+        let jump_user = jump.user.as_deref().unwrap_or(user);
+        let jump_handler = SshHandler {
+            known_hosts_path: options.known_hosts_path.clone(),
+            host: jump.host.clone(),
+            port: jump_port,
+        };
+        let jump_handle = connect_direct(
+            jump_user,
+            &jump.host,
+            jump_port,
+            key.clone(),
+            password,
+            options,
+            jump_handler,
+        )
+        .await?;
+
+        let channel = jump_handle
+            .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| Error::Transport(format!("ssh proxy channel to {host}:{port}: {e}")))?;
+        let stream = channel.into_stream();
+
+        let target_handler = SshHandler {
+            known_hosts_path: options.known_hosts_path.clone(),
+            host: host.to_string(),
+            port,
+        };
+        let config = build_client_config(options);
+        let target_connect = async {
+            client::connect_stream(config, stream, target_handler)
+                .await
+                .map_err(|e| {
+                    Error::Transport(format!("ssh connect via proxy to {host}:{port}: {e}"))
+                })
+        };
+        let mut handle = match options.connection_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, target_connect)
+                .await
+                .map_err(|_| {
+                    Error::Transport(format!("ssh connect to {host}:{port} timed out"))
+                })??,
+            None => target_connect.await?,
+        };
+        authenticate_handle(&mut handle, user, key, password).await?;
+
+        Ok(SshClient {
+            handle,
+            jump: Some(jump_handle),
+        })
+    } else {
+        let handler = SshHandler {
+            known_hosts_path: options.known_hosts_path.clone(),
+            host: host.to_string(),
+            port,
+        };
+        let handle = connect_direct(user, host, port, key, password, options, handler).await?;
+        Ok(SshClient { handle, jump: None })
+    }
+}
+
+/// A single russh SSH connection and its PTY shell channel.
 pub struct SshConnection {
     user: String,
     host: String,
@@ -37,8 +380,9 @@ pub struct SshConnection {
     identity: Option<String>,
     password: Option<String>,
     env: Vec<(String, String)>,
-    handle: Arc<Mutex<Option<client::Handle<SshHandler>>>>,
-    commands: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<SshCommand>>>>,
+    options: SshOptions,
+    handle: Arc<Mutex<Option<SshClient>>>,
+    commands: Arc<Mutex<Option<UnboundedSender<SshCommand>>>>,
 }
 
 enum SshCommand {
@@ -61,62 +405,9 @@ impl std::fmt::Debug for SshConnection {
     }
 }
 
-/// 建立并认证一条 russh 客户端连接。
-///
-/// 参数/输出：`user`、`host`、`port`、`identity` 和 `password` 为输入；
-/// 返回已完成认证、可用于打开 session channel 的客户端句柄。
-pub(crate) async fn connect_authenticated(
-    user: &str,
-    host: &str,
-    port: u16,
-    identity: Option<&str>,
-    password: Option<&str>,
-) -> Result<client::Handle<SshHandler>> {
-    let key_arc = match identity {
-        Some(path) => {
-            let key = russh_keys::load_secret_key(path, None)
-                .map_err(|e| Error::Transport(format!("ssh key {path}: {e}")))?;
-            Some(Arc::new(key))
-        }
-        None => None,
-    };
-
-    let config = Arc::new(Config::default());
-    let mut handle = client::connect(config, (host.to_string(), port), SshHandler)
-        .await
-        .map_err(|e| Error::Transport(format!("ssh connect {host}:{port}: {e}")))?;
-
-    let auth_ok = match key_arc {
-        Some(key) => handle
-            .authenticate_publickey(user, key)
-            .await
-            .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
-        None => match password {
-            Some(password) => handle
-                .authenticate_password(user, password.to_string())
-                .await
-                .map_err(|e| Error::Transport(format!("ssh auth: {e}")))?,
-            None => {
-                return Err(Error::Transport(format!(
-                    "ssh: provide identity= or password for {user}@{host}"
-                )));
-            }
-        },
-    };
-    if !auth_ok {
-        return Err(Error::Transport(format!(
-            "ssh: authentication failed for {user}@{host}"
-        )));
-    }
-
-    Ok(handle)
-}
-
 impl SshConnection {
-    /// 创建 SSH 连接配置，但暂不建立网络连接。
-    ///
-    /// 参数/输出：`user`、`host`、`port`、`identity`、`password` 和 `env`
-    /// 为输入；返回尚未连接的 [`SshConnection`]。
+    /// Create an SSH connection config with default options, without opening
+    /// the network connection yet.
     pub fn new(
         user: String,
         host: String,
@@ -125,6 +416,28 @@ impl SshConnection {
         password: Option<String>,
         env: Vec<(String, String)>,
     ) -> Self {
+        Self::with_options(
+            user,
+            host,
+            port,
+            identity,
+            password,
+            env,
+            SshOptions::default(),
+        )
+    }
+
+    /// Create an SSH connection config with explicit connection options,
+    /// without opening the network connection yet.
+    pub fn with_options(
+        user: String,
+        host: String,
+        port: u16,
+        identity: Option<String>,
+        password: Option<String>,
+        env: Vec<(String, String)>,
+        options: SshOptions,
+    ) -> Self {
         Self {
             user,
             host,
@@ -132,15 +445,14 @@ impl SshConnection {
             identity,
             password,
             env,
+            options,
             handle: Arc::new(Mutex::new(None)),
             commands: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// 连接、认证、申请 PTY 与 shell，返回远程输出字节流。
-    ///
-    /// 参数/输出：`self` 为输入输出，会保存连接和命令通道；`size` 为输入初始
-    /// 终端尺寸；返回远程输出接收端。
+    /// Connect, authenticate, request a PTY and a shell, and return the remote
+    /// output byte stream.
     pub async fn connect(&self, size: Size) -> Result<UnboundedReceiver<Vec<u8>>> {
         for (name, value) in &self.env {
             if !is_valid_environment_name(name) {
@@ -161,16 +473,18 @@ impl SshConnection {
             user = %self.user,
             "ssh connect"
         );
-        let handle = connect_authenticated(
+        let client = connect_authenticated(
             &self.user,
             &self.host,
             self.port,
             self.identity.as_deref(),
             self.password.as_deref(),
+            &self.options,
         )
         .await?;
 
-        let mut channel = handle
+        let mut channel = client
+            .handle
             .channel_open_session()
             .await
             .map_err(|e| Error::Transport(format!("ssh channel_open_session: {e}")))?;
@@ -199,10 +513,15 @@ impl SshConnection {
             );
         }
 
+        let term_type = self
+            .options
+            .term_type
+            .as_deref()
+            .unwrap_or(DEFAULT_TERMINAL_TYPE);
         channel
             .request_pty(
                 true,
-                "xterm-256color",
+                term_type,
                 size.cols as u32,
                 size.rows as u32,
                 0,
@@ -216,12 +535,13 @@ impl SshConnection {
             .await
             .map_err(|e| Error::Transport(format!("ssh request_shell: {e}")))?;
 
-        *self.handle.lock().await = Some(handle);
+        *self.handle.lock().await = Some(client);
         let (out_tx, out_rx) = unbounded_channel::<Vec<u8>>();
         let (command_tx, command_rx) = unbounded_channel();
         *self.commands.lock().await = Some(command_tx);
+        let null_packet_keepalive = self.options.null_packet_keepalive;
         tokio::spawn(async move {
-            run_channel(channel, command_rx, out_tx).await;
+            run_channel(channel, command_rx, out_tx, null_packet_keepalive).await;
         });
 
         if !rejected_env.is_empty() {
@@ -232,9 +552,7 @@ impl SshConnection {
         Ok(out_rx)
     }
 
-    /// 向远端 shell 写入原始字节。
-    ///
-    /// 参数/输出：`self` 为输入；`data` 为输入字节；返回成功写入的字节数。
+    /// Write raw bytes to the remote shell.
     pub async fn write(&self, data: &[u8]) -> Result<usize> {
         let (reply, result) = oneshot::channel();
         let command_tx = self
@@ -252,9 +570,7 @@ impl SshConnection {
             .map_err(|_| Error::Transport("ssh: command task stopped".into()))?
     }
 
-    /// 通知远端调整 PTY 尺寸。
-    ///
-    /// 参数/输出：`self` 为输入；`size` 为输入尺寸；成功时无返回值。
+    /// Notify the remote host to resize the PTY.
     pub async fn resize(&self, size: Size) -> Result<()> {
         let (reply, result) = oneshot::channel();
         let command_tx = self
@@ -272,9 +588,7 @@ impl SshConnection {
             .map_err(|_| Error::Transport("ssh: command task stopped".into()))?
     }
 
-    /// 关闭 SSH channel 和客户端连接。
-    ///
-    /// 参数/输出：`self` 为输入输出，会清空命令通道并释放连接状态；成功时无返回值。
+    /// Close the SSH channel and release the client connection.
     pub async fn close(&self) -> Result<()> {
         let command_tx = self.commands.lock().await.take();
         if let Some(command_tx) = command_tx {
@@ -323,9 +637,26 @@ fn environment_export_command(env: &[(String, String)]) -> String {
 async fn run_channel(
     mut channel: Channel<client::Msg>,
     mut commands: UnboundedReceiver<SshCommand>,
-    out_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    out_tx: UnboundedSender<Vec<u8>>,
+    null_packet_keepalive: bool,
 ) {
+    let mut keepalive = null_packet_keepalive.then(|| {
+        let mut interval = tokio::time::interval(Duration::from_secs(NULL_PACKET_KEEPALIVE_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval
+    });
+    if let Some(interval) = keepalive.as_mut() {
+        interval.tick().await;
+    }
+
     loop {
+        let keepalive_tick = async {
+            match keepalive.as_mut() {
+                Some(interval) => interval.tick().await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             message = channel.wait() => {
                 match message {
@@ -370,13 +701,18 @@ async fn run_channel(
                     }
                 }
             }
+            _ = keepalive_tick => {
+                if channel.data(&b"\0"[..]).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{environment_export_command, is_valid_environment_name};
+    use super::{environment_export_command, is_valid_environment_name, parse_proxy_jump};
 
     #[test]
     fn environment_name_validation_accepts_shell_identifiers() {
@@ -397,5 +733,30 @@ mod tests {
             ]),
             "export PLAIN='value' QUOTED='a'\\''b c'\n"
         );
+    }
+
+    #[test]
+    fn proxy_jump_parses_user_host_and_port() {
+        let parsed = parse_proxy_jump("bastion@jump.example.com:2222").unwrap();
+        assert_eq!(parsed.user.as_deref(), Some("bastion"));
+        assert_eq!(parsed.host, "jump.example.com");
+        assert_eq!(parsed.port, Some(2222));
+    }
+
+    #[test]
+    fn proxy_jump_parses_host_only() {
+        let parsed = parse_proxy_jump("jump.example.com").unwrap();
+        assert_eq!(parsed.user, None);
+        assert_eq!(parsed.host, "jump.example.com");
+        assert_eq!(parsed.port, None);
+    }
+
+    #[test]
+    fn proxy_jump_rejects_empty_and_malformed() {
+        assert!(parse_proxy_jump("").is_none());
+        assert!(parse_proxy_jump("   ").is_none());
+        assert!(parse_proxy_jump("@host").is_none());
+        assert!(parse_proxy_jump("user@").is_none());
+        assert!(parse_proxy_jump("bad host").is_none());
     }
 }

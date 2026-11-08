@@ -6,6 +6,7 @@ use common::{receive_until, TestConfig};
 use std::time::Duration;
 use xscore::domain::{Domain, RemoteSshDomain, TerminalConfig, TerminalKind};
 use xscore::platform::Size;
+use xscore::SshOptions;
 
 const SSH_OK: &[u8] = b"XSCORE_SSH_DOMAIN_OK";
 
@@ -25,6 +26,7 @@ async fn ssh_shell_roundtrip_and_resize() {
             env: vec![("XSCORE_TEST_ENV".into(), "OK".into())],
             cols: 80,
             rows: 24,
+            options: SshOptions::default(),
         })
         .await
         .expect("connect and start remote SSH shell");
