@@ -32,17 +32,52 @@ type ReaderTask = JoinHandle<()>;
 /// 构造 `tmux -C attach` 的完整命令行。
 ///
 /// 参数/输出：`prefix`、`socket` 和 `session` 为输入；返回按执行顺序排列的参数列表。
-pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String> {
+/// How [`TmuxControl::spawn`] attaches to (or creates) the tmux session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TmuxSpawnMode {
+    /// Attach to an existing session (`tmux -C attach -t <session>`).
+    Attach,
+    /// Create a new session and bind the control client to it
+    /// (`tmux -C new-session -A -s <session> -x <cols> -y <rows>`).
+    NewSession {
+        /// Initial terminal columns.
+        cols: u16,
+        /// Initial terminal rows.
+        rows: u16,
+    },
+}
+
+fn argv_for_mode(
+    prefix: &[String],
+    socket: &TmuxSocket,
+    session: &str,
+    mode: TmuxSpawnMode,
+) -> Vec<String> {
     let mut argv = prefix.to_vec();
     argv.push("tmux".to_string());
     argv.extend(socket_args(socket));
-    argv.extend([
-        "-C".to_string(),
-        "attach".to_string(),
-        "-t".to_string(),
-        session.to_string(),
-    ]);
+    argv.push("-C".to_string());
+    match mode {
+        TmuxSpawnMode::Attach => {
+            argv.extend(["attach".to_string(), "-t".to_string(), session.to_string()])
+        }
+        TmuxSpawnMode::NewSession { cols, rows } => argv.extend([
+            "new-session".to_string(),
+            "-A".to_string(),
+            "-s".to_string(),
+            session.to_string(),
+            "-x".to_string(),
+            cols.to_string(),
+            "-y".to_string(),
+            rows.to_string(),
+        ]),
+    }
     argv
+}
+
+/// Build the complete `tmux -C attach` command line.
+pub fn argv(prefix: &[String], socket: &TmuxSocket, session: &str) -> Vec<String> {
+    argv_for_mode(prefix, socket, session, TmuxSpawnMode::Attach)
 }
 
 struct Shared {
@@ -210,6 +245,32 @@ impl TmuxControl {
         socket: &TmuxSocket,
         session: &str,
     ) -> Result<TmuxControl> {
+        Self::spawn_inner(host, socket, session, TmuxSpawnMode::Attach).await
+    }
+
+    /// Start a control transport and create a new session inside it.
+    pub async fn spawn_new_session(
+        host: &TmuxHostConfig,
+        socket: &TmuxSocket,
+        session: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TmuxControl> {
+        Self::spawn_inner(
+            host,
+            socket,
+            session,
+            TmuxSpawnMode::NewSession { cols, rows },
+        )
+        .await
+    }
+
+    async fn spawn_inner(
+        host: &TmuxHostConfig,
+        socket: &TmuxSocket,
+        session: &str,
+        mode: TmuxSpawnMode,
+    ) -> Result<TmuxControl> {
         if session.is_empty() {
             return Err(Error::Invalid("tmux session name must not be empty".into()));
         }
@@ -217,12 +278,12 @@ impl TmuxControl {
         let shared = Arc::new(Shared::new());
         let (transport, reader): (Arc<dyn TmuxTransport>, ReaderTask) = match host {
             TmuxHostConfig::Ssh { .. } => {
-                spawn_ssh_transport(host, socket, session, Arc::clone(&shared)).await?
+                spawn_ssh_transport(host, socket, session, mode, Arc::clone(&shared)).await?
             }
             TmuxHostConfig::Local | TmuxHostConfig::Wsl { .. } => {
                 let prefix = process_prefix(host)
                     .ok_or_else(|| Error::Transport("missing process prefix".into()))?;
-                spawn_process_transport(prefix, socket, session, Arc::clone(&shared))?
+                spawn_process_transport(prefix, socket, session, mode, Arc::clone(&shared))?
             }
         };
 
@@ -342,9 +403,10 @@ fn spawn_process_transport(
     prefix: Vec<String>,
     socket: &TmuxSocket,
     session: &str,
+    mode: TmuxSpawnMode,
     shared: Arc<Shared>,
 ) -> Result<(Arc<dyn TmuxTransport>, ReaderTask)> {
-    let argv = argv(&prefix, socket, session);
+    let argv = argv_for_mode(&prefix, socket, session, mode);
     tracing::debug!(argv = %argv.join(" "), session, "tmux control: spawn process");
     let (program, args) = argv
         .split_first()
@@ -392,6 +454,7 @@ async fn spawn_ssh_transport(
     host: &TmuxHostConfig,
     socket: &TmuxSocket,
     session: &str,
+    mode: TmuxSpawnMode,
     shared: Arc<Shared>,
 ) -> Result<(Arc<dyn TmuxTransport>, ReaderTask)> {
     let TmuxHostConfig::Ssh {
@@ -407,7 +470,7 @@ async fn spawn_ssh_transport(
             "ssh tmux transport requires ssh host".into(),
         ));
     };
-    let command = remote_tmux_command(socket, session);
+    let command = remote_tmux_command(socket, session, mode);
     tracing::debug!(
         user,
         host,
@@ -461,8 +524,8 @@ async fn spawn_ssh_transport(
     Ok((Arc::new(transport), reader))
 }
 
-fn remote_tmux_command(socket: &TmuxSocket, session: &str) -> String {
-    argv(&[], socket, session)
+fn remote_tmux_command(socket: &TmuxSocket, session: &str, mode: TmuxSpawnMode) -> String {
+    argv_for_mode(&[], socket, session, mode)
         .iter()
         .map(|arg| quote_arg(arg))
         .collect::<Vec<_>>()
@@ -528,6 +591,10 @@ fn handle_parsed(state: &mut ReaderState, shared: &Shared, parsed: Parsed) -> bo
         }
         Parsed::Output { pane, bytes } => {
             tracing::trace!(pane, len = bytes.len(), "tmux control: output");
+            shared.deliver_output(&pane, bytes);
+        }
+        Parsed::ExtendedOutput { pane, bytes, .. } => {
+            tracing::trace!(pane, len = bytes.len(), "tmux control: extended output");
             shared.deliver_output(&pane, bytes);
         }
         Parsed::Event(event) => {
@@ -659,7 +726,11 @@ mod tests {
     #[test]
     fn remote_command_quotes_socket_and_session() {
         assert_eq!(
-            remote_tmux_command(&TmuxSocket::Named("x y".into()), "work space"),
+            remote_tmux_command(
+                &TmuxSocket::Named("x y".into()),
+                "work space",
+                TmuxSpawnMode::Attach
+            ),
             "'tmux' '-L' 'x y' '-C' 'attach' '-t' 'work space'"
         );
     }

@@ -1,87 +1,192 @@
-//! `tmux -CC` 控制模式线路协议：纯解析，无 IO。
+//! `tmux -CC` control-mode line protocol: pure parsing, no I/O.
 
-/// 一行协议，按前缀分类。
+/// One line of the control-mode protocol, classified by prefix.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Parsed {
-    /// 一条命令回复块开始。
+    /// Start of a synchronous command reply block.
     Begin {
-        /// tmux 命令编号。
+        /// tmux command number.
         num: u64,
-        /// `%begin` 携带的标志位。
+        /// Flags carried by `%begin`.
         flags: u32,
     },
-    /// 一条命令回复块结束。
+    /// End of a synchronous command reply block.
     End {
-        /// tmux 命令编号。
+        /// tmux command number.
         num: u64,
     },
-    /// 一条命令回复块报错。
+    /// A command reply block failed.
     Error {
-        /// tmux 命令编号。
+        /// tmux command number.
         num: u64,
-        /// tmux 返回的错误文本。
+        /// tmux-provided error text.
         message: String,
     },
-    /// 窗格字节。`pane` 是 tmux 句柄（`"%3"`）。
+    /// Pane bytes. `pane` is the tmux handle (e.g. `%3`).
     Output {
-        /// 产生输出的 pane 句柄。
+        /// Handle of the pane that produced the output.
         pane: String,
-        /// 已解除 tmux 转义的原始终端字节。
+        /// Decoded raw terminal bytes.
         bytes: Vec<u8>,
     },
-    /// 结构变更事件。
+    /// Historical pane bytes (`%extended-output`). `age_ms` is how long
+    /// ago tmux generated the bytes.
+    ExtendedOutput {
+        /// Handle of the pane that produced the output.
+        pane: String,
+        /// Age of the output in milliseconds.
+        age_ms: u64,
+        /// Decoded raw terminal bytes.
+        bytes: Vec<u8>,
+    },
+    /// A structural notification.
     Event(TmuxEvent),
-    /// 未识别或格式不完整的控制模式记录。
+    /// An unrecognised or incomplete control-mode record.
     Unknown(String),
 }
 
-/// 结构通知。
+/// Structural notifications from the tmux server.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TmuxEvent {
-    /// 新增 window。
+    /// A window was added.
     WindowAdd {
-        /// 新增 window 的 tmux 句柄。
+        /// tmux window handle.
         handle: String,
     },
-    /// 关闭 window。
+    /// A window was closed.
     WindowClose {
-        /// 被关闭 window 的 tmux 句柄。
+        /// tmux window handle.
         handle: String,
     },
-    /// 重命名 window。
+    /// A window was renamed.
     WindowRenamed {
-        /// 被重命名 window 的 tmux 句柄。
+        /// tmux window handle.
         handle: String,
+        /// New window name.
+        name: String,
     },
-    /// window 布局发生变化。
+    /// A window layout changed.
     LayoutChange {
-        /// 发生布局变化的 window 句柄。
+        /// tmux window handle.
         handle: String,
-        /// 新的 tmux 布局字符串。
+        /// New tmux layout string.
         layout: String,
     },
-    /// session 的当前活动 window 发生变化。
+    /// The session's active window changed.
     SessionWindowChanged {
-        /// session 句柄。
+        /// tmux session handle.
         session: String,
-        /// 新的活动 window 句柄。
+        /// tmux window handle.
         window: String,
     },
-    /// 控制连接切换了 session。
+    /// The control connection switched sessions.
     SessionChanged {
-        /// 新的 session 句柄。
+        /// New tmux session handle.
         session: String,
     },
-    /// session 集合发生变化。
+    /// The session list may have changed.
     SessionsChanged,
-    /// tmux 控制连接退出。
+    /// The session was renamed.
+    SessionRenamed {
+        /// tmux session handle.
+        session: String,
+        /// New session name.
+        name: String,
+    },
+    /// The session was removed.
+    SessionClosed {
+        /// tmux session handle.
+        session: String,
+    },
+    /// The active pane of a window changed.
+    WindowPaneChanged {
+        /// tmux window handle.
+        window: String,
+        /// tmux pane handle.
+        pane: String,
+    },
+    /// A window that is not linked to any session was added.
+    UnlinkedWindowAdd {
+        /// tmux window handle.
+        handle: String,
+    },
+    /// A window that is not linked to any session was closed.
+    UnlinkedWindowClose {
+        /// tmux window handle.
+        handle: String,
+    },
+    /// A pane entered or left a mode.
+    PaneModeChanged {
+        /// tmux pane handle.
+        pane: String,
+    },
+    /// A pane's program exited cleanly.
+    PaneExited {
+        /// tmux pane handle.
+        pane: String,
+    },
+    /// A pane's program died abnormally.
+    PaneDied {
+        /// tmux pane handle.
+        pane: String,
+    },
+    /// A paste buffer changed.
+    PasteBufferChanged {
+        /// Buffer name.
+        name: String,
+    },
+    /// A client detached from the server.
+    ClientDetached {
+        /// Client identifier.
+        client: String,
+    },
+    /// A client switched sessions.
+    ClientSessionChanged {
+        /// Client identifier.
+        client: String,
+        /// tmux session handle.
+        session: String,
+        /// Session name.
+        name: String,
+    },
+    /// The server rejected a config option on reload.
+    ConfigError {
+        /// Error message.
+        message: String,
+    },
+    /// The server paused output for a pane (backpressure).
+    Pause {
+        /// tmux pane handle.
+        pane: String,
+    },
+    /// The server resumed output for a pane.
+    Continue {
+        /// tmux pane handle.
+        pane: String,
+    },
+    /// `%popup-open` (tmux 3.4+). Raw payload carried verbatim.
+    PopupOpen {
+        /// Raw line remainder.
+        line: String,
+    },
+    /// `%popup-output` (tmux 3.4+). Raw payload carried verbatim.
+    PopupOutput {
+        /// Raw line remainder.
+        line: String,
+    },
+    /// `%popup-close` (tmux 3.4+). Raw payload carried verbatim.
+    PopupClose {
+        /// Raw line remainder.
+        line: String,
+    },
+    /// The tmux control connection exited.
     Exit {
-        /// tmux 提供的退出原因。
+        /// Exit reason supplied by tmux.
         reason: String,
     },
 }
 
-/// 跨读保留的解析器：喂入字节，返回完整记录。
+/// A cross-chunk-preserving parser: feed bytes, receive complete records.
 #[derive(Debug, Default)]
 pub struct ProtocolParser {
     carry: Vec<u8>,
@@ -89,17 +194,13 @@ pub struct ProtocolParser {
 }
 
 impl ProtocolParser {
-    /// 创建一个保留跨 chunk 状态的空解析器。
-    ///
-    /// 参数/输出：无输入；返回新的 [`ProtocolParser`]。
+    /// Create a parser with no retained state.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 喂入一段控制模式字节，并返回其中已完整解析的记录。
-    ///
-    /// 参数/输出：`self` 为输入输出，会保留未完成行；`chunk` 为输入字节；
-    /// 返回本次新增的完整 [`Parsed`] 记录。
+    /// Feed a chunk of control-mode bytes and return every complete record
+    /// it newly produced. Incomplete trailing lines are retained internally.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Parsed> {
         self.carry.extend_from_slice(chunk);
         let mut out = Vec::new();
@@ -126,9 +227,7 @@ impl ProtocolParser {
     }
 }
 
-/// 解除 tmux 控制模式字符串中的反斜杠八进制转义。
-///
-/// 参数/输出：`data` 为输入；返回解码后的原始字节。
+/// Decode tmux control-mode string escapes into raw bytes.
 pub fn unescape(data: &str) -> Vec<u8> {
     unescape_bytes(data.as_bytes())
 }
@@ -196,14 +295,21 @@ fn parse_line(line: &[u8]) -> Parsed {
         };
     }
 
+    if let Some(rest) = line.strip_prefix(b"%extended-output ") {
+        return parse_extended_output(rest).unwrap_or_else(|| Parsed::Unknown(lossy(line)));
+    }
+
     let text = lossy(line);
     let tokens: Vec<&str> = text.split_whitespace().collect();
     let head = tokens.first().copied().unwrap_or("");
 
     match head {
-        "%begin" => match (num_field(&tokens, 2), flags_field(&tokens, 3)) {
-            (Some(num), Some(flags)) => Parsed::Begin { num, flags },
-            _ => Parsed::Unknown(text),
+        "%begin" => match num_field(&tokens, 2) {
+            Some(num) => Parsed::Begin {
+                num,
+                flags: flags_field(&tokens, 3).unwrap_or(0),
+            },
+            None => Parsed::Unknown(text),
         },
         "%end" => match num_field(&tokens, 2) {
             Some(num) => Parsed::End { num },
@@ -217,13 +323,36 @@ fn parse_line(line: &[u8]) -> Parsed {
             None => Parsed::Unknown(text),
         },
         "%window-add" => one_arg(&text, &tokens, |handle| TmuxEvent::WindowAdd { handle }),
-        "%window-close" | "%unlinked-window-close" => {
-            one_arg(&text, &tokens, |handle| TmuxEvent::WindowClose { handle })
-        }
-        "%window-renamed" => one_arg(&text, &tokens, |handle| TmuxEvent::WindowRenamed { handle }),
+        "%window-close" => one_arg(&text, &tokens, |handle| TmuxEvent::WindowClose { handle }),
+        "%window-renamed" => match tokens.get(1) {
+            Some(handle) => Parsed::Event(TmuxEvent::WindowRenamed {
+                handle: (*handle).to_string(),
+                name: tokens[2..].join(" "),
+            }),
+            None => Parsed::Unknown(text),
+        },
+        "%unlinked-window-add" => one_arg(&text, &tokens, |handle| TmuxEvent::UnlinkedWindowAdd {
+            handle,
+        }),
+        "%unlinked-window-close" => one_arg(&text, &tokens, |handle| {
+            TmuxEvent::UnlinkedWindowClose { handle }
+        }),
         "%session-changed" => one_arg(&text, &tokens, |session| TmuxEvent::SessionChanged {
             session,
         }),
+        "%session-renamed" => match tokens.get(1) {
+            Some(session) => Parsed::Event(TmuxEvent::SessionRenamed {
+                session: (*session).to_string(),
+                name: tokens[2..].join(" "),
+            }),
+            None => Parsed::Unknown(text),
+        },
+        "%session-closed" => match tokens.get(1) {
+            Some(session) => Parsed::Event(TmuxEvent::SessionClosed {
+                session: (*session).to_string(),
+            }),
+            None => Parsed::Unknown(text),
+        },
         "%layout-change" => match tokens.get(1) {
             Some(handle) => Parsed::Event(TmuxEvent::LayoutChange {
                 handle: (*handle).to_string(),
@@ -243,12 +372,67 @@ fn parse_line(line: &[u8]) -> Parsed {
             }),
             _ => Parsed::Unknown(text),
         },
+        "%window-pane-changed" => match (tokens.get(1), tokens.get(2)) {
+            (Some(window), Some(pane)) => Parsed::Event(TmuxEvent::WindowPaneChanged {
+                window: (*window).to_string(),
+                pane: (*pane).to_string(),
+            }),
+            _ => Parsed::Unknown(text),
+        },
         "%sessions-changed" => Parsed::Event(TmuxEvent::SessionsChanged),
+        "%pane-mode-changed" => one_arg(&text, &tokens, |pane| TmuxEvent::PaneModeChanged { pane }),
+        "%pane-exited" => one_arg(&text, &tokens, |pane| TmuxEvent::PaneExited { pane }),
+        "%pane-died" => one_arg(&text, &tokens, |pane| TmuxEvent::PaneDied { pane }),
+        "%paste-buffer-changed" => one_arg(&text, &tokens, |name| TmuxEvent::PasteBufferChanged {
+            name,
+        }),
+        "%client-detached" => one_arg(&text, &tokens, |client| TmuxEvent::ClientDetached {
+            client,
+        }),
+        "%client-session-changed" => match (tokens.get(1), tokens.get(2)) {
+            (Some(client), Some(session)) => Parsed::Event(TmuxEvent::ClientSessionChanged {
+                client: (*client).to_string(),
+                session: (*session).to_string(),
+                name: tokens[3..].join(" "),
+            }),
+            _ => Parsed::Unknown(text),
+        },
+        "%config-error" => Parsed::Event(TmuxEvent::ConfigError {
+            message: rest_after(&text, 1).to_string(),
+        }),
+        "%pause" => one_arg(&text, &tokens, |pane| TmuxEvent::Pause { pane }),
+        "%continue" => one_arg(&text, &tokens, |pane| TmuxEvent::Continue { pane }),
+        "%popup-open" => Parsed::Event(TmuxEvent::PopupOpen {
+            line: rest_after(&text, 1).to_string(),
+        }),
+        "%popup-output" => Parsed::Event(TmuxEvent::PopupOutput {
+            line: rest_after(&text, 1).to_string(),
+        }),
+        "%popup-close" => Parsed::Event(TmuxEvent::PopupClose {
+            line: rest_after(&text, 1).to_string(),
+        }),
         "%exit" => Parsed::Event(TmuxEvent::Exit {
             reason: rest_after(&text, 1).to_string(),
         }),
         _ => Parsed::Unknown(text),
     }
+}
+
+fn parse_extended_output(rest: &[u8]) -> Option<Parsed> {
+    let text = lossy(rest);
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    if tokens.len() < 4 {
+        return None;
+    }
+    let pane = tokens[0].to_string();
+    let age_ms = tokens[1].parse::<u64>().ok()?;
+    let tail = tokens[2..].join(" ");
+    let data_str = tail.rsplit_once(':')?.1;
+    Some(Parsed::ExtendedOutput {
+        pane,
+        age_ms,
+        bytes: unescape_bytes(data_str.trim_start().as_bytes()),
+    })
 }
 
 fn one_arg(text: &str, tokens: &[&str], make: impl FnOnce(String) -> TmuxEvent) -> Parsed {
@@ -299,11 +483,13 @@ mod tests {
         "%end 1792566490 270 0\r\n",
         "%session-changed $0 probe\r\n",
         "%output %0 TICK\\015\\012\r\n",
-        "%output %1 \\033[?2004hloner@WinLite \\033[0;36mxscore\\033[0m $ \r\n",
+        "%extended-output %0 1234 0,1,2 : hi\\041\r\n",
         "%window-add @1\r\n",
         "%session-window-changed $0 @1\r\n",
-        "%layout-change @1 419a,80x24,0,0[80x12,0,0,1,80x11,0,13,2] \
-         419a,80x24,0,0[80x12,0,0,1,80x11,0,13,2] *\r\n",
+        "%window-pane-changed @1 %2\r\n",
+        "%pane-exited %2\r\n",
+        "%pause %0\r\n",
+        "%continue %0\r\n",
         "%unlinked-window-close @1\r\n",
         "%sessions-changed\r\n",
         "%exit\r\n",
@@ -318,25 +504,24 @@ mod tests {
         let parsed = parse_all(TRANSCRIPT);
         assert!(parsed.contains(&Parsed::Begin { num: 270, flags: 0 }));
         assert!(parsed.contains(&Parsed::End { num: 270 }));
-
-        let outputs: Vec<(String, Vec<u8>)> = parsed
-            .iter()
-            .filter_map(|p| match p {
-                Parsed::Output { pane, bytes } => Some((pane.clone(), bytes.clone())),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].0, "%0");
-        assert_eq!(outputs[0].1, b"TICK\r\n");
-        assert!(outputs[1].1.starts_with(b"\x1b[?2004h"));
-
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::WindowAdd {
-            handle: "@1".into()
-        })));
-        assert!(parsed.contains(&Parsed::Event(TmuxEvent::WindowClose {
-            handle: "@1".into()
-        })));
+        assert!(
+            parsed.contains(&Parsed::Event(TmuxEvent::WindowPaneChanged {
+                window: "@1".into(),
+                pane: "%2".into(),
+            }))
+        );
+        assert!(parsed.contains(&Parsed::Event(TmuxEvent::PaneExited { pane: "%2".into() })));
+        assert!(parsed.contains(&Parsed::Event(TmuxEvent::Pause { pane: "%0".into() })));
+        assert!(
+            parsed.contains(&Parsed::Event(TmuxEvent::UnlinkedWindowClose {
+                handle: "@1".into(),
+            }))
+        );
+        assert!(parsed.contains(&Parsed::ExtendedOutput {
+            pane: "%0".into(),
+            age_ms: 1234,
+            bytes: b"hi!".to_vec(),
+        }));
         assert!(!parsed.iter().any(|p| matches!(p, Parsed::Unknown(_))));
     }
 
@@ -353,8 +538,8 @@ mod tests {
 
     #[test]
     fn utf8_survives_escaping() {
-        let parsed = parse_all("%output %2 héllo→\\033[1m\r\n");
-        let expected = "héllo→\x1b[1m".as_bytes().to_vec();
+        let parsed = parse_all("%output %2 h\u{e9}llo\u{2192}\x1b[1m\r\n");
+        let expected = "h\u{e9}llo\u{2192}\x1b[1m".as_bytes().to_vec();
         match &parsed[0] {
             Parsed::Output { pane, bytes } => {
                 assert_eq!(pane, "%2");

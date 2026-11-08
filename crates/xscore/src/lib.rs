@@ -46,7 +46,7 @@ pub use domain::{
     TmuxTerminalInfo, TmuxWindowInfo,
 };
 pub use platform::ssh::SshOptions;
-pub use platform::tmux::{TmuxControl, TmuxEvent, TmuxHostConfig, TmuxSocket};
+pub use platform::tmux::{TmuxControl, TmuxEvent, TmuxHostConfig, TmuxSocket, TmuxSpawnMode};
 pub use platform::{LocalPty, Size};
 
 /// 常用类型的统一导入入口。
