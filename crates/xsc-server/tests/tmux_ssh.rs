@@ -18,6 +18,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use xscore::domain::TmuxDomain;
 use xscore::platform::tmux::{TmuxHostConfig, TmuxSocket};
+use xscore::SshOptions;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -221,6 +222,7 @@ async fn ssh_tmux_attach_split_kill_sync() {
         port: config.ssh_port,
         identity: None,
         password: Some(config.ssh_password.clone()),
+        options: SshOptions::default(),
     };
     let domain = TmuxDomain::new();
     let panes = domain

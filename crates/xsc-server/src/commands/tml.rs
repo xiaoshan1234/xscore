@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 
 use xscore::domain::{Domain, LocalDomain, RemoteSshDomain, TerminalConfig, TerminalId};
 use xscore::platform::tmux::quote_arg;
+use xscore::SshOptions;
 
 use crate::cli::{
     parse_conversation_url, parse_environment_assignment, parse_ssh_target, ConversationSpec,
@@ -194,6 +195,7 @@ async fn spawn(
                     env: environment.to_vec(),
                     cols: *cols,
                     rows: *rows,
+                    options: SshOptions::default(),
                 })
                 .await?;
             Ok(match window {

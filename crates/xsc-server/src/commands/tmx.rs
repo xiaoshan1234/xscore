@@ -7,6 +7,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
 
 use xscore::platform::tmux::{TmuxHostConfig, TmuxSocket};
+use xscore::SshOptions;
 
 use crate::app::App;
 use crate::commands::tmux::attach_session;
@@ -44,6 +45,7 @@ fn build_tmx_config(args: &TmxAttachRequest) -> Result<(TmuxSocket, TmuxHostConf
                 port,
                 identity,
                 password,
+                options: SshOptions::default(),
             }
         }
         (None, Some(wsl_url)) => {
