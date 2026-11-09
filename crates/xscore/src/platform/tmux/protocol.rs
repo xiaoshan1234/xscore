@@ -419,19 +419,23 @@ fn parse_line(line: &[u8]) -> Parsed {
 }
 
 fn parse_extended_output(rest: &[u8]) -> Option<Parsed> {
-    let text = lossy(rest);
-    let tokens: Vec<&str> = text.split_whitespace().collect();
-    if tokens.len() < 4 {
-        return None;
-    }
-    let pane = tokens[0].to_string();
-    let age_ms = tokens[1].parse::<u64>().ok()?;
-    let tail = tokens[2..].join(" ");
-    let data_str = tail.rsplit_once(':')?.1;
+    // `%extended-output <pane> <age> <meta> : <data>` — split on exact byte
+    // offsets so whitespace at the start of the data is preserved.
+    let first_space = rest.iter().position(|&b| b == b' ')?;
+    let pane = lossy(&rest[..first_space]);
+    let after_pane = &rest[first_space + 1..];
+    let second_space = after_pane.iter().position(|&b| b == b' ')?;
+    let age_ms = lossy(&after_pane[..second_space]).parse::<u64>().ok()?;
+    let after_age = &after_pane[second_space + 1..];
+    let marker = b" : ";
+    let marker_at = after_age
+        .windows(marker.len())
+        .position(|window| window == marker)?;
+    let data = &after_age[marker_at + marker.len()..];
     Some(Parsed::ExtendedOutput {
         pane,
         age_ms,
-        bytes: unescape_bytes(data_str.trim_start().as_bytes()),
+        bytes: unescape_bytes(data),
     })
 }
 
@@ -452,12 +456,10 @@ fn flags_field(tokens: &[&str], index: usize) -> Option<u32> {
 
 fn split_token(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     let at = bytes.iter().position(|&b| b == b' ' || b == b'\t')?;
-    let rest = &bytes[at..];
-    let skip = rest
-        .iter()
-        .position(|&b| b != b' ' && b != b'\t')
-        .unwrap_or(rest.len());
-    Some((&bytes[..at], &rest[skip..]))
+    // `%output <pane> <data>` uses exactly one separator byte. The payload
+    // itself may start with spaces (for example the echoed space keystroke),
+    // so only the separator may be skipped.
+    Some((&bytes[..at], &bytes[at + 1..]))
 }
 
 fn rest_after(text: &str, words: usize) -> &str {
@@ -549,5 +551,43 @@ mod tests {
         }
         assert_eq!(unescape(r"a\\b"), b"a\\b");
         assert_eq!(unescape("tail\\"), b"tail\\");
+    }
+
+    #[test]
+    fn output_preserves_leading_space_data() {
+        // One separator space after `%0`, then one data byte that is a space.
+        let parsed = parse_all("%output %0  \r\n");
+        assert_eq!(
+            parsed[0],
+            Parsed::Output {
+                pane: "%0".into(),
+                bytes: b" ".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn output_preserves_multiple_leading_spaces() {
+        let parsed = parse_all("%output %0   \r\n");
+        assert_eq!(
+            parsed[0],
+            Parsed::Output {
+                pane: "%0".into(),
+                bytes: b"  ".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn extended_output_preserves_data_leading_space() {
+        let parsed = parse_all("%extended-output %0 1234 0,1,2 :  hi\r\n");
+        assert_eq!(
+            parsed[0],
+            Parsed::ExtendedOutput {
+                pane: "%0".into(),
+                age_ms: 1234,
+                bytes: b" hi".to_vec(),
+            }
+        );
     }
 }
