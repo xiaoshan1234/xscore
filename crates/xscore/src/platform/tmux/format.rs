@@ -107,6 +107,18 @@ pub fn quote_arg(text: &str) -> String {
     out
 }
 
+/// Build a remote shell command that can find tmux installed by Homebrew on
+/// macOS. Non-interactive SSH sessions usually have a minimal `/usr/bin:/bin`
+/// PATH, even though the same user's interactive shell finds Homebrew.
+pub fn remote_tmux_shell_command(args: &[String]) -> String {
+    let command = args
+        .iter()
+        .map(|arg| quote_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("/usr/bin/env \"PATH=/opt/homebrew/bin:/usr/local/bin:$PATH\" {command}")
+}
+
 /// 把 `payload` 逐字投递给 pane `handle`：无换行走 `-l -- '...'`，有换行走
 /// `-H <hex>`。NUL 无线路表示，拒绝。
 ///
@@ -224,6 +236,21 @@ mod tests {
         assert_eq!(
             socket_args(&TmuxSocket::Named("x".into())),
             vec!["-L".to_string(), "x".to_string()]
+        );
+    }
+
+    #[test]
+    fn remote_tmux_command_includes_homebrew_paths() {
+        let args = vec![
+            "tmux".to_string(),
+            "-C".to_string(),
+            "attach".to_string(),
+            "-t".to_string(),
+            "work space".to_string(),
+        ];
+        assert_eq!(
+            remote_tmux_shell_command(&args),
+            "/usr/bin/env \"PATH=/opt/homebrew/bin:/usr/local/bin:$PATH\" 'tmux' '-C' 'attach' '-t' 'work space'"
         );
     }
 

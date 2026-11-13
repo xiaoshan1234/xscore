@@ -8,8 +8,8 @@ pub mod protocol;
 pub use control::{argv, TmuxControl, TmuxSpawnMode};
 pub use format::{
     list_panes_command, list_windows_command, parse_pane_line, parse_window_line, process_prefix,
-    quote_arg, resize_pane_command, send_keys_literal, socket_args, PaneLine, WindowLine,
-    LIST_PANES_FORMAT, LIST_WINDOWS_FORMAT,
+    quote_arg, remote_tmux_shell_command, resize_pane_command, send_keys_literal, socket_args,
+    PaneLine, WindowLine, LIST_PANES_FORMAT, LIST_WINDOWS_FORMAT,
 };
 pub use model::{TmuxHostConfig, TmuxSocket};
 pub use protocol::{Parsed, ProtocolParser, TmuxEvent};

@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::format::{process_prefix, quote_arg, socket_args};
+use super::format::{process_prefix, remote_tmux_shell_command, socket_args};
 use super::protocol::{Parsed, ProtocolParser, TmuxEvent};
 use super::{TmuxHostConfig, TmuxSocket};
 use crate::platform::ssh::{connect_authenticated, SshClient};
@@ -283,7 +283,7 @@ impl TmuxControl {
             }
         };
 
-        tracing::debug!(session, host = ?host, socket = ?socket, "tmux control: spawned");
+        tracing::debug!(session, socket = ?socket, "tmux control: spawned");
 
         Ok(TmuxControl {
             session: session.to_string(),
@@ -530,11 +530,8 @@ async fn spawn_ssh_transport(
 }
 
 fn remote_tmux_command(socket: &TmuxSocket, session: &str, mode: TmuxSpawnMode) -> String {
-    argv_for_mode(&[], socket, session, mode)
-        .iter()
-        .map(|arg| quote_arg(arg))
-        .collect::<Vec<_>>()
-        .join(" ")
+    let args = argv_for_mode(&[], socket, session, mode);
+    remote_tmux_shell_command(&args)
 }
 
 struct ReaderState {
@@ -736,7 +733,7 @@ mod tests {
                 "work space",
                 TmuxSpawnMode::Attach
             ),
-            "'tmux' '-L' 'x y' '-C' 'attach' '-t' 'work space'"
+            "/usr/bin/env \"PATH=/opt/homebrew/bin:/usr/local/bin:$PATH\" 'tmux' '-L' 'x y' '-C' 'attach' '-t' 'work space'"
         );
     }
 }
