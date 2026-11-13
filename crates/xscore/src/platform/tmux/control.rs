@@ -226,6 +226,7 @@ pub struct TmuxControl {
     transport: Arc<dyn TmuxTransport>,
     reader: Mutex<Option<ReaderTask>>,
     shared: Arc<Shared>,
+    command_lock: tokio::sync::Mutex<()>,
 }
 
 impl TmuxControl {
@@ -294,6 +295,7 @@ impl TmuxControl {
             transport,
             reader: Mutex::new(Some(reader)),
             shared,
+            command_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -301,6 +303,10 @@ impl TmuxControl {
     ///
     /// 参数/输出：`self` 为输入；`command` 为输入命令；返回回复中的文本行。
     pub async fn send(&self, command: &str) -> Result<Vec<String>> {
+        // Control-mode replies are correlated by `%begin/%end` encounter order.
+        // Interleaving concurrent commands allows a resize/capture reply to be
+        // claimed by the wrong waiter, so command round-trips must be serialized.
+        let _command_guard = self.command_lock.lock().await;
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(gone(&self.session));
         }
