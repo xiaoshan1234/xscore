@@ -5,11 +5,11 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child as ProcessChild, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
-use portable_pty::{native_pty_system, Child as PtyChild, CommandBuilder, MasterPty, PtySize};
 use russh::Disconnect;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -128,9 +128,7 @@ impl Shared {
     }
 }
 
-type ChildHandle = Box<dyn PtyChild + Send + Sync>;
-
-fn kill_child(child: &mut ChildHandle) {
+fn kill_child(child: &mut ProcessChild) {
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -162,8 +160,7 @@ fn queue_line(writer: &Mutex<Option<UnboundedSender<String>>>, line: &str) -> Re
 }
 
 struct LocalTransport {
-    child: Mutex<Option<ChildHandle>>,
-    master: Mutex<Option<Box<dyn MasterPty + Send>>>,
+    child: Mutex<Option<ProcessChild>>,
     writer: Mutex<Option<UnboundedSender<String>>>,
 }
 
@@ -179,7 +176,6 @@ impl TmuxTransport for LocalTransport {
         if let Some(mut child) = child {
             let _ = tokio::task::spawn_blocking(move || kill_child(&mut child)).await;
         }
-        drop(lock(&self.master).take());
         Ok(())
     }
 }
@@ -190,7 +186,6 @@ impl Drop for LocalTransport {
         if let Some(mut child) = lock(&self.child).take() {
             kill_child(&mut child);
         }
-        drop(lock(&self.master).take());
     }
 }
 
@@ -418,31 +413,36 @@ fn spawn_process_transport(
         .split_first()
         .ok_or_else(|| Error::Transport("empty tmux command line".into()))?;
 
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 40,
-            cols: 120,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| Error::Transport(format!("tmux control openpty: {e}")))?;
-    let mut command = CommandBuilder::new(program);
+    // Control mode is a line protocol, not a terminal display stream. Running
+    // it through ConPTY can trim trailing data spaces from `%output` records,
+    // which turns TUI input such as `ls -al` into `ls-al`. Pipes preserve the
+    // protocol bytes; the client size is still updated with tmux commands.
+    let mut command = Command::new(program);
     for arg in args {
         command.arg(arg);
     }
-    let child = pair
-        .slave
-        .spawn_command(command)
+    command.env("TERM", "xterm-256color");
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command
+        .spawn()
         .map_err(|e| Error::Transport(format!("spawn `{}`: {e}", argv.join(" "))))?;
-    drop(pair.slave);
-    let stdout = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| Error::Transport(format!("tmux control reader: {e}")))?;
-    let stdin = pair
-        .master
-        .take_writer()
-        .map_err(|e| Error::Transport(format!("tmux control writer: {e}")))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::Transport("tmux control stdout pipe unavailable".into()))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| Error::Transport("tmux control stdin pipe unavailable".into()))?;
 
     let (write_tx, write_rx) = mpsc::unbounded_channel::<String>();
     tokio::task::spawn_blocking(move || writer_loop(stdin, write_rx));
@@ -450,7 +450,6 @@ fn spawn_process_transport(
 
     let transport = LocalTransport {
         child: Mutex::new(Some(child)),
-        master: Mutex::new(Some(pair.master)),
         writer: Mutex::new(Some(write_tx)),
     };
     Ok((Arc::new(transport), reader))
